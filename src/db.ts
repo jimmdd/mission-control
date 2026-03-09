@@ -1,0 +1,811 @@
+import { randomUUID } from "node:crypto";
+import { mkdirSync } from "node:fs";
+import { dirname } from "node:path";
+import Database from "better-sqlite3";
+
+export type AgentStatus = "standby" | "working" | "offline";
+export type TaskStatus =
+  | "pending_dispatch"
+  | "planning"
+  | "inbox"
+  | "assigned"
+  | "in_progress"
+  | "testing"
+  | "review"
+  | "done";
+export type TaskPriority = "low" | "normal" | "high" | "urgent";
+
+export interface WorkspaceRecord {
+  id: string;
+  name: string;
+  slug: string;
+  description: string | null;
+  icon: string;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface AgentRecord {
+  id: string;
+  name: string;
+  role: string;
+  description: string | null;
+  avatar_emoji: string;
+  status: AgentStatus;
+  is_master: number;
+  workspace_id: string;
+  soul_md: string | null;
+  user_md: string | null;
+  agents_md: string | null;
+  model: string | null;
+  source: string;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface TaskRecord {
+  id: string;
+  title: string;
+  description: string | null;
+  status: TaskStatus;
+  priority: TaskPriority;
+  assigned_agent_id: string | null;
+  created_by_agent_id: string | null;
+  workspace_id: string;
+  due_date: string | null;
+  parent_task_id: string | null;
+  linear_issue_id: string | null;
+  linear_issue_url: string | null;
+  source: string;
+  triage_state: string | null;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface EventRecord {
+  id: string;
+  type: string;
+  agent_id: string | null;
+  task_id: string | null;
+  message: string;
+  metadata: string | null;
+  created_at: string;
+}
+
+export interface TaskActivityRecord {
+  id: string;
+  task_id: string;
+  agent_id: string | null;
+  activity_type: string;
+  message: string;
+  metadata: string | null;
+  created_at: string;
+}
+
+export interface TaskDeliverableRecord {
+  id: string;
+  task_id: string;
+  deliverable_type: string;
+  title: string;
+  path: string | null;
+  description: string | null;
+  created_at: string;
+}
+
+export interface SessionRecord {
+  id: string;
+  agent_id: string | null;
+  openclaw_session_id: string;
+  channel: string | null;
+  status: string;
+  session_type: string;
+  task_id: string | null;
+  ended_at: string | null;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface TaskFilters {
+  status?: string;
+  workspace_id?: string;
+  assigned_agent_id?: string;
+}
+
+export interface AgentFilters {
+  workspace_id?: string;
+  status?: AgentStatus;
+}
+
+export interface CreateTaskInput {
+  title: string;
+  description?: string;
+  status?: TaskStatus;
+  priority?: TaskPriority;
+  assigned_agent_id?: string;
+  created_by_agent_id?: string;
+  workspace_id?: string;
+  due_date?: string;
+  parent_task_id?: string;
+  linear_issue_id?: string;
+  linear_issue_url?: string;
+  source?: string;
+  triage_state?: string;
+}
+
+export interface UpdateTaskInput {
+  title?: string;
+  description?: string;
+  status?: TaskStatus;
+  priority?: TaskPriority;
+  assigned_agent_id?: string | null;
+  created_by_agent_id?: string | null;
+  workspace_id?: string;
+  due_date?: string | null;
+  parent_task_id?: string | null;
+  linear_issue_id?: string | null;
+  linear_issue_url?: string | null;
+  source?: string;
+  triage_state?: string | null;
+}
+
+export interface CreateAgentInput {
+  name: string;
+  role: string;
+  description?: string;
+  avatar_emoji?: string;
+  status?: AgentStatus;
+  is_master?: boolean;
+  workspace_id?: string;
+  soul_md?: string;
+  user_md?: string;
+  agents_md?: string;
+  model?: string;
+  source?: string;
+}
+
+export interface UpdateAgentInput {
+  name?: string;
+  role?: string;
+  description?: string | null;
+  avatar_emoji?: string;
+  status?: AgentStatus;
+  is_master?: boolean;
+  workspace_id?: string;
+  soul_md?: string | null;
+  user_md?: string | null;
+  agents_md?: string | null;
+  model?: string | null;
+  source?: string;
+}
+
+export interface CreateWorkspaceInput {
+  name: string;
+  slug?: string;
+  description?: string;
+  icon?: string;
+}
+
+export interface UpdateWorkspaceInput {
+  name?: string;
+  slug?: string;
+  description?: string | null;
+  icon?: string;
+}
+
+export interface CreateActivityInput {
+  task_id: string;
+  agent_id?: string;
+  activity_type: string;
+  message: string;
+  metadata?: string;
+}
+
+export interface CreateDeliverableInput {
+  task_id: string;
+  deliverable_type: string;
+  title: string;
+  path?: string;
+  description?: string;
+}
+
+export interface CreateEventInput {
+  type: string;
+  agent_id?: string;
+  task_id?: string;
+  message: string;
+  metadata?: string;
+}
+
+export interface CreateSessionInput {
+  agent_id?: string;
+  openclaw_session_id: string;
+  channel?: string;
+  status?: string;
+  session_type?: string;
+  task_id?: string;
+  ended_at?: string;
+}
+
+const SCHEMA_SQL = `
+PRAGMA journal_mode = WAL;
+PRAGMA foreign_keys = ON;
+
+CREATE TABLE IF NOT EXISTS workspaces (
+  id TEXT PRIMARY KEY,
+  name TEXT NOT NULL,
+  slug TEXT NOT NULL UNIQUE,
+  description TEXT,
+  icon TEXT DEFAULT '📁',
+  created_at TEXT DEFAULT (datetime('now')),
+  updated_at TEXT DEFAULT (datetime('now'))
+);
+
+CREATE TABLE IF NOT EXISTS agents (
+  id TEXT PRIMARY KEY,
+  name TEXT NOT NULL,
+  role TEXT NOT NULL,
+  description TEXT,
+  avatar_emoji TEXT DEFAULT '🤖',
+  status TEXT DEFAULT 'standby' CHECK (status IN ('standby', 'working', 'offline')),
+  is_master INTEGER DEFAULT 0,
+  workspace_id TEXT DEFAULT 'default' REFERENCES workspaces(id),
+  soul_md TEXT,
+  user_md TEXT,
+  agents_md TEXT,
+  model TEXT,
+  source TEXT DEFAULT 'local',
+  created_at TEXT DEFAULT (datetime('now')),
+  updated_at TEXT DEFAULT (datetime('now'))
+);
+
+CREATE TABLE IF NOT EXISTS tasks (
+  id TEXT PRIMARY KEY,
+  title TEXT NOT NULL,
+  description TEXT,
+  status TEXT DEFAULT 'inbox' CHECK (status IN ('pending_dispatch', 'planning', 'inbox', 'assigned', 'in_progress', 'testing', 'review', 'done')),
+  priority TEXT DEFAULT 'normal' CHECK (priority IN ('low', 'normal', 'high', 'urgent')),
+  assigned_agent_id TEXT REFERENCES agents(id),
+  created_by_agent_id TEXT REFERENCES agents(id),
+  workspace_id TEXT DEFAULT 'default' REFERENCES workspaces(id),
+  due_date TEXT,
+  parent_task_id TEXT REFERENCES tasks(id),
+  linear_issue_id TEXT,
+  linear_issue_url TEXT,
+  source TEXT DEFAULT 'manual',
+  triage_state TEXT,
+  created_at TEXT DEFAULT (datetime('now')),
+  updated_at TEXT DEFAULT (datetime('now'))
+);
+
+CREATE TABLE IF NOT EXISTS events (
+  id TEXT PRIMARY KEY,
+  type TEXT NOT NULL,
+  agent_id TEXT REFERENCES agents(id),
+  task_id TEXT REFERENCES tasks(id),
+  message TEXT NOT NULL,
+  metadata TEXT,
+  created_at TEXT DEFAULT (datetime('now'))
+);
+
+CREATE TABLE IF NOT EXISTS task_activities (
+  id TEXT PRIMARY KEY,
+  task_id TEXT NOT NULL REFERENCES tasks(id) ON DELETE CASCADE,
+  agent_id TEXT REFERENCES agents(id),
+  activity_type TEXT NOT NULL,
+  message TEXT NOT NULL,
+  metadata TEXT,
+  created_at TEXT DEFAULT (datetime('now'))
+);
+
+CREATE TABLE IF NOT EXISTS task_deliverables (
+  id TEXT PRIMARY KEY,
+  task_id TEXT NOT NULL REFERENCES tasks(id) ON DELETE CASCADE,
+  deliverable_type TEXT NOT NULL,
+  title TEXT NOT NULL,
+  path TEXT,
+  description TEXT,
+  created_at TEXT DEFAULT (datetime('now'))
+);
+
+CREATE TABLE IF NOT EXISTS openclaw_sessions (
+  id TEXT PRIMARY KEY,
+  agent_id TEXT REFERENCES agents(id),
+  openclaw_session_id TEXT NOT NULL,
+  channel TEXT,
+  status TEXT DEFAULT 'active',
+  session_type TEXT DEFAULT 'persistent',
+  task_id TEXT REFERENCES tasks(id),
+  ended_at TEXT,
+  created_at TEXT DEFAULT (datetime('now')),
+  updated_at TEXT DEFAULT (datetime('now'))
+);
+
+CREATE INDEX IF NOT EXISTS idx_tasks_status ON tasks(status);
+CREATE INDEX IF NOT EXISTS idx_tasks_assigned ON tasks(assigned_agent_id);
+CREATE INDEX IF NOT EXISTS idx_tasks_workspace ON tasks(workspace_id);
+CREATE INDEX IF NOT EXISTS idx_agents_workspace ON agents(workspace_id);
+CREATE INDEX IF NOT EXISTS idx_events_created ON events(created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_agents_status ON agents(status);
+CREATE INDEX IF NOT EXISTS idx_activities_task ON task_activities(task_id, created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_deliverables_task ON task_deliverables(task_id);
+CREATE INDEX IF NOT EXISTS idx_openclaw_sessions_task ON openclaw_sessions(task_id);
+CREATE INDEX IF NOT EXISTS idx_tasks_parent ON tasks(parent_task_id);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_tasks_linear_issue ON tasks(linear_issue_id);
+`;
+
+function generateSlug(name: string): string {
+  const slug = name
+    .toLowerCase()
+    .trim()
+    .replace(/[^a-z0-9]+/g, "-")
+    .replace(/^-+|-+$/g, "");
+  return slug || randomUUID().slice(0, 8);
+}
+
+export class MissionControlDB {
+  private readonly db: InstanceType<typeof Database>;
+
+  constructor(dbPath: string) {
+    mkdirSync(dirname(dbPath), { recursive: true });
+    this.db = new Database(dbPath);
+    this.db.pragma("journal_mode = WAL");
+    this.db.pragma("foreign_keys = ON");
+  }
+
+  initSchema(): void {
+    this.db.exec(SCHEMA_SQL);
+  }
+
+  seedDefaults(): void {
+    this.db
+      .prepare(
+        `INSERT OR IGNORE INTO workspaces (id, name, slug, description, icon)
+         VALUES (?, ?, ?, ?, ?)`
+      )
+      .run("default", "Default Workspace", "default", "Default workspace", "🏠");
+  }
+
+  listTasks(filters: TaskFilters = {}): TaskRecord[] {
+    let sql = "SELECT * FROM tasks WHERE 1=1";
+    const params: unknown[] = [];
+
+    if (filters.status) {
+      sql += " AND status = ?";
+      params.push(filters.status);
+    }
+    if (filters.workspace_id) {
+      sql += " AND workspace_id = ?";
+      params.push(filters.workspace_id);
+    }
+    if (filters.assigned_agent_id) {
+      sql += " AND assigned_agent_id = ?";
+      params.push(filters.assigned_agent_id);
+    }
+
+    sql += " ORDER BY created_at DESC";
+    return this.db.prepare(sql).all(...params) as TaskRecord[];
+  }
+
+  getTask(id: string): TaskRecord | undefined {
+    return this.db.prepare("SELECT * FROM tasks WHERE id = ?").get(id) as
+      | TaskRecord
+      | undefined;
+  }
+
+  createTask(data: CreateTaskInput): TaskRecord {
+    const id = randomUUID();
+    const now = new Date().toISOString();
+
+    this.db
+      .prepare(
+        `INSERT INTO tasks (
+          id, title, description, status, priority, assigned_agent_id, created_by_agent_id,
+          workspace_id, due_date, parent_task_id, linear_issue_id, linear_issue_url,
+          source, triage_state, created_at, updated_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+      )
+      .run(
+        id,
+        data.title,
+        data.description ?? null,
+        data.status ?? "inbox",
+        data.priority ?? "normal",
+        data.assigned_agent_id ?? null,
+        data.created_by_agent_id ?? null,
+        data.workspace_id ?? "default",
+        data.due_date ?? null,
+        data.parent_task_id ?? null,
+        data.linear_issue_id ?? null,
+        data.linear_issue_url ?? null,
+        data.source ?? "manual",
+        data.triage_state ?? null,
+        now,
+        now
+      );
+
+    const task = this.getTask(id);
+    if (!task) {
+      throw new Error("Failed to create task");
+    }
+    return task;
+  }
+
+  updateTask(id: string, data: UpdateTaskInput): TaskRecord | undefined {
+    const updates: string[] = [];
+    const values: unknown[] = [];
+
+    const setValue = (column: string, value: unknown): void => {
+      updates.push(`${column} = ?`);
+      values.push(value);
+    };
+
+    if (data.title !== undefined) setValue("title", data.title);
+    if (data.description !== undefined) setValue("description", data.description);
+    if (data.status !== undefined) setValue("status", data.status);
+    if (data.priority !== undefined) setValue("priority", data.priority);
+    if (data.assigned_agent_id !== undefined) {
+      setValue("assigned_agent_id", data.assigned_agent_id);
+    }
+    if (data.created_by_agent_id !== undefined) {
+      setValue("created_by_agent_id", data.created_by_agent_id);
+    }
+    if (data.workspace_id !== undefined) setValue("workspace_id", data.workspace_id);
+    if (data.due_date !== undefined) setValue("due_date", data.due_date);
+    if (data.parent_task_id !== undefined) {
+      setValue("parent_task_id", data.parent_task_id);
+    }
+    if (data.linear_issue_id !== undefined) {
+      setValue("linear_issue_id", data.linear_issue_id);
+    }
+    if (data.linear_issue_url !== undefined) {
+      setValue("linear_issue_url", data.linear_issue_url);
+    }
+    if (data.source !== undefined) setValue("source", data.source);
+    if (data.triage_state !== undefined) {
+      setValue("triage_state", data.triage_state);
+    }
+
+    if (updates.length === 0) {
+      return this.getTask(id);
+    }
+
+    updates.push("updated_at = ?");
+    values.push(new Date().toISOString(), id);
+
+    this.db.prepare(`UPDATE tasks SET ${updates.join(", ")} WHERE id = ?`).run(...values);
+    return this.getTask(id);
+  }
+
+  deleteTask(id: string): boolean {
+    this.db.prepare("DELETE FROM openclaw_sessions WHERE task_id = ?").run(id);
+    this.db.prepare("DELETE FROM events WHERE task_id = ?").run(id);
+    const result = this.db.prepare("DELETE FROM tasks WHERE id = ?").run(id);
+    return result.changes > 0;
+  }
+
+  listAgents(filters: AgentFilters = {}): AgentRecord[] {
+    let sql = "SELECT * FROM agents WHERE 1=1";
+    const params: unknown[] = [];
+
+    if (filters.workspace_id) {
+      sql += " AND workspace_id = ?";
+      params.push(filters.workspace_id);
+    }
+    if (filters.status) {
+      sql += " AND status = ?";
+      params.push(filters.status);
+    }
+
+    sql += " ORDER BY is_master DESC, name ASC";
+    return this.db.prepare(sql).all(...params) as AgentRecord[];
+  }
+
+  getAgent(id: string): AgentRecord | undefined {
+    return this.db.prepare("SELECT * FROM agents WHERE id = ?").get(id) as
+      | AgentRecord
+      | undefined;
+  }
+
+  createAgent(data: CreateAgentInput): AgentRecord {
+    const id = randomUUID();
+    const now = new Date().toISOString();
+
+    this.db
+      .prepare(
+        `INSERT INTO agents (
+          id, name, role, description, avatar_emoji, status, is_master,
+          workspace_id, soul_md, user_md, agents_md, model, source,
+          created_at, updated_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+      )
+      .run(
+        id,
+        data.name,
+        data.role,
+        data.description ?? null,
+        data.avatar_emoji ?? "🤖",
+        data.status ?? "standby",
+        data.is_master ? 1 : 0,
+        data.workspace_id ?? "default",
+        data.soul_md ?? null,
+        data.user_md ?? null,
+        data.agents_md ?? null,
+        data.model ?? null,
+        data.source ?? "local",
+        now,
+        now
+      );
+
+    const agent = this.getAgent(id);
+    if (!agent) {
+      throw new Error("Failed to create agent");
+    }
+    return agent;
+  }
+
+  updateAgent(id: string, data: UpdateAgentInput): AgentRecord | undefined {
+    const updates: string[] = [];
+    const values: unknown[] = [];
+
+    const setValue = (column: string, value: unknown): void => {
+      updates.push(`${column} = ?`);
+      values.push(value);
+    };
+
+    if (data.name !== undefined) setValue("name", data.name);
+    if (data.role !== undefined) setValue("role", data.role);
+    if (data.description !== undefined) setValue("description", data.description);
+    if (data.avatar_emoji !== undefined) setValue("avatar_emoji", data.avatar_emoji);
+    if (data.status !== undefined) setValue("status", data.status);
+    if (data.is_master !== undefined) setValue("is_master", data.is_master ? 1 : 0);
+    if (data.workspace_id !== undefined) setValue("workspace_id", data.workspace_id);
+    if (data.soul_md !== undefined) setValue("soul_md", data.soul_md);
+    if (data.user_md !== undefined) setValue("user_md", data.user_md);
+    if (data.agents_md !== undefined) setValue("agents_md", data.agents_md);
+    if (data.model !== undefined) setValue("model", data.model);
+    if (data.source !== undefined) setValue("source", data.source);
+
+    if (updates.length === 0) {
+      return this.getAgent(id);
+    }
+
+    updates.push("updated_at = ?");
+    values.push(new Date().toISOString(), id);
+
+    this.db.prepare(`UPDATE agents SET ${updates.join(", ")} WHERE id = ?`).run(...values);
+    return this.getAgent(id);
+  }
+
+  deleteAgent(id: string): boolean {
+    this.db.prepare("DELETE FROM openclaw_sessions WHERE agent_id = ?").run(id);
+    this.db.prepare("DELETE FROM events WHERE agent_id = ?").run(id);
+    this.db
+      .prepare("UPDATE tasks SET assigned_agent_id = NULL WHERE assigned_agent_id = ?")
+      .run(id);
+    this.db
+      .prepare("UPDATE tasks SET created_by_agent_id = NULL WHERE created_by_agent_id = ?")
+      .run(id);
+    this.db.prepare("UPDATE task_activities SET agent_id = NULL WHERE agent_id = ?").run(id);
+    const result = this.db.prepare("DELETE FROM agents WHERE id = ?").run(id);
+    return result.changes > 0;
+  }
+
+  listWorkspaces(): WorkspaceRecord[] {
+    return this.db.prepare("SELECT * FROM workspaces ORDER BY name ASC").all() as WorkspaceRecord[];
+  }
+
+  getWorkspace(id: string): WorkspaceRecord | undefined {
+    return this.db
+      .prepare("SELECT * FROM workspaces WHERE id = ? OR slug = ?")
+      .get(id, id) as WorkspaceRecord | undefined;
+  }
+
+  createWorkspace(data: CreateWorkspaceInput): WorkspaceRecord {
+    const id = randomUUID();
+    const now = new Date().toISOString();
+    const slug = data.slug ? generateSlug(data.slug) : generateSlug(data.name);
+
+    this.db
+      .prepare(
+        `INSERT INTO workspaces (id, name, slug, description, icon, created_at, updated_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?)`
+      )
+      .run(id, data.name, slug, data.description ?? null, data.icon ?? "📁", now, now);
+
+    const workspace = this.getWorkspace(id);
+    if (!workspace) {
+      throw new Error("Failed to create workspace");
+    }
+    return workspace;
+  }
+
+  updateWorkspace(id: string, data: UpdateWorkspaceInput): WorkspaceRecord | undefined {
+    const updates: string[] = [];
+    const values: unknown[] = [];
+
+    const setValue = (column: string, value: unknown): void => {
+      updates.push(`${column} = ?`);
+      values.push(value);
+    };
+
+    if (data.name !== undefined) setValue("name", data.name);
+    if (data.slug !== undefined) setValue("slug", generateSlug(data.slug));
+    if (data.description !== undefined) setValue("description", data.description);
+    if (data.icon !== undefined) setValue("icon", data.icon);
+
+    if (updates.length === 0) {
+      return this.getWorkspace(id);
+    }
+
+    updates.push("updated_at = ?");
+    values.push(new Date().toISOString(), id);
+
+    this.db
+      .prepare(`UPDATE workspaces SET ${updates.join(", ")} WHERE id = ?`)
+      .run(...values);
+    return this.getWorkspace(id);
+  }
+
+  deleteWorkspace(id: string): boolean {
+    const result = this.db.prepare("DELETE FROM workspaces WHERE id = ?").run(id);
+    return result.changes > 0;
+  }
+
+  listActivities(taskId: string): TaskActivityRecord[] {
+    return this.db
+      .prepare("SELECT * FROM task_activities WHERE task_id = ? ORDER BY created_at DESC")
+      .all(taskId) as TaskActivityRecord[];
+  }
+
+  createActivity(data: CreateActivityInput): TaskActivityRecord {
+    const id = randomUUID();
+    this.db
+      .prepare(
+        `INSERT INTO task_activities (id, task_id, agent_id, activity_type, message, metadata)
+         VALUES (?, ?, ?, ?, ?, ?)`
+      )
+      .run(
+        id,
+        data.task_id,
+        data.agent_id ?? null,
+        data.activity_type,
+        data.message,
+        data.metadata ?? null
+      );
+
+    return this.db
+      .prepare("SELECT * FROM task_activities WHERE id = ?")
+      .get(id) as TaskActivityRecord;
+  }
+
+  listDeliverables(taskId: string): TaskDeliverableRecord[] {
+    return this.db
+      .prepare("SELECT * FROM task_deliverables WHERE task_id = ? ORDER BY created_at DESC")
+      .all(taskId) as TaskDeliverableRecord[];
+  }
+
+  createDeliverable(data: CreateDeliverableInput): TaskDeliverableRecord {
+    const id = randomUUID();
+    this.db
+      .prepare(
+        `INSERT INTO task_deliverables (id, task_id, deliverable_type, title, path, description)
+         VALUES (?, ?, ?, ?, ?, ?)`
+      )
+      .run(
+        id,
+        data.task_id,
+        data.deliverable_type,
+        data.title,
+        data.path ?? null,
+        data.description ?? null
+      );
+
+    return this.db
+      .prepare("SELECT * FROM task_deliverables WHERE id = ?")
+      .get(id) as TaskDeliverableRecord;
+  }
+
+  listEvents(limit = 50, since?: string): EventRecord[] {
+    if (since) {
+      return this.db
+        .prepare(
+          "SELECT * FROM events WHERE created_at > ? ORDER BY created_at DESC LIMIT ?"
+        )
+        .all(since, limit) as EventRecord[];
+    }
+    return this.db
+      .prepare("SELECT * FROM events ORDER BY created_at DESC LIMIT ?")
+      .all(limit) as EventRecord[];
+  }
+
+  createEvent(data: CreateEventInput): EventRecord {
+    const id = randomUUID();
+    this.db
+      .prepare(
+        `INSERT INTO events (id, type, agent_id, task_id, message, metadata)
+         VALUES (?, ?, ?, ?, ?, ?)`
+      )
+      .run(
+        id,
+        data.type,
+        data.agent_id ?? null,
+        data.task_id ?? null,
+        data.message,
+        data.metadata ?? null
+      );
+
+    return this.db.prepare("SELECT * FROM events WHERE id = ?").get(id) as EventRecord;
+  }
+
+  getTriageState(taskId: string): Record<string, unknown> | null {
+    const row = this.db.prepare("SELECT triage_state FROM tasks WHERE id = ?").get(taskId) as
+      | { triage_state: string | null }
+      | undefined;
+    if (!row || !row.triage_state) {
+      return null;
+    }
+    return JSON.parse(row.triage_state) as Record<string, unknown>;
+  }
+
+  updateTriageState(taskId: string, data: Record<string, unknown>): Record<string, unknown> {
+    const current = this.getTriageState(taskId) ?? {};
+    const next = { ...current, ...data, updated_at: new Date().toISOString() };
+
+    this.db
+      .prepare("UPDATE tasks SET triage_state = ?, updated_at = ? WHERE id = ?")
+      .run(JSON.stringify(next), new Date().toISOString(), taskId);
+
+    return next;
+  }
+
+  replaceTriageState(taskId: string, data: Record<string, unknown>): Record<string, unknown> {
+    this.db
+      .prepare("UPDATE tasks SET triage_state = ?, updated_at = ? WHERE id = ?")
+      .run(JSON.stringify(data), new Date().toISOString(), taskId);
+    return data;
+  }
+
+  listSessions(taskId?: string): SessionRecord[] {
+    if (taskId) {
+      return this.db
+        .prepare("SELECT * FROM openclaw_sessions WHERE task_id = ? ORDER BY created_at DESC")
+        .all(taskId) as SessionRecord[];
+    }
+    return this.db
+      .prepare("SELECT * FROM openclaw_sessions ORDER BY created_at DESC")
+      .all() as SessionRecord[];
+  }
+
+  createSession(data: CreateSessionInput): SessionRecord {
+    const id = randomUUID();
+    const now = new Date().toISOString();
+
+    this.db
+      .prepare(
+        `INSERT INTO openclaw_sessions (
+          id, agent_id, openclaw_session_id, channel, status, session_type,
+          task_id, ended_at, created_at, updated_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+      )
+      .run(
+        id,
+        data.agent_id ?? null,
+        data.openclaw_session_id,
+        data.channel ?? null,
+        data.status ?? "active",
+        data.session_type ?? "persistent",
+        data.task_id ?? null,
+        data.ended_at ?? null,
+        now,
+        now
+      );
+
+    return this.db
+      .prepare("SELECT * FROM openclaw_sessions WHERE id = ?")
+      .get(id) as SessionRecord;
+  }
+
+  close(): void {
+    this.db.close();
+  }
+}

@@ -1,0 +1,37 @@
+{
+  "name": "mission-control",
+  "version": "1.0.0",
+  "description": "OpenClaw plugin: Agent task management with SQLite, workspaces, and triage workflows",
+  "type": "module",
+  "main": "index.ts",
+  "openclaw": {
+    "extensions": [
+      "./index.ts"
+    ]
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/jimmdd/mission-control.git"
+  },
+  "author": "jimmdd",
+  "license": "MIT",
+  "keywords": [
+    "openclaw",
+    "openclaw-plugin",
+    "mission-control",
+    "task-management",
+    "agent-tools"
+  ],
+  "scripts": {
+    "build": "tsc --noEmit"
+  },
+  "dependencies": {
+    "better-sqlite3": "^12.6.2",
+    "@sinclair/typebox": "0.34.48"
+  },
+  "devDependencies": {
+    "@types/better-sqlite3": "^7.6.12",
+    "@types/node": "^22.13.8",
+    "typescript": "^5.7.2"
+  }
+}
