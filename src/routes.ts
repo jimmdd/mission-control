@@ -1,3 +1,6 @@
+import { readFileSync } from "node:fs";
+import { join, dirname } from "node:path";
+import { fileURLToPath } from "node:url";
 import type { IncomingMessage, ServerResponse } from "node:http";
 import type { OpenClawPluginApi } from "openclaw/plugin-sdk";
 import type {
@@ -44,7 +47,36 @@ function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
-const API_PREFIX = "/ext/mission-control/api";
+const PLUGIN_PREFIX = "/ext/mission-control";
+const API_PREFIX = `${PLUGIN_PREFIX}/api`;
+
+// Load dashboard HTML at module load time (single file, ~30KB)
+let dashboardHtml: string | null = null;
+function getDashboardHtml(): string | null {
+  if (dashboardHtml !== null) return dashboardHtml;
+  try {
+    const thisDir = dirname(fileURLToPath(import.meta.url));
+    const htmlPath = join(thisDir, "..", "public", "index.html");
+    dashboardHtml = readFileSync(htmlPath, "utf-8");
+  } catch {
+    dashboardHtml = "";
+  }
+  return dashboardHtml || null;
+}
+
+function serveDashboard(res: ServerResponse): void {
+  const html = getDashboardHtml();
+  if (!html) {
+    res.statusCode = 404;
+    res.setHeader("Content-Type", "text/plain");
+    res.end("Dashboard not found");
+    return;
+  }
+  res.statusCode = 200;
+  res.setHeader("Content-Type", "text/html; charset=utf-8");
+  res.setHeader("Cache-Control", "no-cache");
+  res.end(html);
+}
 
 export function registerRoutes(api: OpenClawPluginApi, db: MissionControlDB): void {
   api.logger.info(`mission-control: registering HTTP handler at ${API_PREFIX}`);
@@ -56,6 +88,18 @@ export function registerRoutes(api: OpenClawPluginApi, db: MissionControlDB): vo
     const url = new URL(req.url ?? "/", "http://localhost");
     const pathname = url.pathname;
 
+    // Serve dashboard UI at /ext/mission-control/ or /ext/mission-control
+    if (
+      pathname === PLUGIN_PREFIX ||
+      pathname === `${PLUGIN_PREFIX}/` ||
+      pathname === `${PLUGIN_PREFIX}/dashboard` ||
+      pathname === `${PLUGIN_PREFIX}/dashboard/`
+    ) {
+      serveDashboard(res);
+      return true;
+    }
+
+    // API routes
     if (!pathname.startsWith(`${API_PREFIX}/`)) {
       return false;
     }
