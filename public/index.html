@@ -23,6 +23,8 @@
             --status-assigned: #06b6d4;
             --status-done: #6b7280;
             --status-failed: #ef4444;
+            --status-active: #00ff88;
+            --status-error: #ff4444;
 
             --priority-urgent: #ef4444;
             --priority-high: #f97316;
@@ -49,6 +51,272 @@
             overflow: hidden;
             display: flex;
             flex-direction: column;
+        }
+
+        /* Mission Control Panel */
+        .mc-panel {
+            background-color: var(--bg-card);
+            border-bottom: 1px solid var(--border-color);
+            position: relative;
+            flex-shrink: 0;
+            display: flex;
+            flex-direction: column;
+        }
+
+        .mc-toggle {
+            font-family: var(--font-mono);
+            font-size: 10px;
+            color: var(--text-secondary);
+            text-align: center;
+            padding: 4px;
+            cursor: pointer;
+            background: var(--bg-main);
+            border-bottom: 1px solid var(--border-color);
+            letter-spacing: 2px;
+            user-select: none;
+            transition: all 150ms ease;
+        }
+
+        .mc-toggle:hover {
+            color: var(--accent);
+            background: rgba(0, 212, 255, 0.05);
+        }
+
+        .mc-content {
+            position: relative;
+            padding: 20px 24px;
+            display: flex;
+            flex-direction: column;
+            gap: 24px;
+            transition: max-height 0.3s ease, padding 0.3s ease, opacity 0.3s ease;
+            max-height: 400px;
+            opacity: 1;
+            overflow: hidden;
+        }
+
+        .mc-content.collapsed {
+            max-height: 0;
+            padding-top: 0;
+            padding-bottom: 0;
+            opacity: 0;
+        }
+
+        .mc-bg-effects {
+            position: absolute;
+            top: 0; left: 0; right: 0; bottom: 0;
+            pointer-events: none;
+            background: 
+                linear-gradient(rgba(18, 18, 26, 0) 50%, rgba(0, 0, 0, 0.25) 50%), 
+                linear-gradient(90deg, rgba(255, 255, 255, 0.02) 1px, transparent 1px),
+                linear-gradient(rgba(255, 255, 255, 0.02) 1px, transparent 1px);
+            background-size: 100% 4px, 20px 20px, 20px 20px;
+            z-index: 0;
+        }
+
+        .mc-gauges {
+            display: flex;
+            justify-content: space-around;
+            align-items: flex-end;
+            position: relative;
+            z-index: 1;
+            flex-wrap: wrap;
+            gap: 16px;
+        }
+
+        .mc-gauge {
+            position: relative;
+            width: 120px;
+            height: 60px;
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+        }
+
+        .gauge-svg {
+            width: 100%;
+            height: 100%;
+            overflow: visible;
+        }
+
+        .gauge-data {
+            position: absolute;
+            bottom: -5px;
+            text-align: center;
+            width: 100%;
+        }
+
+        .gauge-number {
+            font-family: var(--font-mono);
+            font-size: 24px;
+            font-weight: 700;
+            color: var(--text-primary);
+            line-height: 1;
+            text-shadow: 0 0 10px rgba(255,255,255,0.1);
+        }
+
+        .gauge-label {
+            font-family: var(--font-mono);
+            font-size: 10px;
+            color: var(--text-secondary);
+            letter-spacing: 1px;
+            margin-top: 4px;
+        }
+
+        .mc-pipeline {
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            position: relative;
+            z-index: 1;
+            background: rgba(0,0,0,0.2);
+            padding: 16px;
+            border-radius: 8px;
+            border: 1px solid var(--border-color);
+            overflow-x: auto;
+        }
+
+        .pipe-stage {
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            min-width: 80px;
+            opacity: 0.4;
+            transition: opacity 0.3s, text-shadow 0.3s;
+        }
+
+        .pipe-stage.active {
+            opacity: 1;
+        }
+
+        .pipe-stage.active .stage-count {
+            color: var(--accent);
+            text-shadow: 0 0 8px rgba(0, 212, 255, 0.5);
+        }
+
+        .stage-count {
+            font-family: var(--font-mono);
+            font-size: 20px;
+            font-weight: 700;
+            color: var(--text-secondary);
+            transition: color 0.3s;
+        }
+
+        .stage-label {
+            font-family: var(--font-mono);
+            font-size: 9px;
+            color: var(--text-secondary);
+            letter-spacing: 1px;
+            margin-top: 4px;
+            text-align: center;
+        }
+
+        .pipe-conn {
+            flex: 1;
+            height: 2px;
+            background: var(--border-color);
+            margin: 0 8px;
+            position: relative;
+            overflow: hidden;
+            min-width: 20px;
+        }
+
+        .pipe-flow {
+            position: absolute;
+            top: 0; left: 0; bottom: 0;
+            width: 50%;
+            background: linear-gradient(90deg, transparent, var(--accent), transparent);
+            opacity: 0;
+        }
+
+        .pipe-conn.active .pipe-flow {
+            opacity: 1;
+            animation: flowAnim 1.5s linear infinite;
+        }
+
+        @keyframes flowAnim {
+            0% { transform: translateX(-100%); }
+            100% { transform: translateX(200%); }
+        }
+
+        .mc-agents {
+            display: flex;
+            gap: 12px;
+            flex-wrap: wrap;
+            position: relative;
+            z-index: 1;
+            min-height: 40px;
+        }
+
+        .agent-tile {
+            background: rgba(0,0,0,0.3);
+            border: 1px solid var(--border-color);
+            border-radius: 4px;
+            padding: 8px 12px;
+            display: flex;
+            align-items: center;
+            gap: 12px;
+            font-family: var(--font-mono);
+        }
+
+        .agent-tile.running {
+            border-color: rgba(0, 255, 136, 0.3);
+        }
+
+        .agent-tile.failed {
+            border-color: rgba(255, 68, 68, 0.3);
+        }
+
+        .agent-status-icon {
+            width: 12px;
+            height: 12px;
+            border-radius: 50%;
+            flex-shrink: 0;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            font-size: 8px;
+            color: var(--bg-main);
+            font-weight: bold;
+        }
+
+        .agent-tile.running .agent-status-icon {
+            background: var(--status-active);
+            box-shadow: 0 0 8px var(--status-active);
+            animation: pulse 2s infinite;
+        }
+
+        .agent-tile.completed .agent-status-icon {
+            background: var(--status-done);
+        }
+        .agent-tile.completed .agent-status-icon::after {
+            content: '✓';
+            color: var(--bg-main);
+        }
+
+        .agent-tile.failed .agent-status-icon {
+            background: var(--status-error);
+            box-shadow: 0 0 8px var(--status-error);
+        }
+        .agent-tile.failed .agent-status-icon::after {
+            content: '✕';
+            color: var(--bg-main);
+        }
+
+        @keyframes pulse {
+            0% { opacity: 1; }
+            50% { opacity: 0.4; }
+            100% { opacity: 1; }
+        }
+
+        .agent-repo {
+            font-size: 11px;
+            color: var(--text-primary);
+            font-weight: 600;
+        }
+
+        .agent-time {
+            font-size: 10px;
+            color: var(--text-secondary);
         }
 
         /* Top Bar */
@@ -581,6 +849,79 @@
         @keyframes spin {
             to { transform: rotate(360deg); }
         }
+
+        /* Drawer Actions */
+        .btn-triage {
+            background: transparent;
+            border: 1px solid var(--status-planning);
+            color: var(--status-planning);
+            padding: 2px 8px;
+            border-radius: 4px;
+            font-family: var(--font-mono);
+            font-size: 11px;
+            font-weight: 600;
+            cursor: pointer;
+            text-transform: uppercase;
+            letter-spacing: 0.5px;
+            transition: all 150ms ease;
+            margin-left: auto;
+        }
+
+        .btn-triage:hover {
+            background: rgba(245, 158, 11, 0.1);
+        }
+
+        /* Add Note */
+        .drawer-footer {
+            padding: 16px 24px;
+            border-top: 1px solid var(--border-color);
+            background-color: var(--bg-drawer);
+        }
+
+        .add-note-container {
+            display: flex;
+            gap: 8px;
+        }
+
+        .note-input {
+            flex: 1;
+            background: var(--bg-main);
+            border: 1px solid var(--border-color);
+            color: var(--text-primary);
+            padding: 8px 12px;
+            border-radius: 4px;
+            font-family: var(--font-mono);
+            font-size: 13px;
+            outline: none;
+            transition: border-color 150ms ease;
+        }
+
+        .note-input:focus {
+            border-color: var(--accent);
+        }
+
+        .btn-send {
+            background: rgba(0, 212, 255, 0.1);
+            border: 1px solid var(--accent);
+            color: var(--accent);
+            padding: 8px 16px;
+            border-radius: 4px;
+            font-family: var(--font-mono);
+            font-size: 12px;
+            font-weight: 600;
+            cursor: pointer;
+            text-transform: uppercase;
+            transition: all 150ms ease;
+        }
+
+        .btn-send:hover:not(:disabled) {
+            background: rgba(0, 212, 255, 0.2);
+        }
+        
+        .btn-send:disabled {
+            opacity: 0.5;
+            cursor: not-allowed;
+        }
     </style>
 </head>
 <body>
@@ -600,6 +941,106 @@
                 <option value="status">Status</option>
                 <option value="priority">Priority</option>
             </select>
+        </div>
+    </div>
+
+    <div class="mc-panel" id="mc-panel">
+        <div class="mc-toggle" id="mc-toggle">▼ MISSION CONTROL</div>
+        <div class="mc-content" id="mc-content">
+            <div class="mc-bg-effects"></div>
+            
+            <!-- Gauges -->
+            <div class="mc-gauges">
+                <div class="mc-gauge">
+                    <svg viewBox="0 0 100 50" class="gauge-svg">
+                        <path d="M 10 50 A 40 40 0 0 1 90 50" fill="none" stroke="var(--border-color)" stroke-width="8" stroke-linecap="round" />
+                        <path id="gauge-tasks-arc" d="M 10 50 A 40 40 0 0 1 90 50" fill="none" stroke="var(--accent)" stroke-width="8" stroke-linecap="round" stroke-dasharray="125.6" stroke-dashoffset="125.6" style="transition: stroke-dashoffset 0.5s ease;" />
+                    </svg>
+                    <div class="gauge-data">
+                        <div class="gauge-number" id="gauge-tasks-val">0</div>
+                        <div class="gauge-label">TASKS</div>
+                    </div>
+                </div>
+                <div class="mc-gauge">
+                    <svg viewBox="0 0 100 50" class="gauge-svg">
+                        <path d="M 10 50 A 40 40 0 0 1 90 50" fill="none" stroke="var(--border-color)" stroke-width="8" stroke-linecap="round" />
+                        <path id="gauge-agents-arc" d="M 10 50 A 40 40 0 0 1 90 50" fill="none" stroke="var(--status-active)" stroke-width="8" stroke-linecap="round" stroke-dasharray="125.6" stroke-dashoffset="125.6" style="transition: stroke-dashoffset 0.5s ease;" />
+                    </svg>
+                    <div class="gauge-data">
+                        <div class="gauge-number" id="gauge-agents-val">0</div>
+                        <div class="gauge-label">AGENTS</div>
+                    </div>
+                </div>
+                <div class="mc-gauge">
+                    <svg viewBox="0 0 100 50" class="gauge-svg">
+                        <path d="M 10 50 A 40 40 0 0 1 90 50" fill="none" stroke="var(--border-color)" stroke-width="8" stroke-linecap="round" />
+                        <path id="gauge-triage-arc" d="M 10 50 A 40 40 0 0 1 90 50" fill="none" stroke="var(--status-planning)" stroke-width="8" stroke-linecap="round" stroke-dasharray="125.6" stroke-dashoffset="125.6" style="transition: stroke-dashoffset 0.5s ease;" />
+                    </svg>
+                    <div class="gauge-data">
+                        <div class="gauge-number" id="gauge-triage-val">0</div>
+                        <div class="gauge-label">TRIAGE</div>
+                    </div>
+                </div>
+                <div class="mc-gauge">
+                    <svg viewBox="0 0 100 50" class="gauge-svg">
+                        <path d="M 10 50 A 40 40 0 0 1 90 50" fill="none" stroke="var(--border-color)" stroke-width="8" stroke-linecap="round" />
+                        <path id="gauge-pipeline-arc" d="M 10 50 A 40 40 0 0 1 90 50" fill="none" stroke="var(--status-inbox)" stroke-width="8" stroke-linecap="round" stroke-dasharray="125.6" stroke-dashoffset="125.6" style="transition: stroke-dashoffset 0.5s ease;" />
+                    </svg>
+                    <div class="gauge-data">
+                        <div class="gauge-number" id="gauge-pipeline-val">0</div>
+                        <div class="gauge-label">PIPELINE 24H</div>
+                    </div>
+                </div>
+                <div class="mc-gauge">
+                    <div class="gauge-data" style="margin-top: 15px;">
+                        <div class="gauge-number" id="gauge-uptime-val">00:00:00</div>
+                        <div class="gauge-label">UPTIME</div>
+                    </div>
+                </div>
+            </div>
+
+            <!-- Pipeline Flow -->
+            <div class="mc-pipeline">
+                <div class="pipe-stage" id="stage-sync">
+                    <div class="stage-count">0</div>
+                    <div class="stage-label">LINEAR SYNC</div>
+                </div>
+                <div class="pipe-conn" id="conn-sync-inbox"><div class="pipe-flow"></div></div>
+                <div class="pipe-stage" id="stage-inbox">
+                    <div class="stage-count">0</div>
+                    <div class="stage-label">INBOX</div>
+                </div>
+                <div class="pipe-conn" id="conn-inbox-triage"><div class="pipe-flow"></div></div>
+                <div class="pipe-stage" id="stage-triage">
+                    <div class="stage-count">0</div>
+                    <div class="stage-label">TRIAGE</div>
+                </div>
+                <div class="pipe-conn" id="conn-triage-planning"><div class="pipe-flow"></div></div>
+                <div class="pipe-stage" id="stage-planning">
+                    <div class="stage-count">0</div>
+                    <div class="stage-label">PLANNING</div>
+                </div>
+                <div class="pipe-conn" id="conn-planning-agents"><div class="pipe-flow"></div></div>
+                <div class="pipe-stage" id="stage-agents">
+                    <div class="stage-count">0</div>
+                    <div class="stage-label">AGENTS</div>
+                </div>
+                <div class="pipe-conn" id="conn-agents-inprogress"><div class="pipe-flow"></div></div>
+                <div class="pipe-stage" id="stage-inprogress">
+                    <div class="stage-count">0</div>
+                    <div class="stage-label">IN PROGRESS</div>
+                </div>
+                <div class="pipe-conn" id="conn-inprogress-done"><div class="pipe-flow"></div></div>
+                <div class="pipe-stage" id="stage-done">
+                    <div class="stage-count">0</div>
+                    <div class="stage-label">DONE</div>
+                </div>
+            </div>
+
+            <!-- Agent Status Panel -->
+            <div class="mc-agents" id="mc-agents-container">
+                <!-- Agent tiles injected here -->
+            </div>
         </div>
     </div>
 
@@ -641,6 +1082,12 @@
                 </div>
             </div>
         </div>
+        <div class="drawer-footer">
+            <form id="add-note-form" class="add-note-container">
+                <input type="text" id="note-input" class="note-input" placeholder="Add a note..." autocomplete="off">
+                <button type="submit" class="btn-send" id="btn-send">Send</button>
+            </form>
+        </div>
     </div>
 
     <script>
@@ -681,7 +1128,10 @@
             drawerDescription: document.getElementById('drawer-description'),
             drawerTriageSection: document.getElementById('drawer-triage-section'),
             drawerTriage: document.getElementById('drawer-triage'),
-            drawerTimeline: document.getElementById('drawer-timeline')
+            drawerTimeline: document.getElementById('drawer-timeline'),
+            addNoteForm: document.getElementById('add-note-form'),
+            noteInput: document.getElementById('note-input'),
+            btnSend: document.getElementById('btn-send')
         };
 
         // Utilities
@@ -746,6 +1196,7 @@
                 updateLastUpdated();
                 renderFilters();
                 renderTasks();
+                updateMissionControl();
             } catch (error) {
                 console.error('Failed to fetch tasks:', error);
                 if (state.tasks.length === 0) {
@@ -940,11 +1391,17 @@
                 ? `<a href="${task.linear_issue_url}" target="_blank" rel="noopener noreferrer">${sourceLabel}</a>`
                 : sourceLabel;
 
+            let triageBtnHtml = '';
+            if (!task.parent_task_id && (task.status === 'in_progress' || task.status === 'assigned')) {
+                triageBtnHtml = `<button class="btn-triage" id="btn-triage" onclick="handleBackToTriage('${task.id}')">Back to Triage</button>`;
+            }
+
             els.drawerMeta.innerHTML = `
                 <div class="badge badge-status ${task.status}">${task.status.replace('_', ' ')}</div>
                 <div class="badge badge-source">${sourceHtml}</div>
                 <div class="tag" style="text-transform: uppercase">PRIORITY: ${task.priority || 'NORMAL'}</div>
                 <div class="time-ago">Created ${timeAgo(task.created_at)}</div>
+                ${triageBtnHtml}
             `;
 
             // Open UI
@@ -1005,8 +1462,205 @@
         els.closeDrawer.addEventListener('click', closeDrawer);
         els.drawerOverlay.addEventListener('click', closeDrawer);
 
+        els.addNoteForm.addEventListener('submit', async (e) => {
+            e.preventDefault();
+            const text = els.noteInput.value.trim();
+            if (!text || !state.selectedTaskId) return;
+            
+            els.btnSend.disabled = true;
+            els.noteInput.disabled = true;
+            
+            try {
+                await fetch(getApiUrl(`/tasks/${state.selectedTaskId}/activities`), {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({
+                        activity_type: 'updated',
+                        message: text
+                    })
+                });
+                
+                els.noteInput.value = '';
+                fetchTaskDetails(state.selectedTaskId);
+            } catch (error) {
+                console.error('Failed to add note:', error);
+                alert('Failed to add note.');
+            } finally {
+                els.btnSend.disabled = false;
+                els.noteInput.disabled = false;
+                els.noteInput.focus();
+            }
+        });
+
+        window.handleBackToTriage = async (taskId) => {
+            if (!confirm('Send this task back to triage? Running agents will need to be manually stopped.')) {
+                return;
+            }
+            
+            try {
+                await fetch(getApiUrl(`/tasks/${taskId}`), {
+                    method: 'PATCH',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ status: 'planning' })
+                });
+                
+                await fetch(getApiUrl(`/tasks/${taskId}/activities`), {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({
+                        activity_type: 'status_changed',
+                        message: 'Sent back to triage from dashboard'
+                    })
+                });
+                
+                fetchTasks();
+                closeDrawer();
+            } catch (error) {
+                console.error('Failed to send back to triage:', error);
+                alert('Failed to update task status.');
+            }
+        };
+
+        // Mission Control Logic
+        const initMissionControl = () => {
+            // Uptime clock
+            const startTime = Date.now();
+            setInterval(() => {
+                const now = Date.now();
+                const diff = Math.floor((now - startTime) / 1000);
+                const h = String(Math.floor(diff / 3600)).padStart(2, '0');
+                const m = String(Math.floor((diff % 3600) / 60)).padStart(2, '0');
+                const s = String(diff % 60).padStart(2, '0');
+                const uptimeEl = document.getElementById('gauge-uptime-val');
+                if (uptimeEl) uptimeEl.textContent = `${h}:${m}:${s}`;
+            }, 1000);
+
+            // Toggle logic
+            const toggleBtn = document.getElementById('mc-toggle');
+            if (toggleBtn) {
+                toggleBtn.addEventListener('click', () => {
+                    const content = document.getElementById('mc-content');
+                    content.classList.toggle('collapsed');
+                    toggleBtn.textContent = content.classList.contains('collapsed') ? '▲ MISSION CONTROL' : '▼ MISSION CONTROL';
+                });
+            }
+        };
+
+        const updateMissionControl = () => {
+            const tasks = state.tasks;
+            
+            // Gauges
+            const totalTasks = tasks.length;
+            const doneTasks = tasks.filter(t => t.status === 'done').length;
+            const completionPct = totalTasks ? (doneTasks / totalTasks) : 0;
+            
+            const tasksVal = document.getElementById('gauge-tasks-val');
+            if (tasksVal) tasksVal.textContent = totalTasks;
+            const tasksArc = document.getElementById('gauge-tasks-arc');
+            if (tasksArc) {
+                tasksArc.style.strokeDashoffset = 125.6 - (125.6 * completionPct);
+            }
+
+            const childTasks = tasks.filter(t => t.parent_task_id);
+            const activeAgents = childTasks.filter(t => t.status === 'in_progress' || t.status === 'assigned').length;
+            const agentsVal = document.getElementById('gauge-agents-val');
+            if (agentsVal) agentsVal.textContent = activeAgents;
+            const agentsArc = document.getElementById('gauge-agents-arc');
+            if (agentsArc) {
+                const agentPct = childTasks.length ? (activeAgents / childTasks.length) : 0;
+                agentsArc.style.strokeDashoffset = 125.6 - (125.6 * agentPct);
+                if (activeAgents > 0) {
+                    agentsArc.style.filter = 'drop-shadow(0 0 4px var(--status-active))';
+                } else {
+                    agentsArc.style.filter = 'none';
+                }
+            }
+
+            const triageTasks = tasks.filter(t => t.status === 'inbox' || t.status === 'planning').length;
+            const triageVal = document.getElementById('gauge-triage-val');
+            if (triageVal) triageVal.textContent = triageTasks;
+            const triageArc = document.getElementById('gauge-triage-arc');
+            if (triageArc) {
+                const triagePct = totalTasks ? (triageTasks / totalTasks) : 0;
+                triageArc.style.strokeDashoffset = 125.6 - (125.6 * triagePct);
+            }
+
+            const now = new Date();
+            const last24h = tasks.filter(t => t.status === 'done' && (now - new Date(t.updated_at || t.created_at)) < 24*60*60*1000).length;
+            const pipelineVal = document.getElementById('gauge-pipeline-val');
+            if (pipelineVal) pipelineVal.textContent = last24h;
+            const pipelineArc = document.getElementById('gauge-pipeline-arc');
+            if (pipelineArc) {
+                const pipePct = Math.min(last24h / 10, 1); // arbitrary scale
+                pipelineArc.style.strokeDashoffset = 125.6 - (125.6 * pipePct);
+            }
+
+            // Pipeline Flow
+            const counts = {
+                sync: tasks.filter(t => t.linear_issue_url).length,
+                inbox: tasks.filter(t => t.status === 'inbox').length,
+                triage: tasks.filter(t => t.status === 'planning').length,
+                planning: tasks.filter(t => t.status === 'assigned').length,
+                agents: childTasks.length,
+                inprogress: tasks.filter(t => t.status === 'in_progress').length,
+                done: tasks.filter(t => t.status === 'done').length
+            };
+            
+            const stages = ['sync', 'inbox', 'triage', 'planning', 'agents', 'inprogress', 'done'];
+            stages.forEach((stage, idx) => {
+                const el = document.getElementById(`stage-${stage}`);
+                if (el) {
+                    const count = counts[stage] || 0;
+                    const countEl = el.querySelector('.stage-count');
+                    if (countEl) countEl.textContent = count;
+                    if (count > 0) {
+                        el.classList.add('active');
+                    } else {
+                        el.classList.remove('active');
+                    }
+                }
+                
+                // Update connection lines
+                if (idx < stages.length - 1) {
+                    const nextStage = stages[idx + 1];
+                    const conn = document.getElementById(`conn-${stage}-${nextStage}`);
+                    if (conn) {
+                        if (counts[stage] > 0 || counts[nextStage] > 0) {
+                            conn.classList.add('active');
+                        } else {
+                            conn.classList.remove('active');
+                        }
+                    }
+                }
+            });
+
+            // Agent Status Panel
+            const agentsContainer = document.getElementById('mc-agents-container');
+            if (agentsContainer) {
+                if (childTasks.length === 0) {
+                    agentsContainer.innerHTML = '<div style="color: var(--text-secondary); font-size: 11px; font-family: var(--font-mono);">NO AGENTS DEPLOYED</div>';
+                } else {
+                    agentsContainer.innerHTML = childTasks.map(t => {
+                        const repo = extractTargetRepo(t.title) || 'UNKNOWN REPO';
+                        let statusClass = 'completed';
+                        if (t.status === 'in_progress' || t.status === 'assigned') statusClass = 'running';
+                        if (t.status === 'failed') statusClass = 'failed';
+                        
+                        return `
+                            <div class="agent-tile ${statusClass}">
+                                <div class="agent-status-icon"></div>
+                                <div class="agent-repo">${escapeHtml(repo)}</div>
+                                <div class="agent-time">${timeAgo(t.created_at)}</div>
+                            </div>
+                        `;
+                    }).join('');
+                }
+            }
+        };
+
         // Initialization & Polling
         const init = () => {
+            initMissionControl();
             fetchTasks();
             
             // Poll every 30 seconds
