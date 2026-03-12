@@ -2,6 +2,7 @@ import { readFileSync } from "node:fs";
 import { join, dirname } from "node:path";
 import { homedir, cpus, totalmem, freemem, loadavg } from "node:os";
 import { fileURLToPath } from "node:url";
+import { execFile } from "node:child_process";
 import type { IncomingMessage, ServerResponse } from "node:http";
 import type { OpenClawPluginApi } from "openclaw/plugin-sdk";
 import type {
@@ -626,8 +627,66 @@ async function handleApiRequest(
               freeGB: Math.round((freeMem / 1073741824) * 10) / 10,
               usagePercent: Math.round((usedMem / totalMem) * 100),
             },
+            concurrency: {
+              maxClaude: parseInt(process.env.MAX_CLAUDE_AGENTS || "10", 10),
+              maxCodex: parseInt(process.env.MAX_CODEX_AGENTS || "3", 10),
+            },
           });
           return;
+        }
+
+        if (segments[0] === "knowledge") {
+          const knowledgeScript = join(homedir(), ".openclaw", "swarm", "knowledge-manage.py");
+
+          if (segments.length === 1 && method === "POST") {
+            const body = await parseBody(req);
+            if (!isRecord(body) || typeof body.text !== "string" || !body.text.trim()) {
+              sendJson(res, 400, { error: "text is required" });
+              return;
+            }
+
+            const args = [
+              knowledgeScript, "inject",
+              "--text", String(body.text),
+              "--importance", String(body.importance ?? 5),
+              "--category", String(body.category ?? "fact"),
+              "--source", "human",
+              "--via", "mc-api",
+            ];
+            if (body.project) args.push("--project", String(body.project));
+            if (body.repo) args.push("--repo", String(body.repo));
+            if (body.scope) args.push("--scope", String(body.scope));
+
+            const result = await runPython(args);
+            sendJson(res, 201, result);
+            return;
+          }
+
+          if (segments.length === 1 && method === "GET") {
+            const project = url.searchParams.get("project") ?? "";
+            const repo = url.searchParams.get("repo") ?? "";
+            const scope = url.searchParams.get("scope") ?? "";
+            const limit = url.searchParams.get("limit") ?? "50";
+
+            const args = [knowledgeScript, "list", "--limit", limit];
+            if (scope) args.push("--scope", scope);
+            else if (project) {
+              args.push("--project", project);
+              if (repo) args.push("--repo", repo);
+            }
+
+            const result = await runPython(args);
+            sendJson(res, 200, result);
+            return;
+          }
+
+          if (segments.length === 2 && method === "DELETE") {
+            const entryId = segments[1];
+            const args = [knowledgeScript, "delete", "--id", entryId];
+            const result = await runPython(args);
+            sendJson(res, 200, result);
+            return;
+          }
         }
 
         sendJson(res, 404, { error: "Not found" });
@@ -636,4 +695,20 @@ async function handleApiRequest(
         api.logger.error(`mission-control routes error: ${message}`);
         sendJson(res, 500, { error: message });
   }
+}
+
+function runPython(args: string[]): Promise<Record<string, unknown>> {
+  return new Promise((resolve, reject) => {
+    execFile("python3", args, { timeout: 30000 }, (err, stdout, stderr) => {
+      if (err) {
+        reject(new Error(stderr || err.message));
+        return;
+      }
+      try {
+        resolve(JSON.parse(stdout));
+      } catch {
+        reject(new Error(`Invalid JSON from knowledge script: ${stdout}`));
+      }
+    });
+  });
 }

@@ -1186,6 +1186,183 @@
             display: none;
         }
 
+        /* Knowledge Base */
+        .knowledge-panel {
+            padding: 0 24px 24px 24px;
+            position: relative;
+            z-index: 1;
+        }
+
+        .knowledge-header {
+            margin-bottom: 16px;
+        }
+
+        .knowledge-content {
+            display: flex;
+            flex-direction: column;
+            gap: 16px;
+            transition: all 0.3s ease;
+        }
+
+        .knowledge-content.collapsed {
+            display: none;
+        }
+
+        .knowledge-controls {
+            display: flex;
+            gap: 12px;
+            margin-bottom: 8px;
+        }
+
+        .kb-select {
+            background: var(--bg-card);
+            border: 1px solid var(--border-color);
+            color: var(--text-primary);
+            font-family: var(--font-mono);
+            font-size: 11px;
+            padding: 6px 12px;
+            border-radius: 4px;
+            outline: none;
+            cursor: pointer;
+        }
+
+        .kb-select:focus {
+            border-color: var(--accent);
+        }
+
+        .knowledge-list {
+            display: flex;
+            flex-direction: column;
+            gap: 8px;
+            max-height: 300px;
+            overflow-y: auto;
+        }
+
+        .kb-entry {
+            background: var(--bg-card);
+            border: 1px solid var(--border-color);
+            border-radius: 4px;
+            padding: 12px;
+            display: flex;
+            flex-direction: column;
+            gap: 8px;
+        }
+
+        .kb-entry-header {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+        }
+
+        .kb-badges {
+            display: flex;
+            gap: 8px;
+            align-items: center;
+        }
+
+        .kb-badge {
+            font-family: var(--font-mono);
+            font-size: 10px;
+            padding: 2px 6px;
+            border-radius: 2px;
+            text-transform: uppercase;
+        }
+
+        .kb-badge.human {
+            background: rgba(0, 212, 255, 0.1);
+            color: var(--accent);
+            border: 1px solid rgba(0, 212, 255, 0.2);
+        }
+
+        .kb-badge.auto {
+            background: rgba(136, 136, 136, 0.1);
+            color: var(--text-secondary);
+            border: 1px solid rgba(136, 136, 136, 0.2);
+        }
+
+        .kb-badge.category {
+            background: rgba(255, 255, 255, 0.05);
+            color: var(--text-primary);
+            border: 1px solid rgba(255, 255, 255, 0.1);
+        }
+
+        .kb-stars {
+            color: var(--status-planning);
+            font-size: 12px;
+            letter-spacing: 2px;
+        }
+
+        .kb-delete {
+            background: none;
+            border: none;
+            color: var(--text-secondary);
+            cursor: pointer;
+            font-size: 14px;
+            padding: 0 4px;
+            transition: color 0.2s;
+        }
+
+        .kb-delete:hover {
+            color: var(--status-failed);
+        }
+
+        .kb-text {
+            font-family: var(--font-body);
+            font-size: 13px;
+            color: var(--text-primary);
+            line-height: 1.4;
+            white-space: pre-wrap;
+        }
+
+        .knowledge-add-form {
+            background: var(--bg-card);
+            border: 1px solid var(--border-color);
+            border-radius: 4px;
+            padding: 12px;
+            margin-top: 8px;
+        }
+
+        .kb-textarea {
+            width: 100%;
+            background: rgba(0, 0, 0, 0.2);
+            border: 1px solid var(--border-color);
+            color: var(--text-primary);
+            font-family: var(--font-body);
+            font-size: 13px;
+            padding: 8px 12px;
+            border-radius: 4px;
+            resize: vertical;
+            min-height: 60px;
+            outline: none;
+            margin-bottom: 12px;
+        }
+
+        .kb-textarea:focus {
+            border-color: var(--accent);
+        }
+
+        .kb-form-footer {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+        }
+
+        .kb-importance-selector {
+            display: flex;
+            align-items: center;
+        }
+
+        .kb-star-select {
+            cursor: pointer;
+            color: var(--text-secondary);
+            font-size: 16px;
+            transition: color 0.2s;
+        }
+
+        .kb-star-select.active {
+            color: var(--status-planning);
+        }
+
         .pg-row {
             display: flex;
             align-items: center;
@@ -1482,6 +1659,46 @@
             </div>
             <div class="process-graph-content collapsed" id="process-graph-content">
                 <!-- Graph rendered here -->
+            </div>
+        </div>
+
+        <div class="knowledge-panel">
+            <div class="knowledge-header" onclick="toggleKnowledgePanel()">
+                <div class="section-title" style="margin: 0; cursor: pointer;">
+                    KNOWLEDGE BASE <span id="knowledge-toggle" style="font-size: 10px; opacity: 0.5; margin-left: 4px;">(show)</span>
+                </div>
+            </div>
+            <div class="knowledge-content collapsed" id="knowledge-content">
+                <div class="knowledge-controls">
+                    <select id="kb-project-select" class="kb-select" onchange="loadKnowledge()">
+                        <option value="">All Projects</option>
+                    </select>
+                    <select id="kb-repo-select" class="kb-select" onchange="loadKnowledge()">
+                        <option value="">All Repos</option>
+                    </select>
+                </div>
+                <div class="knowledge-list" id="knowledge-list">
+                    <div style="color: var(--text-secondary); font-size: 12px; padding: 12px; text-align: center;">Loading knowledge base...</div>
+                </div>
+                <div class="knowledge-add-form">
+                    <form id="add-kb-form" onsubmit="addKnowledge(event)">
+                        <textarea id="kb-text" class="kb-textarea" placeholder="Type knowledge — branch rules, conventions, gotchas..." required></textarea>
+                        <div class="kb-form-footer">
+                            <div class="kb-importance-selector">
+                                <span style="font-size: 11px; color: var(--text-secondary); margin-right: 8px;">Importance:</span>
+                                <div class="kb-stars" id="kb-stars">
+                                    <span class="kb-star-select active" data-val="1" onclick="setKbImportance(1)">★</span>
+                                    <span class="kb-star-select active" data-val="2" onclick="setKbImportance(2)">★</span>
+                                    <span class="kb-star-select active" data-val="3" onclick="setKbImportance(3)">★</span>
+                                    <span class="kb-star-select active" data-val="4" onclick="setKbImportance(4)">★</span>
+                                    <span class="kb-star-select active" data-val="5" onclick="setKbImportance(5)">★</span>
+                                </div>
+                                <input type="hidden" id="kb-importance" value="5">
+                            </div>
+                            <button type="submit" class="btn-send" id="btn-add-kb">Add Knowledge</button>
+                        </div>
+                    </form>
+                </div>
             </div>
         </div>
     </div>
@@ -1887,7 +2104,9 @@
                 }
             });
             const totalActive = claudeCount + codexCount;
-            const maxSlots = 13;
+            const maxClaude = state.systemStats?.concurrency?.maxClaude || 10;
+            const maxCodex = state.systemStats?.concurrency?.maxCodex || 3;
+            const maxSlots = maxClaude + maxCodex;
             const pressurePct = Math.min(100, (totalActive / maxSlots) * 100);
             let pressureColor = 'green';
             if (pressurePct >= 80) pressureColor = 'red';
@@ -2816,6 +3035,190 @@
             } else {
                 content.classList.add('collapsed');
                 toggle.textContent = '(show)';
+            }
+        };
+
+        // Knowledge Base Logic
+        let kbState = {
+            entries: [],
+            projects: new Set(),
+            repos: new Set(),
+            selectedProject: '',
+            selectedRepo: ''
+        };
+
+        window.toggleKnowledgePanel = () => {
+            const content = document.getElementById('knowledge-content');
+            const toggle = document.getElementById('knowledge-toggle');
+            if (content.classList.contains('collapsed')) {
+                content.classList.remove('collapsed');
+                toggle.textContent = '(hide)';
+                loadKnowledge();
+            } else {
+                content.classList.add('collapsed');
+                toggle.textContent = '(show)';
+            }
+        };
+
+        window.setKbImportance = (val) => {
+            document.getElementById('kb-importance').value = val;
+            const stars = document.querySelectorAll('#kb-stars .kb-star-select');
+            stars.forEach(star => {
+                if (parseInt(star.dataset.val) <= val) {
+                    star.classList.add('active');
+                } else {
+                    star.classList.remove('active');
+                }
+            });
+        };
+
+        const renderKnowledgeList = () => {
+            const list = document.getElementById('knowledge-list');
+            if (!kbState.entries.length) {
+                list.innerHTML = '<div style="color: var(--text-secondary); font-size: 12px; padding: 12px; text-align: center;">No knowledge entries found for this scope.</div>';
+                return;
+            }
+
+            list.innerHTML = kbState.entries.map(entry => {
+                const isAuto = entry.source === 'auto';
+                const sourceClass = isAuto ? 'auto' : 'human';
+                const sourceLabel = isAuto ? 'AUTO' : 'HUMAN';
+                const stars = '★'.repeat(entry.importance || 1) + '☆'.repeat(5 - (entry.importance || 1));
+                
+                return `
+                    <div class="kb-entry">
+                        <div class="kb-entry-header">
+                            <div class="kb-badges">
+                                <span class="kb-badge ${sourceClass}">${sourceLabel}</span>
+                                ${entry.category ? `<span class="kb-badge category">${escapeHtml(entry.category)}</span>` : ''}
+                                <span class="kb-badge" style="background: rgba(255,255,255,0.05); border: 1px solid rgba(255,255,255,0.1);">${escapeHtml(entry.project || 'global')}/${escapeHtml(entry.repo || 'global')}</span>
+                            </div>
+                            <div style="display: flex; align-items: center; gap: 12px;">
+                                <span class="kb-stars">${stars}</span>
+                                <button class="kb-delete" onclick="deleteKnowledge('${entry.id}')" title="Delete entry">×</button>
+                            </div>
+                        </div>
+                        <div class="kb-text">${escapeHtml(entry.text)}</div>
+                    </div>
+                `;
+            }).join('');
+        };
+
+        const updateKbSelectors = () => {
+            const projSelect = document.getElementById('kb-project-select');
+            const repoSelect = document.getElementById('kb-repo-select');
+            
+            const currentProj = projSelect.value;
+            const currentRepo = repoSelect.value;
+
+            projSelect.innerHTML = '<option value="">All Projects</option>' + 
+                Array.from(kbState.projects).sort().map(p => `<option value="${p}" ${p === currentProj ? 'selected' : ''}>${p}</option>`).join('');
+                
+            repoSelect.innerHTML = '<option value="">All Repos</option>' + 
+                Array.from(kbState.repos).sort().map(r => `<option value="${r}" ${r === currentRepo ? 'selected' : ''}>${r}</option>`).join('');
+        };
+
+        window.loadKnowledge = async () => {
+            try {
+                const projSelect = document.getElementById('kb-project-select');
+                const repoSelect = document.getElementById('kb-repo-select');
+                
+                kbState.selectedProject = projSelect.value;
+                kbState.selectedRepo = repoSelect.value;
+
+                let url = getApiUrl('/knowledge');
+                const params = new URLSearchParams();
+                if (kbState.selectedProject) params.append('project', kbState.selectedProject);
+                if (kbState.selectedRepo) params.append('repo', kbState.selectedRepo);
+                
+                if (params.toString()) {
+                    url += '?' + params.toString();
+                }
+
+                const res = await fetch(url);
+                if (!res.ok) throw new Error('Failed to fetch knowledge');
+                
+                const data = await res.json();
+                kbState.entries = data.entries || [];
+                
+                // Extract unique projects and repos for selectors if not filtering
+                if (!kbState.selectedProject && !kbState.selectedRepo) {
+                    kbState.projects.clear();
+                    kbState.repos.clear();
+                    kbState.entries.forEach(e => {
+                        if (e.project) kbState.projects.add(e.project);
+                        if (e.repo) kbState.repos.add(e.repo);
+                    });
+                    updateKbSelectors();
+                }
+
+                renderKnowledgeList();
+            } catch (err) {
+                console.error('Error loading knowledge:', err);
+                document.getElementById('knowledge-list').innerHTML = '<div style="color: var(--status-failed); font-size: 12px; padding: 12px;">Failed to load knowledge base.</div>';
+            }
+        };
+
+        window.addKnowledge = async (e) => {
+            e.preventDefault();
+            const textInput = document.getElementById('kb-text');
+            const importanceInput = document.getElementById('kb-importance');
+            const projSelect = document.getElementById('kb-project-select');
+            const repoSelect = document.getElementById('kb-repo-select');
+            const btn = document.getElementById('btn-add-kb');
+
+            const text = textInput.value.trim();
+            if (!text) return;
+
+            // Default to current selection or 'global' if none
+            const project = projSelect.value || 'global';
+            const repo = repoSelect.value || 'global';
+            const importance = parseInt(importanceInput.value) || 5;
+
+            try {
+                btn.disabled = true;
+                btn.textContent = 'Adding...';
+
+                const res = await fetch(getApiUrl('/knowledge'), {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({
+                        text,
+                        project,
+                        repo,
+                        importance,
+                        category: 'developer_note'
+                    })
+                });
+
+                if (!res.ok) throw new Error('Failed to add knowledge');
+
+                textInput.value = '';
+                setKbImportance(5);
+                await loadKnowledge();
+            } catch (err) {
+                console.error('Error adding knowledge:', err);
+                alert('Failed to add knowledge entry');
+            } finally {
+                btn.disabled = false;
+                btn.textContent = 'Add Knowledge';
+            }
+        };
+
+        window.deleteKnowledge = async (id) => {
+            if (!confirm('Delete this knowledge entry?')) return;
+            
+            try {
+                const res = await fetch(getApiUrl(`/knowledge/${id}`), {
+                    method: 'DELETE'
+                });
+
+                if (!res.ok) throw new Error('Failed to delete knowledge');
+                
+                await loadKnowledge();
+            } catch (err) {
+                console.error('Error deleting knowledge:', err);
+                alert('Failed to delete knowledge entry');
             }
         };
 
