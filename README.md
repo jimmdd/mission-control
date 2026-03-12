@@ -1,8 +1,8 @@
 # Mission Control
 
-OpenClaw embedded plugin for managing autonomous AI agent swarms. Provides task management, a real-time command center dashboard, and agent tools — all backed by SQLite.
+OpenClaw embedded plugin for managing autonomous AI agent swarms. Provides task management, a real-time command center dashboard, knowledge management, and agent tools — all backed by SQLite.
 
-Built to orchestrate [Hive Claw](https://github.com/jimmdd), an autonomous coding pipeline: Linear ticket → triage → agent spawn → code → review → iterate → PR → merge → done.
+Orchestrates an autonomous coding pipeline: Linear ticket → triage → agent spawn → code → review → iterate → PR → merge → done.
 
 ## How It Works
 
@@ -55,6 +55,8 @@ Agents interact with Mission Control through registered tools:
 | `mc_log_activity` | Log an activity entry on a task |
 | `mc_list_workspaces` | List available workspaces |
 | `mc_create_workspace` | Create a new workspace |
+| `mc_add_knowledge` | Store developer knowledge (branch rules, conventions, gotchas) |
+| `mc_list_knowledge` | List stored knowledge entries by repo/project scope |
 
 ### API Endpoints
 
@@ -90,7 +92,10 @@ All endpoints are served under `/ext/mission-control/api/`:
 | GET | `/sessions` | List sessions |
 | POST | `/sessions` | Create session |
 | GET | `/agent-status` | Live agent status with tmux session detection |
-| GET | `/system-stats` | CPU load and memory usage |
+| GET | `/system-stats` | CPU load, memory usage, concurrency limits |
+| GET | `/knowledge` | List knowledge entries (query: `project`, `repo`, `scope`, `limit`) |
+| POST | `/knowledge` | Add knowledge entry (`text`, `project`, `repo`, `importance`, `category`) |
+| DELETE | `/knowledge/:id` | Delete knowledge entry |
 
 ## Setup
 
@@ -140,6 +145,35 @@ open http://localhost:18789/ext/mission-control/
 curl http://localhost:18789/ext/mission-control/api/tasks
 ```
 
+## Memory & Knowledge Integration
+
+Mission Control integrates with [claw-memory-ultra](https://github.com/jimmdd/claw-memory-ultra) (LanceDB-backed vector memory) to give agents context about repositories they're working on.
+
+Knowledge flows through two paths:
+
+1. **Auto-distilled** — When an agent completes a task, `knowledge-distill.py` extracts learnings (API contracts, gotchas, architectural decisions) and stores them in LanceDB with Gemini embeddings.
+2. **Human-injected** — Developers add knowledge directly via the dashboard, gateway chat, or API. These entries are marked `source: human` and get priority during recall.
+
+During triage, the bridge calls `recall_knowledge()` which:
+- Searches LanceDB for entries scoped to the target repo/project
+- Separates results into **Developer Notes** (human-injected, always surfaced) and **Past Learnings** (auto-distilled, similarity-ranked)
+- Injects both into the agent prompt with clear hierarchy
+
+```
+## Developer Notes (MUST FOLLOW)
+- (repo:hivemapper/hivemapper-hdc-os) Production branch is bee. Feature
+  branches from bee or ctp-ready. Only modify meta-luxonis layer.
+
+## Past Learnings (REFERENCE)
+- [fact] (repo:hivemapper/odc-api) Tests require NODE_ENV=test
+```
+
+Knowledge can be added through:
+- **Dashboard** — Knowledge Base panel with scope picker and text input
+- **Gateway chat** — Agent calls `mc_add_knowledge` tool
+- **REST API** — `POST /ext/mission-control/api/knowledge`
+- **CLI** — `python3 ~/.openclaw/swarm/knowledge-manage.py inject --text "..." --project X --repo Y`
+
 ## Swarm Infrastructure
 
 Mission Control is the central hub. The surrounding scripts live in `~/.openclaw/swarm/`:
@@ -152,13 +186,19 @@ Mission Control is the central hub. The surrounding scripts live in `~/.openclaw
 | PR Watcher | `~/.openclaw/swarm/watch-pr-reviews.sh` | 120s | Detect GitHub review comments and approvals |
 | Agent Launcher | `~/.openclaw/swarm/run-claude.sh` | On-demand | Launch Claude with prompt, retry, cost controls |
 | Spawn Script | `~/.openclaw/swarm/spawn-agent.sh` | On-demand | Create worktree, register agent, start tmux |
+| Knowledge Manager | `~/.openclaw/swarm/knowledge-manage.py` | On-demand | Inject/list/delete knowledge entries in LanceDB |
+| Knowledge Distiller | `~/.openclaw/swarm/knowledge-distill.py` | On-demand | Extract learnings from completed tasks into LanceDB |
 
 ### Concurrency
 
-- Max 10 Claude Code agents (Claude Max subscription)
-- Max 3 Codex agents (fallback when Claude slots full)
-- Agents run in tmux sessions for isolation
-- Each agent gets its own git worktree
+Configurable via environment variables:
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `MAX_CLAUDE_AGENTS` | 10 | Max concurrent Claude Code agents |
+| `MAX_CODEX_AGENTS` | 3 | Max concurrent Codex agents (fallback) |
+
+Agents run in tmux sessions for isolation. Each agent gets its own git worktree. When Claude slots are full, new tasks fall back to Codex.
 
 ## Project Structure
 
