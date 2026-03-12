@@ -1,5 +1,6 @@
 import { readFileSync } from "node:fs";
 import { join, dirname } from "node:path";
+import { homedir, cpus, totalmem, freemem, loadavg } from "node:os";
 import { fileURLToPath } from "node:url";
 import type { IncomingMessage, ServerResponse } from "node:http";
 import type { OpenClawPluginApi } from "openclaw/plugin-sdk";
@@ -11,6 +12,7 @@ import type {
   CreateTaskInput,
   CreateWorkspaceInput,
   MissionControlDB,
+  TaskStatus,
   UpdateAgentInput,
   UpdateTaskInput,
   UpdateWorkspaceInput,
@@ -50,18 +52,14 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 const PLUGIN_PREFIX = "/ext/mission-control";
 const API_PREFIX = `${PLUGIN_PREFIX}/api`;
 
-// Load dashboard HTML at module load time (single file, ~30KB)
-let dashboardHtml: string | null = null;
 function getDashboardHtml(): string | null {
-  if (dashboardHtml !== null) return dashboardHtml;
   try {
     const thisDir = dirname(fileURLToPath(import.meta.url));
     const htmlPath = join(thisDir, "..", "public", "index.html");
-    dashboardHtml = readFileSync(htmlPath, "utf-8");
+    return readFileSync(htmlPath, "utf-8");
   } catch {
-    dashboardHtml = "";
+    return null;
   }
-  return dashboardHtml || null;
 }
 
 function serveDashboard(res: ServerResponse): void {
@@ -454,8 +452,12 @@ async function handleApiRequest(
               return;
             }
 
-            if (!["testing", "review", "done"].includes(task.status)) {
-              db.updateTask(task.id, { status: "testing" });
+            const newStatus = (typeof body.status === "string" && ["testing", "review", "done"].includes(body.status)
+              ? body.status
+              : "review") as TaskStatus;
+
+            if (!["review", "done"].includes(task.status)) {
+              db.updateTask(task.id, { status: newStatus });
             }
 
             db.createEvent({
@@ -475,7 +477,7 @@ async function handleApiRequest(
             sendJson(res, 200, {
               success: true,
               task_id: task.id,
-              new_status: "testing",
+              new_status: newStatus,
             });
             return;
           }
@@ -539,6 +541,91 @@ async function handleApiRequest(
 
           sendJson(res, 400, {
             error: "Invalid payload. Provide task_id or session_id + message",
+          });
+          return;
+        }
+
+        if (segments[0] === "agent-status" && segments.length === 1 && method === "GET") {
+          try {
+            const registryPath = join(homedir(), ".openclaw", "swarm", "active-tasks.json");
+            const raw = readFileSync(registryPath, "utf-8");
+            const entries = JSON.parse(raw) as Array<Record<string, unknown>>;
+
+            // Check which tmux sessions are alive
+            let aliveSessions: Set<string> = new Set();
+            try {
+              const { execSync } = await import("node:child_process");
+              const tmuxOut = execSync("tmux list-sessions -F '#{session_name}' 2>/dev/null || true", {
+                encoding: "utf-8",
+                timeout: 3000,
+              });
+              for (const line of tmuxOut.split("\n")) {
+                const trimmed = line.trim();
+                if (trimmed) aliveSessions.add(trimmed);
+              }
+            } catch {
+              // tmux not running or no sessions — aliveSessions stays empty
+            }
+
+            const byTask: Record<string, Record<string, unknown>> = {};
+            for (const entry of entries) {
+              const mcId = entry.mcTaskId as string;
+              if (mcId) {
+                const tmuxName = entry.tmuxSession as string;
+                const tmuxAlive = tmuxName ? aliveSessions.has(tmuxName) : false;
+                const registryStatus = entry.status as string;
+
+                // Compute live status: if tmux is alive, agent is running
+                // If registry says running/ready but tmux is dead, it's completed
+                let liveStatus = registryStatus;
+                if (tmuxAlive && registryStatus !== "failed") {
+                  liveStatus = "running";
+                } else if (!tmuxAlive && registryStatus === "running") {
+                  liveStatus = "completed_by_agent";
+                }
+
+                byTask[mcId] = {
+                  agent: entry.agent,
+                  status: registryStatus,
+                  liveStatus,
+                  tmuxAlive,
+                  tmuxSession: tmuxName,
+                  reviewCycles: entry.reviewCycles,
+                  retryCount: entry.retryCount,
+                  branch: entry.branch,
+                  startedAt: entry.startedAt,
+                  pr: entry.pr,
+                  changeRequestAt: entry.changeRequestAt,
+                };
+              }
+            }
+            sendJson(res, 200, byTask);
+          } catch {
+            sendJson(res, 200, {});
+          }
+          return;
+        }
+
+        if (segments[0] === "system-stats" && segments.length === 1 && method === "GET") {
+          const totalMem = totalmem();
+          const freeMem = freemem();
+          const usedMem = totalMem - freeMem;
+          const load = loadavg();
+          const numCpus = cpus().length;
+
+          sendJson(res, 200, {
+            cpu: {
+              cores: numCpus,
+              loadAvg1m: Math.round(load[0] * 100) / 100,
+              loadAvg5m: Math.round(load[1] * 100) / 100,
+              usagePercent: Math.round((load[0] / numCpus) * 100),
+            },
+            memory: {
+              totalGB: Math.round((totalMem / 1073741824) * 10) / 10,
+              usedGB: Math.round((usedMem / 1073741824) * 10) / 10,
+              freeGB: Math.round((freeMem / 1073741824) * 10) / 10,
+              usagePercent: Math.round((usedMem / totalMem) * 100),
+            },
           });
           return;
         }

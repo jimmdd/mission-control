@@ -25,11 +25,21 @@
             --status-failed: #ef4444;
             --status-active: #00ff88;
             --status-error: #ff4444;
+            --status-testing: #a78bfa;
+            --status-review: #818cf8;
 
             --priority-urgent: #ef4444;
             --priority-high: #f97316;
             --priority-normal: transparent;
             --priority-low: #6b7280;
+
+            --stage-uplink: #3b82f6;
+            --stage-intake: #06b6d4;
+            --stage-triage: #f59e0b;
+            --stage-dispatch: #f97316;
+            --stage-swarm: #00ff88;
+            --stage-review: #818cf8;
+            --stage-complete: #6b7280;
 
             --font-body: 'Inter', sans-serif;
             --font-mono: 'JetBrains Mono', monospace;
@@ -53,281 +63,16 @@
             flex-direction: column;
         }
 
-        /* Mission Control Panel */
-        .mc-panel {
-            background-color: var(--bg-card);
-            border-bottom: 1px solid var(--border-color);
-            position: relative;
-            flex-shrink: 0;
-            display: flex;
-            flex-direction: column;
-        }
-
-        .mc-toggle {
-            font-family: var(--font-mono);
-            font-size: 10px;
-            color: var(--text-secondary);
-            text-align: center;
-            padding: 4px;
-            cursor: pointer;
-            background: var(--bg-main);
-            border-bottom: 1px solid var(--border-color);
-            letter-spacing: 2px;
-            user-select: none;
-            transition: all 150ms ease;
-        }
-
-        .mc-toggle:hover {
-            color: var(--accent);
-            background: rgba(0, 212, 255, 0.05);
-        }
-
-        .mc-content {
-            position: relative;
-            padding: 20px 24px;
-            display: flex;
-            flex-direction: column;
-            gap: 24px;
-            transition: max-height 0.3s ease, padding 0.3s ease, opacity 0.3s ease;
-            max-height: 400px;
-            opacity: 1;
-            overflow: hidden;
-        }
-
-        .mc-content.collapsed {
-            max-height: 0;
-            padding-top: 0;
-            padding-bottom: 0;
-            opacity: 0;
-        }
-
-        .mc-bg-effects {
-            position: absolute;
-            top: 0; left: 0; right: 0; bottom: 0;
-            pointer-events: none;
-            background: 
-                linear-gradient(rgba(18, 18, 26, 0) 50%, rgba(0, 0, 0, 0.25) 50%), 
-                linear-gradient(90deg, rgba(255, 255, 255, 0.02) 1px, transparent 1px),
-                linear-gradient(rgba(255, 255, 255, 0.02) 1px, transparent 1px);
-            background-size: 100% 4px, 20px 20px, 20px 20px;
-            z-index: 0;
-        }
-
-        .mc-gauges {
-            display: flex;
-            justify-content: space-around;
-            align-items: flex-end;
-            position: relative;
-            z-index: 1;
-            flex-wrap: wrap;
-            gap: 16px;
-        }
-
-        .mc-gauge {
-            position: relative;
-            width: 120px;
-            height: 60px;
-            display: flex;
-            flex-direction: column;
-            align-items: center;
-        }
-
-        .gauge-svg {
-            width: 100%;
-            height: 100%;
-            overflow: visible;
-        }
-
-        .gauge-data {
-            position: absolute;
-            bottom: -5px;
-            text-align: center;
-            width: 100%;
-        }
-
-        .gauge-number {
-            font-family: var(--font-mono);
-            font-size: 24px;
-            font-weight: 700;
-            color: var(--text-primary);
-            line-height: 1;
-            text-shadow: 0 0 10px rgba(255,255,255,0.1);
-        }
-
-        .gauge-label {
-            font-family: var(--font-mono);
-            font-size: 10px;
-            color: var(--text-secondary);
-            letter-spacing: 1px;
-            margin-top: 4px;
-        }
-
-        .mc-pipeline {
-            display: flex;
-            align-items: center;
-            justify-content: space-between;
-            position: relative;
-            z-index: 1;
-            background: rgba(0,0,0,0.2);
-            padding: 16px;
-            border-radius: 8px;
-            border: 1px solid var(--border-color);
-            overflow-x: auto;
-        }
-
-        .pipe-stage {
-            display: flex;
-            flex-direction: column;
-            align-items: center;
-            min-width: 80px;
-            opacity: 0.4;
-            transition: opacity 0.3s, text-shadow 0.3s;
-        }
-
-        .pipe-stage.active {
-            opacity: 1;
-        }
-
-        .pipe-stage.active .stage-count {
-            color: var(--accent);
-            text-shadow: 0 0 8px rgba(0, 212, 255, 0.5);
-        }
-
-        .stage-count {
-            font-family: var(--font-mono);
-            font-size: 20px;
-            font-weight: 700;
-            color: var(--text-secondary);
-            transition: color 0.3s;
-        }
-
-        .stage-label {
-            font-family: var(--font-mono);
-            font-size: 9px;
-            color: var(--text-secondary);
-            letter-spacing: 1px;
-            margin-top: 4px;
-            text-align: center;
-        }
-
-        .pipe-conn {
-            flex: 1;
-            height: 2px;
-            background: var(--border-color);
-            margin: 0 8px;
-            position: relative;
-            overflow: hidden;
-            min-width: 20px;
-        }
-
-        .pipe-flow {
-            position: absolute;
-            top: 0; left: 0; bottom: 0;
-            width: 50%;
-            background: linear-gradient(90deg, transparent, var(--accent), transparent);
-            opacity: 0;
-        }
-
-        .pipe-conn.active .pipe-flow {
-            opacity: 1;
-            animation: flowAnim 1.5s linear infinite;
-        }
-
-        @keyframes flowAnim {
-            0% { transform: translateX(-100%); }
-            100% { transform: translateX(200%); }
-        }
-
-        .mc-agents {
-            display: flex;
-            gap: 12px;
-            flex-wrap: wrap;
-            position: relative;
-            z-index: 1;
-            min-height: 40px;
-        }
-
-        .agent-tile {
-            background: rgba(0,0,0,0.3);
-            border: 1px solid var(--border-color);
-            border-radius: 4px;
-            padding: 8px 12px;
-            display: flex;
-            align-items: center;
-            gap: 12px;
-            font-family: var(--font-mono);
-        }
-
-        .agent-tile.running {
-            border-color: rgba(0, 255, 136, 0.3);
-        }
-
-        .agent-tile.failed {
-            border-color: rgba(255, 68, 68, 0.3);
-        }
-
-        .agent-status-icon {
-            width: 12px;
-            height: 12px;
-            border-radius: 50%;
-            flex-shrink: 0;
-            display: flex;
-            align-items: center;
-            justify-content: center;
-            font-size: 8px;
-            color: var(--bg-main);
-            font-weight: bold;
-        }
-
-        .agent-tile.running .agent-status-icon {
-            background: var(--status-active);
-            box-shadow: 0 0 8px var(--status-active);
-            animation: pulse 2s infinite;
-        }
-
-        .agent-tile.completed .agent-status-icon {
-            background: var(--status-done);
-        }
-        .agent-tile.completed .agent-status-icon::after {
-            content: '✓';
-            color: var(--bg-main);
-        }
-
-        .agent-tile.failed .agent-status-icon {
-            background: var(--status-error);
-            box-shadow: 0 0 8px var(--status-error);
-        }
-        .agent-tile.failed .agent-status-icon::after {
-            content: '✕';
-            color: var(--bg-main);
-        }
-
-        @keyframes pulse {
-            0% { opacity: 1; }
-            50% { opacity: 0.4; }
-            100% { opacity: 1; }
-        }
-
-        .agent-repo {
-            font-size: 11px;
-            color: var(--text-primary);
-            font-weight: 600;
-        }
-
-        .agent-time {
-            font-size: 10px;
-            color: var(--text-secondary);
-        }
-
-        /* Top Bar */
-        .top-bar {
+        /* Header Bar */
+        .header-bar {
             display: flex;
             justify-content: space-between;
             align-items: center;
-            padding: 16px 24px;
+            padding: 12px 24px;
             border-bottom: 1px solid var(--border-color);
             background-color: var(--bg-main);
             z-index: 10;
+            flex-shrink: 0;
         }
 
         .title-area {
@@ -348,6 +93,29 @@
             font-family: var(--font-mono);
             font-size: 11px;
             color: var(--text-secondary);
+        }
+
+        .metrics-chips {
+            display: flex;
+            gap: 12px;
+            align-items: center;
+        }
+
+        .metric-chip {
+            font-family: var(--font-mono);
+            font-size: 12px;
+            color: var(--text-primary);
+            background: rgba(255, 255, 255, 0.03);
+            border: 1px solid var(--border-color);
+            padding: 4px 10px;
+            border-radius: 4px;
+            display: flex;
+            align-items: center;
+            gap: 6px;
+        }
+
+        .chip-icon {
+            font-size: 10px;
         }
 
         .controls {
@@ -414,107 +182,495 @@
             border-color: var(--accent);
         }
 
-        /* Main Area */
-        .main-area {
-            flex: 1;
-            overflow-y: auto;
-            padding: 24px;
-            display: flex;
-            justify-content: center;
-        }
-
-        .task-list {
-            width: 100%;
-            max-width: 900px;
-            display: flex;
-            flex-direction: column;
-            gap: 12px;
-        }
-
-        /* Task Card */
-        .task-card {
-            background-color: var(--bg-card);
-            border: 1px solid var(--border-color);
-            border-radius: 6px;
-            padding: 16px;
-            cursor: pointer;
-            transition: all 150ms ease;
-            display: flex;
-            flex-direction: column;
-            gap: 12px;
-            position: relative;
-        }
-
-        .task-card:hover {
-            border-color: var(--accent);
-            box-shadow: 0 0 8px rgba(0, 212, 255, 0.1);
-        }
-
-        .task-card.child-task {
-            margin-left: 32px;
-            position: relative;
-        }
-
-        .task-card.child-task::before {
-            content: '';
-            position: absolute;
-            left: -20px;
-            top: 24px;
-            width: 20px;
-            height: 1px;
-            background-color: var(--border-color);
-        }
-
-        .task-card.child-task::after {
-            content: '';
-            position: absolute;
-            left: -20px;
-            top: -24px;
-            width: 1px;
-            height: 48px;
-            background-color: var(--border-color);
-        }
-
-        .card-header {
-            display: flex;
-            justify-content: space-between;
-            align-items: flex-start;
-            gap: 16px;
-        }
-
-        .card-title-area {
+        /* Pipeline Bar */
+        .pipeline-bar {
             display: flex;
             align-items: center;
-            gap: 12px;
-            flex: 1;
-            min-width: 0;
+            justify-content: space-between;
+            padding: 16px 24px;
+            background: var(--bg-card);
+            border-bottom: 1px solid var(--border-color);
+            flex-shrink: 0;
+            position: relative;
+            overflow-x: auto;
         }
 
-        .priority-dot {
+        .pipe-stage {
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            min-width: 80px;
+            opacity: 0.3;
+            transition: opacity 0.3s, text-shadow 0.3s;
+        }
+
+        .pipe-stage.active {
+            opacity: 1;
+        }
+
+        .pipe-stage.active .stage-count {
+            color: var(--stage-color);
+            text-shadow: 0 0 8px var(--stage-color);
+        }
+
+        .stage-count {
+            font-family: var(--font-mono);
+            font-size: 20px;
+            font-weight: 700;
+            color: var(--text-secondary);
+            transition: color 0.3s;
+        }
+
+        .stage-label {
+            font-family: var(--font-mono);
+            font-size: 10px;
+            color: var(--text-secondary);
+            letter-spacing: 1px;
+            margin-top: 4px;
+            text-align: center;
+        }
+
+        .pipe-conn {
+            flex: 1;
+            height: 2px;
+            background: var(--border-color);
+            margin: 0 12px;
+            position: relative;
+            overflow: hidden;
+            min-width: 20px;
+        }
+
+        .pipe-flow {
+            position: absolute;
+            top: 0; left: 0; bottom: 0;
+            width: 50%;
+            background: linear-gradient(90deg, transparent, var(--stage-color), transparent);
+            opacity: 0;
+        }
+
+        .pipe-conn.active .pipe-flow {
+            opacity: 1;
+            animation: flowAnim 1.5s linear infinite;
+        }
+
+        @keyframes flowAnim {
+            0% { transform: translateX(-100%); }
+            100% { transform: translateX(200%); }
+        }
+
+        .pipe-stage.stage-swarm {
+            min-width: 180px;
+            background: rgba(0, 255, 136, 0.03);
+            border-radius: 8px;
+            padding: 8px 0;
+            border: 1px solid rgba(0, 255, 136, 0.1);
+        }
+
+        .swarm-dots {
+            display: flex;
+            gap: 4px;
+            justify-content: center;
+            flex-wrap: wrap;
+            margin-top: 8px;
+            min-height: 12px;
+            width: 100%;
+            padding: 0 8px;
+        }
+
+        .swarm-dot {
             width: 8px;
             height: 8px;
             border-radius: 50%;
+            animation: floatDot 3s ease-in-out infinite;
+        }
+
+        .swarm-dot.running {
+            background: var(--status-active);
+            box-shadow: 0 0 6px var(--status-active);
+            animation: floatDot 3s ease-in-out infinite, pulseDot 2s infinite;
+        }
+
+        .swarm-dot.completed {
+            background: var(--status-done);
+        }
+
+        .swarm-dot.failed {
+            background: var(--status-error);
+            box-shadow: 0 0 6px var(--status-error);
+            animation: floatDot 3s ease-in-out infinite, pulseDot 2s infinite;
+        }
+
+        @keyframes floatDot {
+            0%, 100% { transform: translateY(0); }
+            50% { transform: translateY(-3px); }
+        }
+
+        @keyframes pulseDot {
+            0% { opacity: 1; }
+            50% { opacity: 0.5; }
+            100% { opacity: 1; }
+        }
+
+        /* Telemetry Strip */
+        .telemetry-strip {
+            display: flex;
+            gap: 1px;
+            background: var(--border-color);
+            border-bottom: 1px solid var(--border-color);
             flex-shrink: 0;
         }
 
-        .priority-dot.urgent { background-color: var(--priority-urgent); box-shadow: 0 0 4px var(--priority-urgent); }
-        .priority-dot.high { background-color: var(--priority-high); }
-        .priority-dot.normal { background-color: var(--priority-normal); border: 1px solid var(--text-secondary); }
-        .priority-dot.low { background-color: var(--priority-low); }
+        .telemetry-module {
+            flex: 1;
+            background: var(--bg-card);
+            padding: 10px 14px;
+            display: flex;
+            flex-direction: column;
+            overflow: hidden;
+        }
 
-        .card-title {
-            font-weight: 600;
-            font-size: 15px;
+        .telemetry-title {
+            font-family: var(--font-mono);
+            font-size: 9px;
+            color: rgba(255,255,255,0.3);
+            letter-spacing: 1px;
+            text-transform: uppercase;
+            margin-bottom: 6px;
+        }
+
+        .telemetry-value {
+            font-family: var(--font-mono);
+            font-size: 12px;
+            color: var(--text-primary);
+        }
+
+        .telemetry-bar-container {
+            height: 2px;
+            background: rgba(255, 255, 255, 0.04);
+            margin-top: 4px;
+            margin-bottom: 4px;
+            overflow: hidden;
+        }
+
+        .telemetry-bar-fill {
+            height: 100%;
+            transition: width 0.3s ease, background-color 0.3s ease;
+        }
+
+        .telemetry-bar-fill.green { background: #22c55e; }
+        .telemetry-bar-fill.amber { background: #f59e0b; }
+        .telemetry-bar-fill.red { background: #ef4444; }
+
+        .telemetry-agent-row {
+            display: flex;
+            align-items: center;
+            gap: 6px;
+            font-family: var(--font-mono);
+            font-size: 10px;
+            color: var(--text-secondary);
+            margin-bottom: 2px;
             white-space: nowrap;
             overflow: hidden;
             text-overflow: ellipsis;
         }
 
-        .card-meta {
+        .telemetry-agent-dot {
+            width: 6px;
+            height: 6px;
+            border-radius: 50%;
+            background: var(--status-active);
+            box-shadow: 0 0 4px var(--status-active);
+            animation: pulseDot 2s infinite;
+            flex-shrink: 0;
+        }
+
+        .telemetry-system-row {
+            display: flex;
+            align-items: center;
+            gap: 8px;
+            margin-bottom: 4px;
+        }
+
+        .telemetry-system-label {
+            font-family: var(--font-mono);
+            font-size: 10px;
+            color: var(--text-secondary);
+            width: 24px;
+        }
+
+        .telemetry-system-val {
+            font-family: var(--font-mono);
+            font-size: 10px;
+            color: var(--text-primary);
+            width: 60px;
+            text-align: right;
+        }
+
+        .telemetry-system-bar {
+            flex: 1;
+            height: 2px;
+            background: rgba(255, 255, 255, 0.04);
+            overflow: hidden;
+        }
+
+        .telemetry-ticker {
+            display: flex;
+            gap: 8px;
+            font-family: var(--font-mono);
+            font-size: 11px;
+            color: var(--text-secondary);
+            white-space: nowrap;
+            overflow: hidden;
+            text-overflow: ellipsis;
+            opacity: 0.7;
+        }
+
+        .telemetry-ticker-time {
+            color: rgba(255,255,255,0.3);
+        }
+
+        /* Main Area & Task Cards */
+        .main-area {
+            flex: 1;
+            overflow-y: auto;
+            background: var(--bg-main);
+            position: relative;
+        }
+
+        .mc-bg-effects {
+            position: absolute;
+            top: 0; left: 0; right: 0; bottom: 0;
+            pointer-events: none;
+            background: 
+                linear-gradient(rgba(18, 18, 26, 0) 50%, rgba(0, 0, 0, 0.25) 50%), 
+                linear-gradient(90deg, rgba(255, 255, 255, 0.02) 1px, transparent 1px),
+                linear-gradient(rgba(255, 255, 255, 0.02) 1px, transparent 1px);
+            background-size: 100% 4px, 20px 20px, 20px 20px;
+            z-index: 0;
+        }
+
+        .task-list {
+            display: grid;
+            grid-template-columns: repeat(auto-fill, minmax(340px, 1fr));
+            grid-auto-rows: 1fr;
+            gap: 12px;
+            padding: 16px 24px;
+            position: relative;
+            z-index: 1;
+        }
+
+        .task-card {
+            background: var(--bg-card);
+            border: 1px solid var(--border-color);
+            border-left: 3px solid var(--card-status-color, var(--border-color));
+            border-radius: 6px;
+            box-shadow: 0 1px 3px rgba(0,0,0,0.3);
+            display: flex;
+            flex-direction: column;
+            transition: border-color 150ms ease, background-color 150ms ease;
+            overflow: hidden;
+        }
+
+        .task-card.priority-urgent {
+            border-color: rgba(239, 68, 68, 0.3);
+            animation: urgentPulse 3s ease-in-out infinite;
+        }
+
+        @keyframes urgentPulse {
+            0%, 100% { box-shadow: 0 1px 3px rgba(0,0,0,0.3), 0 0 0 0 rgba(239, 68, 68, 0); }
+            50% { box-shadow: 0 1px 3px rgba(0,0,0,0.3), 0 0 8px 1px rgba(239, 68, 68, 0.15); }
+        }
+
+        .task-card.priority-high {
+            border-color: rgba(249, 115, 22, 0.2);
+        }
+
+        .task-card:hover {
+            border-color: rgba(255, 255, 255, 0.08);
+            background: rgba(255, 255, 255, 0.02);
+        }
+
+        .card-header {
+            padding: 12px 14px;
+            cursor: pointer;
+            display: flex;
+            flex-direction: column;
+            gap: 8px;
+            flex: 1;
+            justify-content: space-between;
+        }
+
+        .card-top {
+            display: flex;
+            align-items: flex-start;
+            gap: 10px;
+        }
+
+        .card-expand-icon {
+            width: 16px;
+            height: 16px;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            color: var(--text-secondary);
+            font-size: 10px;
+            transition: transform 0.2s ease;
+            flex-shrink: 0;
+            margin-top: 1px;
+        }
+
+        .task-card.expanded .card-expand-icon {
+            transform: rotate(180deg);
+        }
+
+        .card-priority {
+            width: 8px;
+            height: 8px;
+            border-radius: 50%;
+            flex-shrink: 0;
+            margin-top: 5px;
+        }
+
+        .card-priority.urgent { background-color: var(--priority-urgent); box-shadow: 0 0 4px var(--priority-urgent); }
+        .card-priority.high { background-color: var(--priority-high); }
+        .card-priority.normal { background-color: var(--priority-normal); border: 1px solid var(--text-secondary); }
+        .card-priority.low { background-color: var(--priority-low); }
+
+        .card-title {
+            flex: 1;
+            font-size: 14px;
+            font-weight: 500;
+            line-height: 1.3;
+            transition: color 150ms ease;
+            display: -webkit-box;
+            -webkit-line-clamp: 2;
+            -webkit-box-orient: vertical;
+            overflow: hidden;
+        }
+        
+        .card-title:hover {
+            color: var(--accent);
+        }
+
+        .card-subtitle {
+            display: flex;
+            align-items: center;
+            gap: 10px;
+            padding-left: 26px;
+        }
+
+        .card-time {
+            font-family: var(--font-mono);
+            font-size: 11px;
+            color: var(--text-secondary);
+        }
+
+        .subtask-chips {
+            display: flex;
+            flex-wrap: wrap;
+            gap: 8px;
+            padding-left: 26px;
+            margin-top: 4px;
+        }
+
+        .subtask-chip {
+            display: flex;
+            align-items: center;
+            gap: 6px;
+            background: rgba(255, 255, 255, 0.03);
+            border: 1px solid var(--border-color);
+            padding: 2px 8px;
+            border-radius: 12px;
+            font-family: var(--font-mono);
+            font-size: 10px;
+            color: var(--text-secondary);
+        }
+
+        .chip-status-dot {
+            width: 6px;
+            height: 6px;
+            border-radius: 50%;
+        }
+
+        .chip-duration {
+            color: #555;
+            font-size: 9px;
+        }
+
+        .subtask-duration {
+            font-family: var(--font-mono);
+            font-size: 11px;
+            color: var(--text-secondary);
+            white-space: nowrap;
+        }
+
+        .subtask-duration.active {
+            color: var(--status-active);
+        }
+
+        .subtask-duration.active::before {
+            content: '';
+            display: inline-block;
+            width: 5px;
+            height: 5px;
+            border-radius: 50%;
+            background: var(--status-active);
+            margin-right: 4px;
+            animation: pulseDot 2s infinite;
+        }
+
+        .subtask-details {
+            display: grid;
+            grid-template-rows: 0fr;
+            transition: grid-template-rows 0.3s ease;
+            background: rgba(0, 0, 0, 0.2);
+            border-top: 1px solid transparent;
+        }
+
+        .task-card.expanded .subtask-details {
+            grid-template-rows: 1fr;
+            border-top-color: var(--border-color);
+        }
+
+        .subtask-details-inner {
+            min-height: 0;
+            overflow: hidden;
+            display: flex;
+            flex-direction: column;
+            gap: 8px;
+            padding: 0 16px 0 42px;
+            transition: padding 0.3s ease;
+        }
+        
+        .task-card.expanded .subtask-details-inner {
+            padding: 12px 16px 16px 42px;
+        }
+
+        .subtask-entry {
             display: flex;
             align-items: center;
             gap: 12px;
-            flex-shrink: 0;
+            padding: 10px 14px;
+            background: rgba(255, 255, 255, 0.02);
+            border: 1px solid var(--border-color);
+            border-radius: 4px;
+            cursor: pointer;
+            transition: border-color 150ms ease, background-color 150ms ease;
+        }
+
+        .subtask-entry:hover {
+            border-color: rgba(255, 255, 255, 0.1);
+            background: rgba(255, 255, 255, 0.04);
+        }
+
+        .subtask-repo {
+            font-family: var(--font-mono);
+            font-size: 12px;
+            color: var(--accent);
+            flex: 1;
+            white-space: nowrap;
+            overflow: hidden;
+            text-overflow: ellipsis;
         }
 
         .badge {
@@ -533,6 +689,8 @@
         .badge-status.assigned { background: rgba(6, 182, 212, 0.15); color: var(--status-assigned); border: 1px solid rgba(6, 182, 212, 0.3); }
         .badge-status.done { background: rgba(107, 114, 128, 0.15); color: var(--status-done); border: 1px solid rgba(107, 114, 128, 0.3); }
         .badge-status.failed { background: rgba(239, 68, 68, 0.15); color: var(--status-failed); border: 1px solid rgba(239, 68, 68, 0.3); }
+        .badge-status.testing { background: rgba(167, 139, 250, 0.15); color: var(--status-testing); border: 1px solid rgba(167, 139, 250, 0.3); }
+        .badge-status.review { background: rgba(129, 140, 248, 0.15); color: var(--status-review); border: 1px solid rgba(129, 140, 248, 0.3); }
 
         .badge-source {
             background: var(--bg-main);
@@ -549,42 +707,74 @@
             color: var(--text-primary);
         }
 
-        .card-footer {
+        .agent-badge {
             display: flex;
-            justify-content: space-between;
             align-items: center;
+            gap: 6px;
+            font-family: var(--font-mono);
+            font-size: 10px;
+            color: var(--text-secondary);
+            background: rgba(255, 255, 255, 0.03);
+            border: 1px solid var(--border-color);
+            padding: 2px 6px;
+            border-radius: 4px;
+            flex-shrink: 0;
         }
 
-        .tags {
+        .agent-dot {
+            width: 6px;
+            height: 6px;
+            border-radius: 50%;
+        }
+
+        .agent-dot.running {
+            background: var(--status-active);
+            box-shadow: 0 0 4px var(--status-active);
+            animation: pulseDot 2s infinite;
+        }
+
+        .agent-dot.completed {
+            background: var(--status-done);
+        }
+
+        .agent-dot.failed {
+            background: var(--status-error);
+            box-shadow: 0 0 4px var(--status-error);
+        }
+
+        /* Card Milestone — mission control telemetry bar */
+        .card-milestone {
+            margin-top: auto;
+            padding-top: 10px;
             display: flex;
+            align-items: center;
             gap: 8px;
         }
 
-        .tag {
-            font-family: var(--font-mono);
-            font-size: 11px;
-            color: var(--text-secondary);
-            background: rgba(255, 255, 255, 0.05);
-            padding: 2px 6px;
-            border-radius: 4px;
+        .milestone-bar {
+            flex: 1;
+            height: 2px;
+            background: rgba(255, 255, 255, 0.04);
+            overflow: hidden;
         }
 
-        .time-ago {
-            font-family: var(--font-mono);
-            font-size: 11px;
-            color: var(--text-secondary);
+        .milestone-bar-fill {
+            height: 100%;
+            background: rgba(255, 255, 255, 0.18);
+            transition: width 0.3s ease;
         }
 
-        .child-count {
-            display: flex;
-            align-items: center;
-            gap: 4px;
+        .milestone-bar-fill.active {
+            background: rgba(255, 255, 255, 0.25);
+            box-shadow: 0 0 4px rgba(255, 255, 255, 0.06);
+        }
+
+        .milestone-pct {
             font-family: var(--font-mono);
-            font-size: 11px;
-            color: var(--text-secondary);
-            background: rgba(255, 255, 255, 0.05);
-            padding: 2px 6px;
-            border-radius: 4px;
+            font-size: 9px;
+            color: rgba(255, 255, 255, 0.3);
+            flex-shrink: 0;
+            letter-spacing: 0.5px;
         }
 
         /* Drawer */
@@ -724,6 +914,10 @@
             display: flex;
             flex-direction: column;
             gap: 16px;
+        }
+
+        .triage-qa.collapsed {
+            display: none;
         }
 
         .qa-item {
@@ -871,12 +1065,57 @@
             background: rgba(245, 158, 11, 0.1);
         }
 
+        .btn-show-more {
+            background: transparent;
+            border: none;
+            color: var(--text-secondary);
+            font-family: var(--font-mono);
+            font-size: 11px;
+            cursor: pointer;
+            padding: 8px 0;
+            width: 100%;
+            text-align: left;
+            transition: color 150ms ease;
+        }
+
+        .btn-show-more:hover {
+            color: var(--text-primary);
+        }
+
         /* Add Note */
         .drawer-footer {
             padding: 16px 24px;
             border-top: 1px solid var(--border-color);
             background-color: var(--bg-drawer);
         }
+
+        .priority-picker {
+            display: flex;
+            gap: 4px;
+        }
+
+        .priority-opt {
+            background: transparent;
+            border: 1px solid var(--border-color);
+            color: var(--text-secondary);
+            padding: 2px 8px;
+            border-radius: 4px;
+            font-family: var(--font-mono);
+            font-size: 10px;
+            font-weight: 500;
+            cursor: pointer;
+            transition: all 150ms ease;
+        }
+
+        .priority-opt:hover {
+            border-color: var(--text-secondary);
+            color: var(--text-primary);
+        }
+
+        .priority-opt.active.urgent { background: rgba(239, 68, 68, 0.15); border-color: var(--priority-urgent); color: var(--priority-urgent); }
+        .priority-opt.active.high { background: rgba(249, 115, 22, 0.15); border-color: var(--priority-high); color: var(--priority-high); }
+        .priority-opt.active.normal { background: rgba(255, 255, 255, 0.05); border-color: var(--text-secondary); color: var(--text-primary); }
+        .priority-opt.active.low { background: rgba(107, 114, 128, 0.15); border-color: var(--priority-low); color: var(--priority-low); }
 
         .add-note-container {
             display: flex;
@@ -922,14 +1161,255 @@
             opacity: 0.5;
             cursor: not-allowed;
         }
+
+        /* Process Graph */
+        .process-graph-panel {
+            padding: 0 24px 24px 24px;
+            position: relative;
+            z-index: 1;
+        }
+
+        .process-graph-header {
+            margin-bottom: 16px;
+        }
+
+        .process-graph-content {
+            display: flex;
+            flex-direction: column;
+            gap: 16px;
+            overflow-x: auto;
+            padding-bottom: 16px;
+            transition: all 0.3s ease;
+        }
+
+        .process-graph-content.collapsed {
+            display: none;
+        }
+
+        .pg-row {
+            display: flex;
+            align-items: center;
+        }
+
+        .pg-root-wrapper {
+            position: relative;
+            display: flex;
+            align-items: center;
+        }
+
+        .pg-root-wrapper.has-children::after {
+            content: '';
+            position: absolute;
+            right: -20px;
+            top: 50%;
+            width: 20px;
+            height: 1px;
+            background: rgba(255, 255, 255, 0.15);
+        }
+
+        .pg-children {
+            display: flex;
+            flex-direction: column;
+            margin-left: 20px;
+        }
+
+        .pg-child-wrapper {
+            position: relative;
+            padding-left: 20px;
+            padding-top: 6px;
+            padding-bottom: 6px;
+            display: flex;
+            align-items: center;
+        }
+
+        .pg-child-wrapper::before {
+            content: '';
+            position: absolute;
+            left: 0;
+            top: 50%;
+            width: 20px;
+            height: 1px;
+            background: rgba(255, 255, 255, 0.15);
+        }
+
+        .pg-child-wrapper::after {
+            content: '';
+            position: absolute;
+            left: 0;
+            top: 0;
+            bottom: 0;
+            width: 1px;
+            background: rgba(255, 255, 255, 0.15);
+        }
+
+        .pg-child-wrapper:first-child::after {
+            top: 50%;
+        }
+
+        .pg-child-wrapper:last-child::after {
+            bottom: 50%;
+        }
+
+        .pg-child-wrapper:first-child:last-child::after {
+            display: none;
+        }
+
+        .pg-node {
+            background: var(--bg-card);
+            border: 1px solid var(--border-color);
+            border-left: 3px solid var(--node-color, var(--border-color));
+            border-radius: 6px;
+            padding: 10px 14px;
+            display: flex;
+            flex-direction: column;
+            gap: 8px;
+            cursor: pointer;
+            transition: border-color 150ms ease, background-color 150ms ease;
+            width: 280px;
+            box-shadow: 0 1px 3px rgba(0,0,0,0.3);
+        }
+
+        .pg-node:hover {
+            border-color: rgba(255, 255, 255, 0.08);
+            background: rgba(255, 255, 255, 0.02);
+        }
+
+        .pg-node-top {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            gap: 8px;
+        }
+
+        .pg-node-title {
+            font-family: var(--font-mono);
+            font-size: 12px;
+            font-weight: 600;
+            color: var(--text-primary);
+            white-space: nowrap;
+            overflow: hidden;
+            text-overflow: ellipsis;
+            flex: 1;
+        }
+
+        .pg-node-bottom {
+            display: flex;
+            align-items: center;
+            gap: 8px;
+            flex-wrap: wrap;
+        }
+
+        .pg-timeline {
+            display: flex;
+            align-items: flex-start;
+            gap: 0;
+            margin-left: 12px;
+            flex: 1;
+            overflow-x: auto;
+        }
+
+        .pg-tl-step {
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            gap: 3px;
+            padding: 6px 10px;
+            min-width: 70px;
+        }
+
+        .pg-tl-dot {
+            width: 6px;
+            height: 6px;
+            border-radius: 50%;
+        }
+
+        .pg-tl-step.prompt .pg-tl-dot { background: var(--accent); color: var(--accent); }
+        .pg-tl-step.spawn .pg-tl-dot { background: var(--status-in_progress); color: var(--status-in_progress); }
+        .pg-tl-step.review-pass .pg-tl-dot { background: var(--accent); color: var(--accent); }
+        .pg-tl-step.review-fail .pg-tl-dot { background: var(--priority-high); color: var(--priority-high); }
+        .pg-tl-step.feedback .pg-tl-dot { background: var(--status-planning); color: var(--status-planning); }
+        .pg-tl-step.iterate .pg-tl-dot { background: var(--status-review); color: var(--status-review); }
+        .pg-tl-step.relaunch .pg-tl-dot { background: var(--status-review); color: var(--status-review); }
+        .pg-tl-step.complete .pg-tl-dot { background: var(--status-done); color: var(--status-done); }
+        .pg-tl-step.respawn .pg-tl-dot { background: var(--status-failed); color: var(--status-failed); }
+        .pg-tl-step.approved .pg-tl-dot { background: var(--status-done); color: var(--status-done); }
+        .pg-tl-step.done .pg-tl-dot { background: var(--accent); color: var(--accent); }
+
+        .pg-tl-label {
+            font-family: var(--font-mono);
+            font-size: 9px;
+            color: rgba(255,255,255,0.5);
+            white-space: nowrap;
+            font-weight: 600;
+        }
+
+        .pg-tl-agent {
+            font-family: var(--font-mono);
+            font-size: 9px;
+            color: rgba(255,255,255,0.3);
+            text-transform: uppercase;
+        }
+
+        .pg-tl-time {
+            font-family: var(--font-mono);
+            font-size: 8px;
+            color: rgba(255,255,255,0.2);
+        }
+
+        .pg-tl-conn {
+            width: 16px;
+            height: 1px;
+            background: rgba(255,255,255,0.15);
+            margin-top: 9px;
+            flex-shrink: 0;
+        }
+
+        .pg-tl-step.milestone .pg-tl-dot {
+            width: 8px;
+            height: 8px;
+            box-shadow: 0 0 6px currentColor;
+        }
+
+        .pg-tl-step:last-child .pg-tl-dot.pulse-dot {
+            animation: pulseDot 2s infinite;
+            box-shadow: 0 0 4px currentColor;
+        }
+
+        .prompt-content, .description {
+            transition: max-height 0.3s ease;
+        }
+
+        .prompt-content.collapsed, .description.collapsed {
+            max-height: 42px;
+            overflow: hidden;
+            cursor: pointer;
+            -webkit-mask-image: linear-gradient(to bottom, black 50%, transparent 100%);
+            mask-image: linear-gradient(to bottom, black 50%, transparent 100%);
+        }
+
+        .pg-tl-step.pending .pg-tl-label {
+            color: rgba(255,255,255,0.7);
+            letter-spacing: 0.5px;
+        }
+
+        .pg-tl-step.pending .pg-tl-time {
+            color: rgba(255,255,255,0.35);
+            font-style: italic;
+        }
     </style>
 </head>
 <body>
 
-    <div class="top-bar">
+    <div class="header-bar">
         <div class="title-area">
             <div class="title">MISSION CONTROL</div>
             <div class="last-updated" id="last-updated">Last updated: --</div>
+        </div>
+        <div class="metrics-chips">
+            <div class="metric-chip"><span class="chip-icon" style="color: var(--accent)">■</span> <span id="chip-tasks-val">0</span> TASKS</div>
+            <div class="metric-chip"><span class="chip-icon" style="color: var(--status-active)">●</span> <span id="chip-agents-val">0</span> AGENTS</div>
+            <div class="metric-chip"><span class="chip-icon" style="color: var(--status-planning)">▲</span> <span id="chip-triage-val">0</span> TRIAGE</div>
+            <div class="metric-chip"><span class="chip-icon" style="color: var(--text-secondary)">⏱</span> <span id="chip-uptime-val">00:00:00</span></div>
         </div>
         <div class="controls">
             <div class="filters" id="filters">
@@ -944,111 +1424,64 @@
         </div>
     </div>
 
-    <div class="mc-panel" id="mc-panel">
-        <div class="mc-toggle" id="mc-toggle">▼ MISSION CONTROL</div>
-        <div class="mc-content" id="mc-content">
-            <div class="mc-bg-effects"></div>
-            
-            <!-- Gauges -->
-            <div class="mc-gauges">
-                <div class="mc-gauge">
-                    <svg viewBox="0 0 100 50" class="gauge-svg">
-                        <path d="M 10 50 A 40 40 0 0 1 90 50" fill="none" stroke="var(--border-color)" stroke-width="8" stroke-linecap="round" />
-                        <path id="gauge-tasks-arc" d="M 10 50 A 40 40 0 0 1 90 50" fill="none" stroke="var(--accent)" stroke-width="8" stroke-linecap="round" stroke-dasharray="125.6" stroke-dashoffset="125.6" style="transition: stroke-dashoffset 0.5s ease;" />
-                    </svg>
-                    <div class="gauge-data">
-                        <div class="gauge-number" id="gauge-tasks-val">0</div>
-                        <div class="gauge-label">TASKS</div>
-                    </div>
-                </div>
-                <div class="mc-gauge">
-                    <svg viewBox="0 0 100 50" class="gauge-svg">
-                        <path d="M 10 50 A 40 40 0 0 1 90 50" fill="none" stroke="var(--border-color)" stroke-width="8" stroke-linecap="round" />
-                        <path id="gauge-agents-arc" d="M 10 50 A 40 40 0 0 1 90 50" fill="none" stroke="var(--status-active)" stroke-width="8" stroke-linecap="round" stroke-dasharray="125.6" stroke-dashoffset="125.6" style="transition: stroke-dashoffset 0.5s ease;" />
-                    </svg>
-                    <div class="gauge-data">
-                        <div class="gauge-number" id="gauge-agents-val">0</div>
-                        <div class="gauge-label">AGENTS</div>
-                    </div>
-                </div>
-                <div class="mc-gauge">
-                    <svg viewBox="0 0 100 50" class="gauge-svg">
-                        <path d="M 10 50 A 40 40 0 0 1 90 50" fill="none" stroke="var(--border-color)" stroke-width="8" stroke-linecap="round" />
-                        <path id="gauge-triage-arc" d="M 10 50 A 40 40 0 0 1 90 50" fill="none" stroke="var(--status-planning)" stroke-width="8" stroke-linecap="round" stroke-dasharray="125.6" stroke-dashoffset="125.6" style="transition: stroke-dashoffset 0.5s ease;" />
-                    </svg>
-                    <div class="gauge-data">
-                        <div class="gauge-number" id="gauge-triage-val">0</div>
-                        <div class="gauge-label">TRIAGE</div>
-                    </div>
-                </div>
-                <div class="mc-gauge">
-                    <svg viewBox="0 0 100 50" class="gauge-svg">
-                        <path d="M 10 50 A 40 40 0 0 1 90 50" fill="none" stroke="var(--border-color)" stroke-width="8" stroke-linecap="round" />
-                        <path id="gauge-pipeline-arc" d="M 10 50 A 40 40 0 0 1 90 50" fill="none" stroke="var(--status-inbox)" stroke-width="8" stroke-linecap="round" stroke-dasharray="125.6" stroke-dashoffset="125.6" style="transition: stroke-dashoffset 0.5s ease;" />
-                    </svg>
-                    <div class="gauge-data">
-                        <div class="gauge-number" id="gauge-pipeline-val">0</div>
-                        <div class="gauge-label">PIPELINE 24H</div>
-                    </div>
-                </div>
-                <div class="mc-gauge">
-                    <div class="gauge-data" style="margin-top: 15px;">
-                        <div class="gauge-number" id="gauge-uptime-val">00:00:00</div>
-                        <div class="gauge-label">UPTIME</div>
-                    </div>
-                </div>
-            </div>
-
-            <!-- Pipeline Flow -->
-            <div class="mc-pipeline">
-                <div class="pipe-stage" id="stage-sync">
-                    <div class="stage-count">0</div>
-                    <div class="stage-label">LINEAR SYNC</div>
-                </div>
-                <div class="pipe-conn" id="conn-sync-inbox"><div class="pipe-flow"></div></div>
-                <div class="pipe-stage" id="stage-inbox">
-                    <div class="stage-count">0</div>
-                    <div class="stage-label">INBOX</div>
-                </div>
-                <div class="pipe-conn" id="conn-inbox-triage"><div class="pipe-flow"></div></div>
-                <div class="pipe-stage" id="stage-triage">
-                    <div class="stage-count">0</div>
-                    <div class="stage-label">TRIAGE</div>
-                </div>
-                <div class="pipe-conn" id="conn-triage-planning"><div class="pipe-flow"></div></div>
-                <div class="pipe-stage" id="stage-planning">
-                    <div class="stage-count">0</div>
-                    <div class="stage-label">PLANNING</div>
-                </div>
-                <div class="pipe-conn" id="conn-planning-agents"><div class="pipe-flow"></div></div>
-                <div class="pipe-stage" id="stage-agents">
-                    <div class="stage-count">0</div>
-                    <div class="stage-label">AGENTS</div>
-                </div>
-                <div class="pipe-conn" id="conn-agents-inprogress"><div class="pipe-flow"></div></div>
-                <div class="pipe-stage" id="stage-inprogress">
-                    <div class="stage-count">0</div>
-                    <div class="stage-label">IN PROGRESS</div>
-                </div>
-                <div class="pipe-conn" id="conn-inprogress-done"><div class="pipe-flow"></div></div>
-                <div class="pipe-stage" id="stage-done">
-                    <div class="stage-count">0</div>
-                    <div class="stage-label">DONE</div>
-                </div>
-            </div>
-
-            <!-- Agent Status Panel -->
-            <div class="mc-agents" id="mc-agents-container">
-                <!-- Agent tiles injected here -->
-            </div>
+    <div class="pipeline-bar">
+        <div class="pipe-stage" id="stage-intake" style="--stage-color: var(--stage-intake)">
+            <div class="stage-count">0</div>
+            <div class="stage-label">INTAKE</div>
+        </div>
+        <div class="pipe-conn" id="conn-intake-triage" style="--stage-color: var(--stage-intake)"><div class="pipe-flow"></div></div>
+        
+        <div class="pipe-stage" id="stage-triage" style="--stage-color: var(--stage-triage)">
+            <div class="stage-count">0</div>
+            <div class="stage-label">TRIAGE</div>
+        </div>
+        <div class="pipe-conn" id="conn-triage-dispatch" style="--stage-color: var(--stage-triage)"><div class="pipe-flow"></div></div>
+        
+        <div class="pipe-stage" id="stage-dispatch" style="--stage-color: var(--stage-dispatch)">
+            <div class="stage-count">0</div>
+            <div class="stage-label">DISPATCH</div>
+        </div>
+        <div class="pipe-conn" id="conn-dispatch-swarm" style="--stage-color: var(--stage-dispatch)"><div class="pipe-flow"></div></div>
+        
+        <div class="pipe-stage stage-swarm" id="stage-swarm" style="--stage-color: var(--stage-swarm)">
+            <div class="stage-count">0</div>
+            <div class="stage-label">SWARM OPS</div>
+            <div class="swarm-dots" id="swarm-dots"></div>
+        </div>
+        <div class="pipe-conn" id="conn-swarm-review" style="--stage-color: var(--stage-swarm)"><div class="pipe-flow"></div></div>
+        
+        <div class="pipe-stage" id="stage-review" style="--stage-color: var(--stage-review)">
+            <div class="stage-count">0</div>
+            <div class="stage-label">REVIEW</div>
+        </div>
+        <div class="pipe-conn" id="conn-review-complete" style="--stage-color: var(--stage-review)"><div class="pipe-flow"></div></div>
+        
+        <div class="pipe-stage" id="stage-complete" style="--stage-color: var(--stage-complete)">
+            <div class="stage-count">0</div>
+            <div class="stage-label">COMPLETE</div>
         </div>
     </div>
 
+    <div class="telemetry-strip" id="telemetry-strip">
+        <!-- Rendered via JS -->
+    </div>
+
     <div class="main-area">
+        <div class="mc-bg-effects"></div>
         <div class="task-list" id="task-list">
             <div class="loading">
                 <div class="spinner"></div>
                 <div>INITIALIZING TELEMETRY...</div>
+            </div>
+        </div>
+        <div class="process-graph-panel">
+            <div class="process-graph-header" onclick="toggleProcessGraph()">
+                <div class="section-title" style="margin: 0; cursor: pointer;">
+                    PROCESS GRAPH <span id="process-graph-toggle" style="font-size: 10px; opacity: 0.5; margin-left: 4px;">(show)</span>
+                </div>
+            </div>
+            <div class="process-graph-content collapsed" id="process-graph-content">
+                <!-- Graph rendered here -->
             </div>
         </div>
     </div>
@@ -1066,11 +1499,15 @@
         </div>
         <div class="drawer-content">
             <div>
-                <div class="section-title">Description</div>
+                <div class="section-title" style="cursor: pointer;" onclick="const d=document.getElementById('drawer-description');d.classList.toggle('collapsed');document.getElementById('desc-toggle').textContent=d.classList.contains('collapsed')?'(show)':'(hide)'">
+                    Description <span id="desc-toggle" style="font-size: 10px; opacity: 0.5; margin-left: 4px;">(hide)</span>
+                </div>
                 <div class="description" id="drawer-description">--</div>
             </div>
             <div id="drawer-triage-section" style="display: none;">
-                <div class="section-title">Triage State</div>
+                <div class="section-title" style="cursor: pointer;" onclick="const t=document.getElementById('drawer-triage');t.classList.toggle('collapsed');document.getElementById('triage-toggle').textContent=t.classList.contains('collapsed')?'(show)':'(hide)'">
+                    Triage State <span id="triage-toggle" style="font-size: 10px; opacity: 0.5; margin-left: 4px;"></span>
+                </div>
                 <div class="triage-qa" id="drawer-triage">
                     <!-- Triage QA rendered here -->
                 </div>
@@ -1102,12 +1539,23 @@
         let state = {
             tasks: [],
             activities: [],
+            agentStatus: {},
+            systemStats: null,
+            lastEvent: null,
             triageState: null,
             selectedTaskId: null,
             filter: 'all',
             sort: 'newest',
             lastUpdated: null,
-            isDrawerOpen: false
+            isDrawerOpen: false,
+            drawerInitialLoad: false,
+            activityExpanded: false,
+            activityExpandedToggled: false,
+            lastRenderedTasksHtml: '',
+            lastRenderedTelemetryHtml: '',
+            lastActivityCount: 0,
+            lastActivityId: null,
+            childActivities: {}
         };
 
         // Constants
@@ -1155,6 +1603,45 @@
             return seconds + "s ago";
         };
 
+        const TZ = 'America/Los_Angeles';
+
+        const formatStepTime = (dateString) => {
+            if (!dateString) return '';
+            const date = new Date(dateString);
+            const now = new Date();
+            
+            const fmt = { timeZone: TZ };
+            const todayStr = now.toLocaleDateString('en-US', fmt);
+            const dateStr = date.toLocaleDateString('en-US', fmt);
+            const yesterdayDate = new Date(now);
+            yesterdayDate.setDate(yesterdayDate.getDate() - 1);
+            const yesterdayStr = yesterdayDate.toLocaleDateString('en-US', fmt);
+            
+            const timeStr = date.toLocaleTimeString('en-US', { timeZone: TZ, hour: 'numeric', minute: '2-digit', hour12: true }).toLowerCase();
+            
+            if (dateStr === todayStr) return timeStr;
+            if (dateStr === yesterdayStr) return `Yesterday ${timeStr}`;
+            
+            const month = date.toLocaleDateString('en-US', { timeZone: TZ, month: 'short' });
+            const day = date.toLocaleDateString('en-US', { timeZone: TZ, day: 'numeric' });
+            return `${month} ${day} ${timeStr}`;
+        };
+
+        const taskDuration = (task) => {
+            if (!task.created_at) return '';
+            const start = new Date(task.created_at);
+            const isActive = ['in_progress', 'assigned', 'testing'].includes(task.status);
+            const end = isActive ? new Date() : new Date(task.updated_at || task.created_at);
+            const ms = end - start;
+            const mins = Math.floor(ms / 60000);
+            if (mins < 1) return '< 1m';
+            if (mins < 60) return mins + 'm';
+            const hrs = Math.floor(mins / 60);
+            if (hrs < 24) return hrs + 'h ' + (mins % 60) + 'm';
+            const days = Math.floor(hrs / 24);
+            return days + 'd ' + (hrs % 24) + 'h';
+        };
+
         const escapeHtml = (unsafe) => {
             return (unsafe || '').toString()
                 .replace(/&/g, "&amp;")
@@ -1166,12 +1653,18 @@
 
         const parseMarkdown = (text) => {
             if (!text) return '';
-            let html = escapeHtml(text);
-            // Bold
+            const images = [];
+            let clean = text.replace(/!\[([^\]]*)\]\(([^)]+)\)/g, (_, alt, url) => {
+                const idx = images.length;
+                images.push({ alt, url });
+                return `__IMG_${idx}__`;
+            });
+            let html = escapeHtml(clean);
+            images.forEach((img, idx) => {
+                html = html.replace(`__IMG_${idx}__`, `<img src="${img.url}" alt="${escapeHtml(img.alt)}" style="max-width: 100%; border-radius: 4px; margin: 8px 0;">`);
+            });
             html = html.replace(/\*\*(.*?)\*\*/g, '<strong>$1</strong>');
-            // Links
             html = html.replace(/\[([^\]]+)\]\(([^)]+)\)/g, '<a href="$2" target="_blank" rel="noopener noreferrer">$1</a>');
-            // Line breaks
             html = html.replace(/\n/g, '<br>');
             return html;
         };
@@ -1197,17 +1690,67 @@
                 renderFilters();
                 renderTasks();
                 updateMissionControl();
+                renderTelemetryStrip();
             } catch (error) {
                 console.error('Failed to fetch tasks:', error);
                 if (state.tasks.length === 0) {
-                    els.taskList.innerHTML = `<div class="empty-state">CONNECTION FAILED. RETRYING...</div>`;
+                    const errorHtml = `<div class="empty-state">CONNECTION FAILED. RETRYING...</div>`;
+                    if (state.lastRenderedTasksHtml !== errorHtml) {
+                        els.taskList.innerHTML = errorHtml;
+                        state.lastRenderedTasksHtml = errorHtml;
+                    }
                 }
             }
         };
 
+        const fetchAgentStatus = async () => {
+            try {
+                const res = await fetch(getApiUrl('/agent-status'));
+                if (res.ok) {
+                    state.agentStatus = await res.json();
+                    renderTasks();
+                    renderTelemetryStrip();
+                }
+            } catch (error) {
+                console.error('Failed to fetch agent status:', error);
+            }
+        };
+
+        const fetchSystemStats = async () => {
+            try {
+                const res = await fetch(getApiUrl('/system-stats'));
+                if (res.ok) {
+                    state.systemStats = await res.json();
+                    renderTelemetryStrip();
+                }
+            } catch (error) {
+                console.error('Failed to fetch system stats:', error);
+            }
+        };
+
+        const fetchLastEvent = async () => {
+            try {
+                const res = await fetch(getApiUrl('/events?limit=1'));
+                if (res.ok) {
+                    const events = await res.json();
+                    if (events && events.length > 0) {
+                        state.lastEvent = events[0];
+                        renderTelemetryStrip();
+                    }
+                }
+            } catch (error) {
+                console.error('Failed to fetch last event:', error);
+            }
+        };
+
         const fetchTaskDetails = async (taskId) => {
-            els.drawerTimeline.innerHTML = `<div class="loading"><div class="spinner"></div></div>`;
-            els.drawerTriageSection.style.display = 'none';
+            if (state.drawerInitialLoad) {
+                const loadingHtml = `<div class="loading"><div class="spinner"></div></div>`;
+                els.drawerTimeline.innerHTML = loadingHtml;
+                state.lastActivityCount = 0;
+                state.lastActivityId = null;
+                els.drawerTriageSection.style.display = 'none';
+            }
             
             try {
                 const [activitiesRes, triageRes] = await Promise.all([
@@ -1230,13 +1773,294 @@
                 }
 
                 renderDrawerDetails();
+                state.drawerInitialLoad = false;
             } catch (error) {
                 console.error('Failed to fetch task details:', error);
-                els.drawerTimeline.innerHTML = `<div class="empty-state">FAILED TO LOAD TELEMETRY</div>`;
+                if (state.drawerInitialLoad) {
+                    const errorHtml = `<div class="empty-state">FAILED TO LOAD TELEMETRY</div>`;
+                    els.drawerTimeline.innerHTML = errorHtml;
+                    state.lastActivityCount = 0;
+                    state.lastActivityId = null;
+                }
             }
         };
 
+        const fetchChildActivities = async () => {
+            const childIds = state.tasks.filter(t => t.parent_task_id).map(t => t.id);
+            if (childIds.length === 0) return;
+
+            try {
+                const results = await Promise.all(
+                    childIds.map(id => fetch(getApiUrl(`/tasks/${id}/activities`)).then(res => res.ok ? res.json() : []))
+                );
+                
+                childIds.forEach((id, index) => {
+                    state.childActivities[id] = results[index];
+                });
+                
+                renderProcessGraph();
+            } catch (error) {
+                console.error('Failed to fetch child activities:', error);
+            }
+        };
+
+        const parseLifecycleSteps = (activities, childId) => {
+            if (!activities || activities.length === 0) return [];
+            
+            const steps = [];
+            const sorted = [...activities].sort((a, b) => new Date(a.created_at) - new Date(b.created_at));
+            
+            sorted.forEach(act => {
+                const msg = act.message || '';
+                let type = null;
+                let label = null;
+                let agent = null;
+                let isMilestone = false;
+                
+                if (act.activity_type === 'prompt_sent') {
+                    type = 'prompt'; label = 'PROMPT';
+                    agent = state.agentStatus[childId]?.agent || 'system';
+                } else if (msg.includes('Agent spawned for')) {
+                    type = 'spawn'; label = 'SPAWN';
+                    agent = state.agentStatus[childId]?.agent || 'system';
+                } else if (msg.includes('Codex review PASSED')) {
+                    type = 'review-pass'; label = 'REVIEW:PASS';
+                    agent = 'codex';
+                } else if (msg.includes('Codex review cycle') || msg.includes('Codex review found')) {
+                    type = 'review-fail'; label = 'REVIEW:FAIL';
+                    agent = 'codex';
+                } else if (msg.includes('Review found blocking issues')) {
+                    type = 'iterate'; label = 'ITERATE';
+                    agent = 'codex';
+                } else if (msg.includes('Agent respawned')) {
+                    type = 'respawn'; label = 'RESPAWN';
+                    agent = state.agentStatus[childId]?.agent || 'system';
+                } else if (msg.includes('GitHub PR review detected')) {
+                    type = 'feedback'; label = 'PR FEEDBACK';
+                    const match = msg.match(/—\s*([^\s]+)\s*feedback/);
+                    agent = match ? match[1] : 'reviewer';
+                } else if (msg.includes('Change request received')) {
+                    type = 'feedback'; label = 'CHANGE REQ';
+                    agent = 'linear';
+                } else if (msg.includes('CI passed')) {
+                    type = 'complete'; label = 'COMPLETE';
+                    agent = 'system';
+                } else if (msg.includes('Agent relaunched')) {
+                    type = 'relaunch'; label = 'RELAUNCH';
+                    agent = state.agentStatus[childId]?.agent || 'system';
+                } else if (msg.match(/PR #\d+ approved by/)) {
+                    type = 'approved'; label = 'PR APPROVED';
+                    const userMatch = msg.match(/@(\S+)/);
+                    agent = userMatch ? userMatch[1] : 'reviewer';
+                    isMilestone = true;
+                } else if (msg.match(/PR #\d+ changes requested by/)) {
+                    type = 'feedback'; label = 'CHANGES REQ';
+                    const userMatch = msg.match(/@(\S+)/);
+                    agent = userMatch ? userMatch[1] : 'reviewer';
+                } else if (msg.includes('Linear ticket marked')) {
+                    type = 'done'; label = 'LINEAR DONE';
+                    agent = 'linear';
+                    isMilestone = true;
+                }
+                
+                if (type && label) {
+                    steps.push({ type, label, time: act.created_at, msg, agent, isMilestone: isMilestone || false });
+                }
+            });
+            
+            return steps;
+        };
+
         // Rendering
+        const renderTelemetryStrip = () => {
+            const el = document.getElementById('telemetry-strip');
+            if (!el) return;
+
+            // Module 1: SWARM PRESSURE — uses liveStatus (tmux-aware) over registry status
+            let claudeCount = 0;
+            let codexCount = 0;
+            Object.values(state.agentStatus).forEach(agent => {
+                const effectiveStatus = agent.liveStatus || agent.status;
+                if (effectiveStatus === 'running') {
+                    if (agent.agent === 'claude') claudeCount++;
+                    else if (agent.agent === 'codex') codexCount++;
+                }
+            });
+            const totalActive = claudeCount + codexCount;
+            const maxSlots = 13;
+            const pressurePct = Math.min(100, (totalActive / maxSlots) * 100);
+            let pressureColor = 'green';
+            if (pressurePct >= 80) pressureColor = 'red';
+            else if (pressurePct >= 50) pressureColor = 'amber';
+
+            const mod1 = `
+                <div class="telemetry-module">
+                    <div class="telemetry-title">SWARM PRESSURE</div>
+                    <div class="telemetry-bar-container">
+                        <div class="telemetry-bar-fill ${pressureColor}" style="width: ${pressurePct}%"></div>
+                    </div>
+                    <div class="telemetry-value" style="font-size: 10px; margin-top: 4px; color: var(--text-secondary);">
+                        ${claudeCount}/10 CLAUDE &middot; ${codexCount}/3 CODEX
+                    </div>
+                </div>
+            `;
+
+            // Module 2: ACTIVE AGENTS
+            const activeAgents = Object.values(state.agentStatus).filter(a => (a.liveStatus || a.status) === 'running');
+            let mod2Content = '';
+            if (activeAgents.length === 0) {
+                mod2Content = `<div style="font-family: var(--font-mono); font-size: 10px; color: rgba(255,255,255,0.3); margin-top: 4px;">IDLE</div>`;
+            } else {
+                const visibleAgents = activeAgents.slice(0, 4);
+                const extraCount = activeAgents.length - 4;
+                
+                mod2Content = visibleAgents.map(a => {
+                    let repoName = a.tmuxSession || 'unknown';
+                    if (repoName.startsWith('claude-') || repoName.startsWith('codex-')) {
+                        const parts = repoName.split('-');
+                        if (parts.length >= 3) {
+                            repoName = parts.slice(2).join('-');
+                        }
+                    }
+                    
+                    let durationStr = '';
+                    if (a.startedAt) {
+                        const ms = Date.now() - a.startedAt;
+                        const mins = Math.floor(ms / 60000);
+                        if (mins < 60) durationStr = `${mins}m`;
+                        else {
+                            const hrs = Math.floor(mins / 60);
+                            durationStr = `${hrs}h ${mins % 60}m`;
+                        }
+                    }
+                    
+                    return `
+                        <div class="telemetry-agent-row">
+                            <div class="telemetry-agent-dot"></div>
+                            <span style="flex: 1; overflow: hidden; text-overflow: ellipsis;">${escapeHtml(repoName)}</span>
+                            <span>${durationStr}</span>
+                        </div>
+                    `;
+                }).join('');
+                
+                if (extraCount > 0) {
+                    mod2Content += `<div class="telemetry-agent-row" style="color: rgba(255,255,255,0.3);">+${extraCount} MORE</div>`;
+                }
+            }
+
+            const mod2 = `
+                <div class="telemetry-module">
+                    <div class="telemetry-title">ACTIVE AGENTS</div>
+                    <div style="display: flex; flex-direction: column; justify-content: center; flex: 1;">
+                        ${mod2Content}
+                    </div>
+                </div>
+            `;
+
+            // Module 3: THROUGHPUT (24H)
+            const now = new Date();
+            const last24hTasks = state.tasks.filter(t => {
+                if (!t.created_at) return false;
+                return (now - new Date(t.created_at)) <= 24 * 60 * 60 * 1000;
+            });
+            
+            let inCount = 0, triagedCount = 0, dispatchedCount = 0, doneCount = 0;
+            last24hTasks.forEach(t => {
+                if (t.status === 'inbox') inCount++;
+                else if (t.status === 'planning') triagedCount++;
+                else if (t.status === 'assigned' || t.status === 'in_progress' || t.status === 'testing' || t.status === 'review') dispatchedCount++;
+                else if (t.status === 'done') doneCount++;
+            });
+
+            const mod3 = `
+                <div class="telemetry-module">
+                    <div class="telemetry-title">THROUGHPUT (24H)</div>
+                    <div class="telemetry-value" style="display: flex; align-items: center; height: 100%; font-size: 11px; color: var(--text-secondary);">
+                        IN <span style="color: var(--text-primary); margin: 0 6px 0 4px;">${inCount}</span> &middot; 
+                        TRIAGED <span style="color: var(--text-primary); margin: 0 6px 0 4px;">${triagedCount}</span> &middot; 
+                        DISPATCHED <span style="color: var(--text-primary); margin: 0 6px 0 4px;">${dispatchedCount}</span> &middot; 
+                        DONE <span style="color: var(--text-primary); margin: 0 0 0 4px;">${doneCount}</span>
+                    </div>
+                </div>
+            `;
+
+            // Module 4: SYSTEM
+            let cpuPct = 0;
+            let memPct = 0;
+            let memText = '0/0 GB';
+            
+            if (state.systemStats) {
+                if (state.systemStats.cpu) cpuPct = state.systemStats.cpu.usagePercent || 0;
+                if (state.systemStats.memory) {
+                    memPct = state.systemStats.memory.usagePercent || 0;
+                    const used = (state.systemStats.memory.usedGB || 0).toFixed(1);
+                    const total = (state.systemStats.memory.totalGB || 0).toFixed(0);
+                    memText = `${used}/${total} GB`;
+                }
+            }
+            
+            let cpuColor = 'green';
+            if (cpuPct >= 80) cpuColor = 'red';
+            else if (cpuPct >= 60) cpuColor = 'amber';
+            
+            let memColor = 'green';
+            if (memPct >= 80) memColor = 'red';
+            else if (memPct >= 60) memColor = 'amber';
+
+            const mod4 = `
+                <div class="telemetry-module">
+                    <div class="telemetry-title">SYSTEM</div>
+                    <div style="display: flex; flex-direction: column; justify-content: center; flex: 1;">
+                        <div class="telemetry-system-row">
+                            <div class="telemetry-system-label">CPU</div>
+                            <div class="telemetry-system-val">${cpuPct.toFixed(1)}%</div>
+                            <div class="telemetry-system-bar">
+                                <div class="telemetry-bar-fill ${cpuColor}" style="width: ${cpuPct}%"></div>
+                            </div>
+                        </div>
+                        <div class="telemetry-system-row">
+                            <div class="telemetry-system-label">MEM</div>
+                            <div class="telemetry-system-val">${memText}</div>
+                            <div class="telemetry-system-bar">
+                                <div class="telemetry-bar-fill ${memColor}" style="width: ${memPct}%"></div>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            `;
+
+            // Module 5: LAST EVENT
+            let eventTime = '--:--';
+            let eventMsg = 'NO EVENTS';
+            
+            if (state.lastEvent) {
+                if (state.lastEvent.created_at) {
+                    const d = new Date(state.lastEvent.created_at);
+                    eventTime = d.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', hour12: false });
+                }
+                eventMsg = state.lastEvent.message || state.lastEvent.type || 'UNKNOWN EVENT';
+            }
+
+            const mod5 = `
+                <div class="telemetry-module">
+                    <div class="telemetry-title">LAST EVENT</div>
+                    <div style="display: flex; align-items: center; height: 100%;">
+                        <div class="telemetry-ticker">
+                            <span class="telemetry-ticker-time">[${eventTime}]</span>
+                            <span title="${escapeHtml(eventMsg)}">${escapeHtml(eventMsg)}</span>
+                        </div>
+                    </div>
+                </div>
+            `;
+
+            const newHtml = mod1 + mod2 + mod3 + mod4 + mod5;
+            
+            if (state.lastRenderedTelemetryHtml !== newHtml) {
+                el.innerHTML = newHtml;
+                state.lastRenderedTelemetryHtml = newHtml;
+            }
+        };
+
         const updateLastUpdated = () => {
             if (state.lastUpdated) {
                 const timeString = state.lastUpdated.toLocaleTimeString([], { hour12: false });
@@ -1314,65 +2138,171 @@
                 }
             });
 
-            // Flatten for rendering, keeping children under parents
-            const flattened = [];
-            const addToList = (task, isChild = false) => {
-                flattened.push({ ...task, isChild });
-                // Sort children by newest
+            // Sort children by newest
+            rootTasks.forEach(task => {
                 task.children.sort((a, b) => new Date(b.created_at) - new Date(a.created_at));
-                task.children.forEach(child => addToList(child, true));
-            };
+            });
 
-            rootTasks.forEach(task => addToList(task));
-
-            return flattened;
+            return rootTasks;
         };
 
         const renderTasks = () => {
-            const tasksToRender = getProcessedTasks();
+            const rootTasks = getProcessedTasks();
 
-            if (tasksToRender.length === 0) {
-                els.taskList.innerHTML = `<div class="empty-state">NO TASKS FOUND IN CURRENT VIEW</div>`;
+            if (rootTasks.length === 0) {
+                const emptyHtml = `<div class="empty-state">NO TASKS FOUND IN CURRENT VIEW</div>`;
+                if (state.lastRenderedTasksHtml !== emptyHtml) {
+                    els.taskList.innerHTML = emptyHtml;
+                    state.lastRenderedTasksHtml = emptyHtml;
+                }
                 return;
             }
 
-            els.taskList.innerHTML = tasksToRender.map(task => {
-                const repo = extractTargetRepo(task.title);
-                const sourceLabel = task.linear_issue_url ? 'LINEAR' : 'MANUAL';
-                const sourceHtml = task.linear_issue_url 
-                    ? `<a href="${task.linear_issue_url}" target="_blank" rel="noopener noreferrer" onclick="event.stopPropagation()">${sourceLabel}</a>`
-                    : sourceLabel;
+            const newHtml = rootTasks.map(task => {
+                const hasChildren = task.children && task.children.length > 0;
+                let statusColor = `var(--status-${task.status})`;
                 
-                // Count children from the full state, not just filtered
-                const childCount = state.tasks.filter(t => t.parent_task_id === task.id).length;
+                const agent = state.agentStatus[task.id];
+                let agentBadgeHtml = '';
+                if (agent) {
+                    const effectiveStatus = agent.liveStatus || agent.status;
+                    let dotClass = 'completed';
+                    if (effectiveStatus === 'running') dotClass = 'running';
+                    if (effectiveStatus === 'failed') dotClass = 'failed';
+                    
+                    const prText = agent.pr ? `<span style="opacity: 0.5; margin-left: 4px;">PR #${agent.pr}</span>` : '';
+                    agentBadgeHtml = `
+                        <div class="agent-badge">
+                            <div class="agent-dot ${dotClass}"></div>
+                            ${agent.agent.toUpperCase()}${prText}
+                        </div>
+                    `;
+                }
+
+                const subtaskChipsHtml = hasChildren ? `
+                    <div class="subtask-chips">
+                        ${task.children.map(child => {
+                            const repo = extractTargetRepo(child.title) || 'task';
+                            return `
+                                <div class="subtask-chip">
+                                    <div class="chip-status-dot" style="background-color: var(--status-${child.status})"></div>
+                                    ${escapeHtml(repo)}
+                                    <span class="chip-duration">${taskDuration(child)}</span>
+                                </div>
+                            `;
+                        }).join('')}
+                    </div>
+                ` : '';
+
+                const subtaskDetailsHtml = hasChildren ? `
+                    <div class="subtask-details">
+                        <div class="subtask-details-inner">
+                            ${task.children.map(child => {
+                                const repo = extractTargetRepo(child.title) || 'task';
+                                const childAgent = state.agentStatus[child.id];
+                                let childAgentBadgeHtml = '';
+                                if (childAgent) {
+                                    const childEffective = childAgent.liveStatus || childAgent.status;
+                                    let dotClass = 'completed';
+                                    if (childEffective === 'running') dotClass = 'running';
+                                    if (childEffective === 'failed') dotClass = 'failed';
+                                    
+                                    const prText = childAgent.pr ? `<span style="opacity: 0.5; margin-left: 4px;">PR #${childAgent.pr}</span>` : '';
+                                    childAgentBadgeHtml = `
+                                        <div class="agent-badge" style="margin-left: auto;">
+                                            <div class="agent-dot ${dotClass}"></div>
+                                            ${childAgent.agent.toUpperCase()}${prText}
+                                        </div>
+                                    `;
+                                }
+                                return `
+                                    <div class="subtask-entry" onclick="handleTaskClick(event, '${child.id}')">
+                                        <div class="subtask-repo">${escapeHtml(repo)}</div>
+                                        <div class="badge badge-status ${child.status}">${child.status.replace('_', ' ')}</div>
+                                        <div class="subtask-duration ${['in_progress', 'assigned', 'testing'].includes(child.status) ? 'active' : ''}">${taskDuration(child)}</div>
+                                        ${childAgentBadgeHtml}
+                                    </div>
+                                `;
+                            }).join('')}
+                        </div>
+                    </div>
+                ` : '';
+
+                const stageMap = [
+                    { status: 'inbox', label: 'SYNCED', desc: 'Uplinked from Linear' },
+                    { status: 'planning', label: 'TRIAGE', desc: 'Analyzing requirements' },
+                    { status: 'assigned', label: 'DISPATCH', desc: 'Assigning to agents' },
+                    { status: 'in_progress', label: 'ACTIVE', desc: 'Agents executing' },
+                    { status: 'review', label: 'REVIEW', desc: 'Awaiting review' },
+                    { status: 'done', label: 'NOMINAL', desc: 'Mission complete' }
+                ];
+
+                let activeIdx = 0;
+                if (task.status === 'inbox') activeIdx = 0;
+                else if (task.status === 'planning') activeIdx = 1;
+                else if (task.status === 'assigned') activeIdx = 2;
+                else if (task.status === 'in_progress') activeIdx = 3;
+                else if (task.status === 'testing' || task.status === 'review') activeIdx = 4;
+                else if (task.status === 'done') activeIdx = 5;
+                else if (task.status === 'failed') activeIdx = 3;
+
+                const pct = ((activeIdx + 1) / stageMap.length) * 100;
+                const cur = stageMap[activeIdx];
+                const isActive = ['in_progress', 'assigned', 'testing'].includes(task.status);
+
+                const milestoneHtml = `
+                    <div class="card-milestone">
+                        <div class="milestone-bar">
+                            <div class="milestone-bar-fill ${isActive ? 'active' : ''}" style="width: ${pct}%"></div>
+                        </div>
+                        <span class="milestone-pct">${Math.round(pct)}%</span>
+                    </div>
+                `;
+
+                // Preserve expanded state
+                const existingCard = document.getElementById(`card-${task.id}`);
+                const isExpanded = existingCard && existingCard.classList.contains('expanded') ? 'expanded' : '';
 
                 return `
-                    <div class="task-card ${task.isChild ? 'child-task' : ''}" data-id="${task.id}">
-                        <div class="card-header">
-                            <div class="card-title-area">
-                                <div class="priority-dot ${task.priority || 'normal'}" title="Priority: ${task.priority || 'normal'}"></div>
-                                <div class="card-title" title="${escapeHtml(task.title)}">${escapeHtml(task.title)}</div>
+                    <div class="task-card ${isExpanded} ${task.priority === 'urgent' ? 'priority-urgent' : task.priority === 'high' ? 'priority-high' : ''}" id="card-${task.id}" style="--card-status-color: ${statusColor}">
+                        <div class="card-header" onclick="${hasChildren ? `toggleChildren(event, '${task.id}')` : `handleTaskClick(event, '${task.id}')`}">
+                            <div class="card-top">
+                                ${hasChildren ? `<div class="card-expand-icon">▼</div>` : `<div class="card-expand-icon" style="opacity: 0"></div>`}
+                                <div class="card-priority ${task.priority || 'normal'}" title="${task.priority || 'normal'}"></div>
+                                <div class="card-title" onclick="handleTaskClick(event, '${task.id}')" title="${escapeHtml(task.title)}">${escapeHtml(task.title)}</div>
+                                ${agentBadgeHtml}
                             </div>
-                            <div class="card-meta">
-                                <div class="badge badge-source">${sourceHtml}</div>
+                            <div class="card-subtitle">
                                 <div class="badge badge-status ${task.status}">${task.status.replace('_', ' ')}</div>
+                                <div class="card-time">${timeAgo(task.created_at)}</div>
                             </div>
+                            ${subtaskChipsHtml}
+                            ${milestoneHtml}
                         </div>
-                        <div class="card-footer">
-                            <div class="tags">
-                                ${repo ? `<div class="tag">${escapeHtml(repo)}</div>` : ''}
-                                ${childCount > 0 ? `<div class="child-count"><svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M6 9v6a2 2 0 0 0 2 2h10"></path><polyline points="14 13 18 17 14 21"></polyline><path d="M6 5v.01"></path></svg> ${childCount}</div>` : ''}
-                            </div>
-                            <div class="time-ago">${timeAgo(task.created_at)}</div>
-                        </div>
+                        ${subtaskDetailsHtml}
                     </div>
                 `;
             }).join('');
 
-            // Add click listeners
-            document.querySelectorAll('.task-card').forEach(card => {
-                card.addEventListener('click', () => openDrawer(card.dataset.id));
-            });
+            if (state.lastRenderedTasksHtml !== newHtml) {
+                els.taskList.innerHTML = newHtml;
+                state.lastRenderedTasksHtml = newHtml;
+            }
+            
+            renderProcessGraph();
+        };
+
+        window.handleTaskClick = (event, taskId) => {
+            event.stopPropagation();
+            openDrawer(taskId);
+        };
+
+        window.toggleChildren = (event, parentId) => {
+            event.stopPropagation();
+            const card = document.getElementById(`card-${parentId}`);
+            if (card) {
+                card.classList.toggle('expanded');
+            }
         };
 
         const openDrawer = (taskId) => {
@@ -1385,6 +2315,9 @@
             // Populate basic info immediately
             els.drawerTitle.textContent = task.title;
             els.drawerDescription.innerHTML = parseMarkdown(task.description) || '<span style="color: var(--text-secondary)">No description provided.</span>';
+            els.drawerDescription.classList.add('collapsed');
+            const descToggle = document.getElementById('desc-toggle');
+            if (descToggle) descToggle.textContent = '(show)';
             
             const sourceLabel = task.linear_issue_url ? 'LINEAR' : 'MANUAL';
             const sourceHtml = task.linear_issue_url 
@@ -1396,12 +2329,35 @@
                 triageBtnHtml = `<button class="btn-triage" id="btn-triage" onclick="handleBackToTriage('${task.id}')">Back to Triage</button>`;
             }
 
+            let agentInfoHtml = '';
+            const agent = state.agentStatus[taskId];
+            if (agent) {
+                const prLink = agent.pr ? `<a href="#" style="color: var(--accent); text-decoration: none;">PR #${agent.pr}</a>` : '';
+                const branchInfo = agent.branch ? `<span style="color: var(--text-secondary);">Branch:</span> ${escapeHtml(agent.branch)}` : '';
+                const reviewInfo = agent.reviewCycles !== undefined ? `<span style="color: var(--text-secondary);">Reviews:</span> ${agent.reviewCycles}` : '';
+                
+                agentInfoHtml = `
+                    <div style="width: 100%; display: flex; gap: 12px; font-family: var(--font-mono); font-size: 11px; margin-top: 8px; padding-top: 8px; border-top: 1px solid rgba(255,255,255,0.05);">
+                        <span style="color: var(--text-secondary);">Agent:</span> <span style="color: var(--text-primary);">${agent.agent.toUpperCase()}</span>
+                        ${branchInfo ? `<span>${branchInfo}</span>` : ''}
+                        ${reviewInfo ? `<span>${reviewInfo}</span>` : ''}
+                        ${prLink ? `<span>${prLink}</span>` : ''}
+                    </div>
+                `;
+            }
+
             els.drawerMeta.innerHTML = `
                 <div class="badge badge-status ${task.status}">${task.status.replace('_', ' ')}</div>
                 <div class="badge badge-source">${sourceHtml}</div>
-                <div class="tag" style="text-transform: uppercase">PRIORITY: ${task.priority || 'NORMAL'}</div>
-                <div class="time-ago">Created ${timeAgo(task.created_at)}</div>
+                <div class="priority-picker" id="priority-picker">
+                    ${['urgent','high','normal','low'].map(p => {
+                        const active = (task.priority || 'normal') === p;
+                        return `<button class="priority-opt ${p} ${active ? 'active' : ''}" onclick="handleSetPriority('${task.id}', '${p}')">${p.toUpperCase()}</button>`;
+                    }).join('')}
+                </div>
+                <div class="time-ago" style="font-family: var(--font-mono); font-size: 11px; color: var(--text-secondary);">Created ${timeAgo(task.created_at)}</div>
                 ${triageBtnHtml}
+                ${agentInfoHtml}
             `;
 
             // Open UI
@@ -1409,6 +2365,8 @@
             els.drawer.classList.add('open');
 
             // Fetch details
+            state.drawerInitialLoad = true;
+            state.activityExpanded = false;
             fetchTaskDetails(taskId);
         };
 
@@ -1423,34 +2381,90 @@
             // Render Triage State
             if (state.triageState && state.triageState.questions && state.triageState.questions.length > 0) {
                 els.drawerTriageSection.style.display = 'block';
-                els.drawerTriage.innerHTML = state.triageState.questions.map(q => `
+                const task = state.tasks.find(t => t.id === state.selectedTaskId);
+                const isPostTriage = task && !['inbox', 'planning'].includes(task.status);
+                if (isPostTriage) {
+                    els.drawerTriage.classList.add('collapsed');
+                } else {
+                    els.drawerTriage.classList.remove('collapsed');
+                }
+                const toggleEl = document.getElementById('triage-toggle');
+                if (toggleEl) toggleEl.textContent = els.drawerTriage.classList.contains('collapsed') ? '(show)' : '(hide)';
+                const triageHtml = state.triageState.questions.map(q => `
                     <div class="qa-item">
                         <div class="qa-question">${escapeHtml(q.question)}</div>
                         <div class="qa-answer">${escapeHtml(q.answer || 'Pending...')}</div>
                     </div>
                 `).join('');
+                if (els.drawerTriage.innerHTML !== triageHtml) {
+                    els.drawerTriage.innerHTML = triageHtml;
+                }
             } else {
                 els.drawerTriageSection.style.display = 'none';
             }
 
             // Render Activities
             if (state.activities.length === 0) {
-                els.drawerTimeline.innerHTML = `<div class="empty-state">NO ACTIVITY RECORDED</div>`;
+                const emptyHtml = `<div class="empty-state">NO ACTIVITY RECORDED</div>`;
+                if (state.lastActivityCount !== 0) {
+                    els.drawerTimeline.innerHTML = emptyHtml;
+                    state.lastActivityCount = 0;
+                    state.lastActivityId = null;
+                }
                 return;
             }
 
-            // Sort activities oldest first for timeline
-            const sortedActivities = [...state.activities].sort((a, b) => new Date(a.created_at) - new Date(b.created_at));
+            // Sort activities newest first for timeline
+            const sortedActivities = [...state.activities].sort((a, b) => new Date(b.created_at) - new Date(a.created_at));
+            
+            const currentCount = sortedActivities.length;
+            const currentLatestId = sortedActivities[0].id;
 
-            els.drawerTimeline.innerHTML = sortedActivities.map(act => `
-                <div class="timeline-item type-${act.activity_type}">
-                    <div class="timeline-header">
-                        <span class="timeline-type">${escapeHtml(act.activity_type.replace('_', ' '))}</span>
-                        <span class="timeline-time">${timeAgo(act.created_at)}</span>
+            // Skip re-render if data hasn't changed (unless we just toggled expanded state)
+            if (state.lastActivityCount === currentCount && state.lastActivityId === currentLatestId && !state.activityExpandedToggled) {
+                return;
+            }
+            
+            state.activityExpandedToggled = false; // Reset toggle flag
+
+            const visibleActivities = state.activityExpanded ? sortedActivities : sortedActivities.slice(0, 3);
+
+            let timelineHtml = visibleActivities.map(act => {
+                const isPrompt = act.activity_type === 'prompt_sent';
+                const contentHtml = act.message ? (isPrompt
+                    ? `<div class="timeline-content prompt-content collapsed" onclick="this.classList.toggle('collapsed')">${parseMarkdown(act.message)}</div>`
+                    : `<div class="timeline-content">${parseMarkdown(act.message)}</div>`
+                ) : '';
+                return `
+                    <div class="timeline-item type-${act.activity_type}">
+                        <div class="timeline-header">
+                            <span class="timeline-type">${escapeHtml(isPrompt ? 'agent prompt' : act.activity_type.replace('_', ' '))}</span>
+                            <span class="timeline-time">${timeAgo(act.created_at)}</span>
+                            ${isPrompt ? '<span style="font-size:9px;color:rgba(255,255,255,0.3);margin-left:4px;cursor:pointer;" onclick="this.parentElement.nextElementSibling.classList.toggle(\'collapsed\')">(click to expand)</span>' : ''}
+                        </div>
+                        ${contentHtml}
                     </div>
-                    ${act.message ? `<div class="timeline-content">${parseMarkdown(act.message)}</div>` : ''}
-                </div>
-            `).join('');
+                `;
+            }).join('');
+
+            if (sortedActivities.length > 3) {
+                const btnText = state.activityExpanded ? 'SHOW LESS' : `SHOW MORE (${sortedActivities.length - 3})`;
+                timelineHtml += `
+                    <button class="btn-show-more" onclick="toggleActivityExpanded()">
+                        ${btnText}
+                    </button>
+                `;
+            }
+
+            els.drawerTimeline.innerHTML = timelineHtml;
+            state.lastActivityCount = currentCount;
+            state.lastActivityId = currentLatestId;
+        };
+
+        window.toggleActivityExpanded = () => {
+            state.activityExpanded = !state.activityExpanded;
+            state.activityExpandedToggled = true;
+            renderDrawerDetails();
         };
 
         // Event Listeners
@@ -1492,6 +2506,22 @@
             }
         });
 
+        window.handleSetPriority = async (taskId, priority) => {
+            try {
+                await fetch(getApiUrl(`/tasks/${taskId}`), {
+                    method: 'PATCH',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ priority })
+                });
+                const task = state.tasks.find(t => t.id === taskId);
+                if (task) task.priority = priority;
+                renderTasks();
+                if (state.selectedTaskId === taskId) openDrawer(taskId);
+            } catch (error) {
+                console.error('Failed to set priority:', error);
+            }
+        };
+
         window.handleBackToTriage = async (taskId) => {
             if (!confirm('Send this task back to triage? Running agents will need to be manually stopped.')) {
                 return;
@@ -1531,82 +2561,41 @@
                 const h = String(Math.floor(diff / 3600)).padStart(2, '0');
                 const m = String(Math.floor((diff % 3600) / 60)).padStart(2, '0');
                 const s = String(diff % 60).padStart(2, '0');
-                const uptimeEl = document.getElementById('gauge-uptime-val');
+                const uptimeEl = document.getElementById('chip-uptime-val');
                 if (uptimeEl) uptimeEl.textContent = `${h}:${m}:${s}`;
             }, 1000);
-
-            // Toggle logic
-            const toggleBtn = document.getElementById('mc-toggle');
-            if (toggleBtn) {
-                toggleBtn.addEventListener('click', () => {
-                    const content = document.getElementById('mc-content');
-                    content.classList.toggle('collapsed');
-                    toggleBtn.textContent = content.classList.contains('collapsed') ? '▲ MISSION CONTROL' : '▼ MISSION CONTROL';
-                });
-            }
         };
 
         const updateMissionControl = () => {
             const tasks = state.tasks;
             
-            // Gauges
+            // Metrics Chips
             const totalTasks = tasks.length;
-            const doneTasks = tasks.filter(t => t.status === 'done').length;
-            const completionPct = totalTasks ? (doneTasks / totalTasks) : 0;
-            
-            const tasksVal = document.getElementById('gauge-tasks-val');
-            if (tasksVal) tasksVal.textContent = totalTasks;
-            const tasksArc = document.getElementById('gauge-tasks-arc');
-            if (tasksArc) {
-                tasksArc.style.strokeDashoffset = 125.6 - (125.6 * completionPct);
-            }
-
             const childTasks = tasks.filter(t => t.parent_task_id);
             const activeAgents = childTasks.filter(t => t.status === 'in_progress' || t.status === 'assigned').length;
-            const agentsVal = document.getElementById('gauge-agents-val');
-            if (agentsVal) agentsVal.textContent = activeAgents;
-            const agentsArc = document.getElementById('gauge-agents-arc');
-            if (agentsArc) {
-                const agentPct = childTasks.length ? (activeAgents / childTasks.length) : 0;
-                agentsArc.style.strokeDashoffset = 125.6 - (125.6 * agentPct);
-                if (activeAgents > 0) {
-                    agentsArc.style.filter = 'drop-shadow(0 0 4px var(--status-active))';
-                } else {
-                    agentsArc.style.filter = 'none';
-                }
-            }
-
             const triageTasks = tasks.filter(t => t.status === 'inbox' || t.status === 'planning').length;
-            const triageVal = document.getElementById('gauge-triage-val');
+            
+            const tasksVal = document.getElementById('chip-tasks-val');
+            if (tasksVal) tasksVal.textContent = totalTasks;
+            
+            const agentsVal = document.getElementById('chip-agents-val');
+            if (agentsVal) agentsVal.textContent = activeAgents;
+            
+            const triageVal = document.getElementById('chip-triage-val');
             if (triageVal) triageVal.textContent = triageTasks;
-            const triageArc = document.getElementById('gauge-triage-arc');
-            if (triageArc) {
-                const triagePct = totalTasks ? (triageTasks / totalTasks) : 0;
-                triageArc.style.strokeDashoffset = 125.6 - (125.6 * triagePct);
-            }
-
-            const now = new Date();
-            const last24h = tasks.filter(t => t.status === 'done' && (now - new Date(t.updated_at || t.created_at)) < 24*60*60*1000).length;
-            const pipelineVal = document.getElementById('gauge-pipeline-val');
-            if (pipelineVal) pipelineVal.textContent = last24h;
-            const pipelineArc = document.getElementById('gauge-pipeline-arc');
-            if (pipelineArc) {
-                const pipePct = Math.min(last24h / 10, 1); // arbitrary scale
-                pipelineArc.style.strokeDashoffset = 125.6 - (125.6 * pipePct);
-            }
 
             // Pipeline Flow
+            const now = new Date();
             const counts = {
-                sync: tasks.filter(t => t.linear_issue_url).length,
-                inbox: tasks.filter(t => t.status === 'inbox').length,
-                triage: tasks.filter(t => t.status === 'planning').length,
-                planning: tasks.filter(t => t.status === 'assigned').length,
-                agents: childTasks.length,
-                inprogress: tasks.filter(t => t.status === 'in_progress').length,
-                done: tasks.filter(t => t.status === 'done').length
+                intake: tasks.filter(t => t.status === 'inbox' && !t.parent_task_id).length,
+                triage: tasks.filter(t => t.status === 'planning' && !t.parent_task_id).length,
+                dispatch: tasks.filter(t => t.status === 'assigned' && !t.parent_task_id).length,
+                swarm: childTasks.filter(t => t.status === 'in_progress' || t.status === 'assigned').length,
+                review: tasks.filter(t => t.status === 'testing' || t.status === 'review').length,
+                complete: tasks.filter(t => t.status === 'done').length
             };
             
-            const stages = ['sync', 'inbox', 'triage', 'planning', 'agents', 'inprogress', 'done'];
+            const stages = ['intake', 'triage', 'dispatch', 'swarm', 'review', 'complete'];
             stages.forEach((stage, idx) => {
                 const el = document.getElementById(`stage-${stage}`);
                 if (el) {
@@ -1634,27 +2623,199 @@
                 }
             });
 
-            // Agent Status Panel
-            const agentsContainer = document.getElementById('mc-agents-container');
-            if (agentsContainer) {
+            // Swarm agent dots
+            const swarmDots = document.getElementById('swarm-dots');
+            if (swarmDots) {
                 if (childTasks.length === 0) {
-                    agentsContainer.innerHTML = '<div style="color: var(--text-secondary); font-size: 11px; font-family: var(--font-mono);">NO AGENTS DEPLOYED</div>';
+                    swarmDots.innerHTML = '';
                 } else {
-                    agentsContainer.innerHTML = childTasks.map(t => {
-                        const repo = extractTargetRepo(t.title) || 'UNKNOWN REPO';
-                        let statusClass = 'completed';
-                        if (t.status === 'in_progress' || t.status === 'assigned') statusClass = 'running';
-                        if (t.status === 'failed') statusClass = 'failed';
+                    swarmDots.innerHTML = childTasks.map((t, i) => {
+                        const repo = extractTargetRepo(t.title) || 'agent';
+                        let dotClass = 'completed';
+                        if (t.status === 'in_progress' || t.status === 'assigned') dotClass = 'running';
+                        if (t.status === 'failed') dotClass = 'failed';
+                        return `<div class="swarm-dot ${dotClass}" title="${escapeHtml(repo)}" style="animation-delay: ${i * 0.3}s"></div>`;
+                    }).join('');
+                }
+            }
+        };
+
+        const extractTicketId = (title) => {
+            if (!title) return 'TASK';
+            const match = title.match(/^\[?([A-Z]+-\d+)\]?:?/);
+            if (match) return match[1];
+            return title.substring(0, 8) + (title.length > 8 ? '...' : '');
+        };
+
+        const renderProcessGraph = () => {
+            const container = document.getElementById('process-graph-content');
+            if (!container) return;
+
+            const rootTasks = getProcessedTasks();
+            
+            if (rootTasks.length === 0) {
+                container.innerHTML = `<div class="empty-state" style="padding: 24px;">NO PROCESS DATA</div>`;
+                return;
+            }
+
+            const html = rootTasks.map(root => {
+                const hasChildren = root.children && root.children.length > 0;
+                const rootStatusColor = `var(--status-${root.status})`;
+                
+                const rootTicketId = extractTicketId(root.title);
+                const rootTitle = root.title.replace(/^\[?[A-Z]+-\d+\]?:?\s*/, '');
+                
+                let rootAgentHtml = '';
+                const rootAgent = state.agentStatus[root.id];
+                if (rootAgent) {
+                    const effectiveStatus = rootAgent.liveStatus || rootAgent.status;
+                    let dotClass = 'completed';
+                    if (effectiveStatus === 'running') dotClass = 'running';
+                    if (effectiveStatus === 'failed') dotClass = 'failed';
+                    const prText = rootAgent.pr ? `<span style="opacity: 0.5; margin-left: 4px;">PR #${rootAgent.pr}</span>` : '';
+                    rootAgentHtml = `
+                        <div class="agent-badge">
+                            <div class="agent-dot ${dotClass}"></div>
+                            ${rootAgent.agent.toUpperCase()}${prText}
+                        </div>
+                    `;
+                }
+
+                const rootNodeHtml = `
+                    <div class="pg-root-wrapper ${hasChildren ? 'has-children' : ''}">
+                        <div class="pg-node" style="--node-color: ${rootStatusColor}" onclick="handleTaskClick(event, '${root.id}')">
+                            <div class="pg-node-top">
+                                <div class="pg-node-title" title="${escapeHtml(root.title)}">
+                                    <span style="color: var(--accent); margin-right: 4px;">${escapeHtml(rootTicketId)}</span>
+                                    ${escapeHtml(rootTitle)}
+                                </div>
+                            </div>
+                            <div class="pg-node-bottom">
+                                <div class="badge badge-status ${root.status}">${root.status.replace('_', ' ')}</div>
+                                ${rootAgentHtml}
+                            </div>
+                        </div>
+                    </div>
+                `;
+
+                let childrenHtml = '';
+                if (hasChildren) {
+                    const childrenNodes = root.children.map(child => {
+                        const childStatusColor = `var(--status-${child.status})`;
+                        const repo = extractTargetRepo(child.title) || 'task';
                         
+                        let childAgentHtml = '';
+                        const childAgent = state.agentStatus[child.id];
+                        if (childAgent) {
+                            const effectiveStatus = childAgent.liveStatus || childAgent.status;
+                            let dotClass = 'completed';
+                            if (effectiveStatus === 'running') dotClass = 'running';
+                            if (effectiveStatus === 'failed') dotClass = 'failed';
+                            const prText = childAgent.pr ? `<span style="opacity: 0.5; margin-left: 4px;">PR #${childAgent.pr}</span>` : '';
+                            childAgentHtml = `
+                                <div class="agent-badge">
+                                    <div class="agent-dot ${dotClass}"></div>
+                                    ${childAgent.agent.toUpperCase()}${prText}
+                                </div>
+                            `;
+                        }
+
+                        let lifecycleHtml = '';
+                        if (state.childActivities[child.id]) {
+                            const steps = parseLifecycleSteps(state.childActivities[child.id], child.id);
+
+                            if (steps.length > 0) {
+                                const isChildInProgress = ['in_progress', 'assigned', 'testing'].includes(child.status);
+                                const effectiveAgentStatus = childAgent ? (childAgent.liveStatus || childAgent.status) : null;
+                                const lastStepType = steps[steps.length - 1]?.type;
+                                
+                                let pendingStep = null;
+                                if (effectiveAgentStatus === 'running') {
+                                    pendingStep = { type: 'pending-active', label: 'CODING', agent: childAgent?.agent || '', css: 'spawn' };
+                                } else if (child.status === 'review' && !steps.some(s => s.type === 'approved')) {
+                                    pendingStep = { type: 'pending-review', label: 'AWAITING REVIEW', agent: '', css: 'feedback' };
+                                } else if (child.status === 'in_progress' && effectiveAgentStatus !== 'running') {
+                                    pendingStep = { type: 'pending-idle', label: 'IDLE', agent: '', css: 'respawn' };
+                                } else if (child.status === 'done') {
+                                    pendingStep = { type: 'done', label: 'LINEAR DONE', agent: 'linear', css: 'complete', isMilestone: true };
+                                }
+
+                                lifecycleHtml = `
+                                    <div class="pg-timeline">
+                                        ${steps.map((step, idx) => {
+                                            const isLast = idx === steps.length - 1 && !pendingStep;
+                                            const dotClass = isLast && isChildInProgress ? 'pulse-dot' : '';
+                                            const milestoneClass = step.isMilestone || step.type === 'complete' || step.type === 'approved' ? 'milestone' : '';
+                                            const connHtml = (idx < steps.length - 1 || pendingStep) ? `<div class="pg-tl-conn"></div>` : '';
+                                            return `
+                                                <div class="pg-tl-step ${step.type} ${milestoneClass}" title="${escapeHtml(step.msg)}">
+                                                    <div class="pg-tl-dot ${dotClass}"></div>
+                                                    <div class="pg-tl-label">${step.label}</div>
+                                                    <div class="pg-tl-agent">${step.agent ? step.agent.toUpperCase() : ''}</div>
+                                                    <div class="pg-tl-time">${formatStepTime(step.time)}</div>
+                                                </div>
+                                                ${connHtml}
+                                            `;
+                                        }).join('')}
+                                        ${pendingStep ? `
+                                            <div class="pg-tl-step ${pendingStep.css} pending" title="Current state">
+                                                <div class="pg-tl-dot ${effectiveAgentStatus === 'running' ? 'pulse-dot' : ''}"></div>
+                                                <div class="pg-tl-label">${pendingStep.label}</div>
+                                                <div class="pg-tl-agent">${pendingStep.agent ? pendingStep.agent.toUpperCase() : ''}</div>
+                                                <div class="pg-tl-time">now</div>
+                                            </div>
+                                        ` : ''}
+                                    </div>
+                                `;
+                            }
+                        }
+
                         return `
-                            <div class="agent-tile ${statusClass}">
-                                <div class="agent-status-icon"></div>
-                                <div class="agent-repo">${escapeHtml(repo)}</div>
-                                <div class="agent-time">${timeAgo(t.created_at)}</div>
+                            <div class="pg-child-wrapper">
+                                <div class="pg-node" style="--node-color: ${childStatusColor}" onclick="handleTaskClick(event, '${child.id}')">
+                                    <div class="pg-node-top">
+                                        <div class="pg-node-title" style="color: var(--accent);" title="${escapeHtml(child.title)}">
+                                            ${escapeHtml(repo)}
+                                        </div>
+                                    </div>
+                                    <div class="pg-node-bottom">
+                                        <div class="badge badge-status ${child.status}">${child.status.replace('_', ' ')}</div>
+                                        ${childAgentHtml}
+                                    </div>
+                                </div>
+                                ${lifecycleHtml}
                             </div>
                         `;
                     }).join('');
+                    
+                    childrenHtml = `
+                        <div class="pg-children">
+                            ${childrenNodes}
+                        </div>
+                    `;
                 }
+
+                return `
+                    <div class="pg-row">
+                        ${rootNodeHtml}
+                        ${childrenHtml}
+                    </div>
+                `;
+            }).join('');
+
+            container.innerHTML = html;
+        };
+
+        window.toggleProcessGraph = () => {
+            const content = document.getElementById('process-graph-content');
+            const toggle = document.getElementById('process-graph-toggle');
+            if (content.classList.contains('collapsed')) {
+                content.classList.remove('collapsed');
+                toggle.textContent = '(hide)';
+                fetchChildActivities();
+            } else {
+                content.classList.add('collapsed');
+                toggle.textContent = '(show)';
             }
         };
 
@@ -1662,12 +2823,22 @@
         const init = () => {
             initMissionControl();
             fetchTasks();
+            fetchAgentStatus();
+            fetchSystemStats();
+            fetchLastEvent();
             
             // Poll every 30 seconds
             setInterval(() => {
                 fetchTasks();
+                fetchAgentStatus();
+                fetchSystemStats();
+                fetchLastEvent();
                 if (state.isDrawerOpen && state.selectedTaskId) {
                     fetchTaskDetails(state.selectedTaskId);
+                }
+                const pgContent = document.getElementById('process-graph-content');
+                if (pgContent && !pgContent.classList.contains('collapsed')) {
+                    fetchChildActivities();
                 }
             }, 30000);
         };
