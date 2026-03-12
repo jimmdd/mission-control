@@ -1,4 +1,4 @@
-import { readFileSync } from "node:fs";
+import { readFileSync, writeFileSync, existsSync } from "node:fs";
 import { join, dirname } from "node:path";
 import { homedir, cpus, totalmem, freemem, loadavg } from "node:os";
 import { fileURLToPath } from "node:url";
@@ -633,6 +633,47 @@ async function handleApiRequest(
             },
           });
           return;
+        }
+
+        if (segments[0] === "config" && segments.length === 1) {
+          const configPath = join(homedir(), ".openclaw", "swarm", "swarm-config.json");
+
+          const readConfig = (): Record<string, unknown> => {
+            try {
+              if (existsSync(configPath)) {
+                return JSON.parse(readFileSync(configPath, "utf-8"));
+              }
+            } catch {}
+            return {
+              claude: { model: "claude-opus-4-6", fallbackModel: "", maxAgents: 10 },
+              codex: { model: "codex-mini", effort: "high", reviewEffort: "xhigh", maxAgents: 3 },
+            };
+          };
+
+          if (method === "GET") {
+            sendJson(res, 200, readConfig());
+            return;
+          }
+
+          if (method === "PATCH") {
+            const body = await parseBody(req);
+            if (!isRecord(body)) {
+              sendJson(res, 400, { error: "Expected JSON object" });
+              return;
+            }
+
+            const current = readConfig() as Record<string, Record<string, unknown>>;
+
+            for (const key of ["claude", "codex"] as const) {
+              if (isRecord(body[key])) {
+                current[key] = { ...current[key], ...(body[key] as Record<string, unknown>) };
+              }
+            }
+
+            writeFileSync(configPath, JSON.stringify(current, null, 2) + "\n", "utf-8");
+            sendJson(res, 200, current);
+            return;
+          }
         }
 
         if (segments[0] === "knowledge") {

@@ -449,6 +449,10 @@
             z-index: 0;
         }
 
+        .task-cards-content.collapsed {
+            display: none;
+        }
+
         .task-list {
             display: grid;
             grid-template-columns: repeat(auto-fill, minmax(340px, 1fr));
@@ -1363,6 +1367,91 @@
             color: var(--status-planning);
         }
 
+        /* Config Panel */
+        .config-panel {
+            padding: 0 24px 24px 24px;
+            position: relative;
+            z-index: 1;
+        }
+
+        .config-header {
+            margin-bottom: 16px;
+        }
+
+        .config-content {
+            background: var(--bg-card);
+            border: 1px solid var(--border-color);
+            border-radius: 4px;
+            padding: 16px;
+            display: flex;
+            flex-direction: column;
+            gap: 16px;
+            transition: all 0.3s ease;
+        }
+
+        .config-content.collapsed {
+            display: none;
+        }
+
+        .config-grid {
+            display: grid;
+            grid-template-columns: 1fr 1fr;
+            gap: 24px;
+        }
+
+        .config-column {
+            display: flex;
+            flex-direction: column;
+            gap: 12px;
+        }
+
+        .config-col-title {
+            font-family: var(--font-mono);
+            font-size: 12px;
+            font-weight: 700;
+            color: var(--text-secondary);
+            letter-spacing: 1px;
+            margin-bottom: 4px;
+        }
+
+        .config-row {
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            gap: 12px;
+        }
+
+        .config-row label {
+            font-family: var(--font-mono);
+            font-size: 11px;
+            color: var(--text-primary);
+            width: 80px;
+        }
+
+        .config-select, .config-input {
+            flex: 1;
+            background: rgba(0, 0, 0, 0.2);
+            border: 1px solid var(--border-color);
+            color: var(--text-primary);
+            font-family: var(--font-mono);
+            font-size: 11px;
+            padding: 6px 8px;
+            border-radius: 4px;
+            outline: none;
+        }
+
+        .config-select:focus, .config-input:focus {
+            border-color: var(--accent);
+        }
+
+        .config-footer {
+            display: flex;
+            justify-content: flex-end;
+            margin-top: 8px;
+            padding-top: 16px;
+            border-top: 1px solid var(--border-color);
+        }
+
         .pg-row {
             display: flex;
             align-items: center;
@@ -1645,17 +1734,29 @@
 
     <div class="main-area">
         <div class="mc-bg-effects"></div>
-        <div class="task-list" id="task-list">
-            <div class="loading">
-                <div class="spinner"></div>
-                <div>INITIALIZING TELEMETRY...</div>
+        
+        <div class="task-cards-panel" style="padding: 24px 24px 0 24px; position: relative; z-index: 1;">
+            <div class="task-cards-header" style="margin-bottom: 16px;">
+                <div class="section-title" style="margin: 0; cursor: pointer;" onclick="toggleTaskCards()">
+                    TASK CARDS (<span id="task-cards-count">0</span>) <span id="task-cards-toggle" style="font-size: 10px; opacity: 0.5; margin-left: 4px;">(hide)</span>
+                </div>
+            </div>
+            <div class="task-cards-content" id="task-cards-content" style="transition: all 0.3s ease;">
+                <div class="task-list" id="task-list" style="padding: 0;">
+                    <div class="loading">
+                        <div class="spinner"></div>
+                        <div>INITIALIZING TELEMETRY...</div>
+                    </div>
+                </div>
             </div>
         </div>
-        <div class="process-graph-panel">
-            <div class="process-graph-header" onclick="toggleProcessGraph()">
-                <div class="section-title" style="margin: 0; cursor: pointer;">
+
+        <div class="process-graph-panel" style="padding-top: 24px;">
+            <div class="process-graph-header" style="display: flex; align-items: center; gap: 12px; margin-bottom: 16px;">
+                <div class="section-title" style="margin: 0; cursor: pointer; flex: 1;" onclick="toggleProcessGraph()">
                     PROCESS GRAPH <span id="process-graph-toggle" style="font-size: 10px; opacity: 0.5; margin-left: 4px;">(show)</span>
                 </div>
+                <button id="pg-done-toggle" class="filter-pill" style="padding: 2px 8px; font-size: 10px; display: none;" onclick="toggleProcessGraphDone()">Show Done (0)</button>
             </div>
             <div class="process-graph-content collapsed" id="process-graph-content">
                 <!-- Graph rendered here -->
@@ -1698,6 +1799,81 @@
                             <button type="submit" class="btn-send" id="btn-add-kb">Add Knowledge</button>
                         </div>
                     </form>
+                </div>
+            </div>
+        </div>
+
+        <div class="config-panel">
+            <div class="config-header" onclick="toggleConfigPanel()">
+                <div class="section-title" style="margin: 0; cursor: pointer;">
+                    CONFIGURATION <span id="config-toggle" style="font-size: 10px; opacity: 0.5; margin-left: 4px;">(show)</span>
+                </div>
+            </div>
+            <div class="config-content collapsed" id="config-content">
+                <div class="config-grid">
+                    <div class="config-column">
+                        <div class="config-col-title">CLAUDE</div>
+                        <div class="config-row">
+                            <label>Model</label>
+                            <select id="config-claude-model" class="config-select">
+                                <option value="claude-opus-4-6">claude-opus-4-6</option>
+                                <option value="claude-sonnet-4-20250514">claude-sonnet-4-20250514</option>
+                                <option value="claude-sonnet-4-6">claude-sonnet-4-6</option>
+                                <option value="claude-haiku-3-5-20241022">claude-haiku-3-5-20241022</option>
+                            </select>
+                        </div>
+                        <div class="config-row">
+                            <label>Fallback</label>
+                            <select id="config-claude-fallback" class="config-select">
+                                <option value="">none</option>
+                                <option value="claude-opus-4-6">claude-opus-4-6</option>
+                                <option value="claude-sonnet-4-20250514">claude-sonnet-4-20250514</option>
+                                <option value="claude-sonnet-4-6">claude-sonnet-4-6</option>
+                                <option value="claude-haiku-3-5-20241022">claude-haiku-3-5-20241022</option>
+                            </select>
+                        </div>
+                        <div class="config-row">
+                            <label>Max Slots</label>
+                            <input type="number" id="config-claude-slots" class="config-input" min="1" max="20">
+                        </div>
+                    </div>
+                    <div class="config-column">
+                        <div class="config-col-title">CODEX</div>
+                        <div class="config-row">
+                            <label>Model</label>
+                            <select id="config-codex-model" class="config-select">
+                                <option value="o3">o3</option>
+                                <option value="o4-mini">o4-mini</option>
+                                <option value="codex-mini">codex-mini</option>
+                                <option value="gpt-4.1">gpt-4.1</option>
+                            </select>
+                        </div>
+                        <div class="config-row">
+                            <label>Effort</label>
+                            <select id="config-codex-effort" class="config-select">
+                                <option value="low">low</option>
+                                <option value="medium">medium</option>
+                                <option value="high">high</option>
+                                <option value="xhigh">xhigh</option>
+                            </select>
+                        </div>
+                        <div class="config-row">
+                            <label>Rev.Effort</label>
+                            <select id="config-codex-review" class="config-select">
+                                <option value="low">low</option>
+                                <option value="medium">medium</option>
+                                <option value="high">high</option>
+                                <option value="xhigh">xhigh</option>
+                            </select>
+                        </div>
+                        <div class="config-row">
+                            <label>Max Slots</label>
+                            <input type="number" id="config-codex-slots" class="config-input" min="1" max="20">
+                        </div>
+                    </div>
+                </div>
+                <div class="config-footer">
+                    <button class="btn-send" id="btn-save-config" onclick="saveConfig()">Save</button>
                 </div>
             </div>
         </div>
@@ -1768,6 +1944,7 @@
             drawerInitialLoad: false,
             activityExpanded: false,
             activityExpandedToggled: false,
+            showDoneInGraph: false,
             lastRenderedTasksHtml: '',
             lastRenderedTelemetryHtml: '',
             lastActivityCount: 0,
@@ -2368,6 +2545,9 @@
         const renderTasks = () => {
             const rootTasks = getProcessedTasks();
 
+            const countEl = document.getElementById('task-cards-count');
+            if (countEl) countEl.textContent = rootTasks.length;
+
             if (rootTasks.length === 0) {
                 const emptyHtml = `<div class="empty-state">NO TASKS FOUND IN CURRENT VIEW</div>`;
                 if (state.lastRenderedTasksHtml !== emptyHtml) {
@@ -2877,9 +3057,44 @@
                 return;
             }
 
-            const html = rootTasks.map(root => {
-                const hasChildren = root.children && root.children.length > 0;
+            let hiddenDoneCount = 0;
+            
+            const filteredRootTasks = rootTasks.map(root => {
+                const isRootDone = root.status === 'done';
+                const children = root.children || [];
+                const doneChildren = children.filter(c => c.status === 'done');
+                const activeChildren = children.filter(c => c.status !== 'done');
+                
+                let shouldHideRoot = isRootDone && activeChildren.length === 0;
+                
+                if (shouldHideRoot) {
+                    hiddenDoneCount += 1 + doneChildren.length;
+                    if (!state.showDoneInGraph) return null;
+                } else {
+                    hiddenDoneCount += doneChildren.length;
+                }
+                
+                return {
+                    ...root,
+                    displayChildren: state.showDoneInGraph ? children : activeChildren,
+                    isDone: isRootDone
+                };
+            }).filter(Boolean);
+
+            const doneToggleBtn = document.getElementById('pg-done-toggle');
+            if (doneToggleBtn) {
+                doneToggleBtn.textContent = state.showDoneInGraph ? `Hide Done (${hiddenDoneCount})` : `Show Done (${hiddenDoneCount})`;
+                if (hiddenDoneCount === 0) {
+                    doneToggleBtn.style.display = 'none';
+                } else {
+                    doneToggleBtn.style.display = 'block';
+                }
+            }
+
+            const html = filteredRootTasks.map(root => {
+                const hasChildren = root.displayChildren && root.displayChildren.length > 0;
                 const rootStatusColor = `var(--status-${root.status})`;
+                const rootDoneStyle = root.isDone ? 'opacity: 0.5; filter: grayscale(100%);' : '';
                 
                 const rootTicketId = extractTicketId(root.title);
                 const rootTitle = root.title.replace(/^\[?[A-Z]+-\d+\]?:?\s*/, '');
@@ -2902,7 +3117,7 @@
 
                 const rootNodeHtml = `
                     <div class="pg-root-wrapper ${hasChildren ? 'has-children' : ''}">
-                        <div class="pg-node" style="--node-color: ${rootStatusColor}" onclick="handleTaskClick(event, '${root.id}')">
+                        <div class="pg-node" style="--node-color: ${rootStatusColor}; ${rootDoneStyle}" onclick="handleTaskClick(event, '${root.id}')">
                             <div class="pg-node-top">
                                 <div class="pg-node-title" title="${escapeHtml(root.title)}">
                                     <span style="color: var(--accent); margin-right: 4px;">${escapeHtml(rootTicketId)}</span>
@@ -2919,8 +3134,9 @@
 
                 let childrenHtml = '';
                 if (hasChildren) {
-                    const childrenNodes = root.children.map(child => {
+                    const childrenNodes = root.displayChildren.map(child => {
                         const childStatusColor = `var(--status-${child.status})`;
+                        const childDoneStyle = child.status === 'done' ? 'opacity: 0.5; filter: grayscale(100%);' : '';
                         const repo = extractTargetRepo(child.title) || 'task';
                         
                         let childAgentHtml = '';
@@ -2960,7 +3176,7 @@
                                 }
 
                                 lifecycleHtml = `
-                                    <div class="pg-timeline">
+                                    <div class="pg-timeline" style="${childDoneStyle}">
                                         ${steps.map((step, idx) => {
                                             const isLast = idx === steps.length - 1 && !pendingStep;
                                             const dotClass = isLast && isChildInProgress ? 'pulse-dot' : '';
@@ -2991,7 +3207,7 @@
 
                         return `
                             <div class="pg-child-wrapper">
-                                <div class="pg-node" style="--node-color: ${childStatusColor}" onclick="handleTaskClick(event, '${child.id}')">
+                                <div class="pg-node" style="--node-color: ${childStatusColor}; ${childDoneStyle}" onclick="handleTaskClick(event, '${child.id}')">
                                     <div class="pg-node-top">
                                         <div class="pg-node-title" style="color: var(--accent);" title="${escapeHtml(child.title)}">
                                             ${escapeHtml(repo)}
@@ -3023,6 +3239,23 @@
             }).join('');
 
             container.innerHTML = html;
+        };
+
+        window.toggleTaskCards = () => {
+            const content = document.getElementById('task-cards-content');
+            const toggle = document.getElementById('task-cards-toggle');
+            if (content.classList.contains('collapsed')) {
+                content.classList.remove('collapsed');
+                toggle.textContent = '(hide)';
+            } else {
+                content.classList.add('collapsed');
+                toggle.textContent = '(show)';
+            }
+        };
+
+        window.toggleProcessGraphDone = () => {
+            state.showDoneInGraph = !state.showDoneInGraph;
+            renderProcessGraph();
         };
 
         window.toggleProcessGraph = () => {
@@ -3219,6 +3452,85 @@
             } catch (err) {
                 console.error('Error deleting knowledge:', err);
                 alert('Failed to delete knowledge entry');
+            }
+        };
+
+        // Config Panel Logic
+        window.toggleConfigPanel = () => {
+            const content = document.getElementById('config-content');
+            const toggle = document.getElementById('config-toggle');
+            if (content.classList.contains('collapsed')) {
+                content.classList.remove('collapsed');
+                toggle.textContent = '(hide)';
+                loadConfig();
+            } else {
+                content.classList.add('collapsed');
+                toggle.textContent = '(show)';
+            }
+        };
+
+        window.loadConfig = async () => {
+            try {
+                const res = await fetch(getApiUrl('/config'));
+                if (!res.ok) throw new Error('Failed to fetch config');
+                const data = await res.json();
+                
+                if (data.claude) {
+                    if (data.claude.model) document.getElementById('config-claude-model').value = data.claude.model;
+                    if (data.claude.fallbackModel !== undefined) document.getElementById('config-claude-fallback').value = data.claude.fallbackModel;
+                    if (data.claude.maxAgents) document.getElementById('config-claude-slots').value = data.claude.maxAgents;
+                }
+                if (data.codex) {
+                    if (data.codex.model) document.getElementById('config-codex-model').value = data.codex.model;
+                    if (data.codex.effort) document.getElementById('config-codex-effort').value = data.codex.effort;
+                    if (data.codex.reviewEffort) document.getElementById('config-codex-review').value = data.codex.reviewEffort;
+                    if (data.codex.maxAgents) document.getElementById('config-codex-slots').value = data.codex.maxAgents;
+                }
+            } catch (err) {
+                console.error('Error loading config:', err);
+            }
+        };
+
+        window.saveConfig = async () => {
+            const btn = document.getElementById('btn-save-config');
+            try {
+                btn.disabled = true;
+                btn.textContent = 'Saving...';
+                
+                const payload = {
+                    claude: {
+                        model: document.getElementById('config-claude-model').value,
+                        fallbackModel: document.getElementById('config-claude-fallback').value,
+                        maxAgents: parseInt(document.getElementById('config-claude-slots').value) || 10
+                    },
+                    codex: {
+                        model: document.getElementById('config-codex-model').value,
+                        effort: document.getElementById('config-codex-effort').value,
+                        reviewEffort: document.getElementById('config-codex-review').value,
+                        maxAgents: parseInt(document.getElementById('config-codex-slots').value) || 3
+                    }
+                };
+
+                const res = await fetch(getApiUrl('/config'), {
+                    method: 'PATCH',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify(payload)
+                });
+
+                if (!res.ok) throw new Error('Failed to save config');
+                
+                btn.textContent = 'Saved!';
+                setTimeout(() => {
+                    btn.textContent = 'Save';
+                    btn.disabled = false;
+                }, 2000);
+            } catch (err) {
+                console.error('Error saving config:', err);
+                btn.textContent = 'Error';
+                setTimeout(() => {
+                    btn.textContent = 'Save';
+                    btn.disabled = false;
+                }, 2000);
             }
         };
 
