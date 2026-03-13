@@ -1871,6 +1871,20 @@
                             <input type="number" id="config-codex-slots" class="config-input" min="1" max="20">
                         </div>
                     </div>
+                    <div class="config-column">
+                        <div class="config-col-title">CI AUTO-FIX</div>
+                        <div class="config-row">
+                            <label>Enabled</label>
+                            <select id="config-ci-enabled" class="config-select">
+                                <option value="true">yes</option>
+                                <option value="false">no</option>
+                            </select>
+                        </div>
+                        <div class="config-row">
+                            <label>Max Cycles</label>
+                            <input type="number" id="config-ci-maxcycles" class="config-input" min="1" max="5">
+                        </div>
+                    </div>
                 </div>
                 <div class="config-footer">
                     <button class="btn-send" id="btn-save-config" onclick="saveConfig()">Save</button>
@@ -3046,11 +3060,29 @@
             return title.substring(0, 8) + (title.length > 8 ? '...' : '');
         };
 
+        const getProcessGraphTasks = () => {
+            // Process graph always uses ALL tasks — independent of card filter pills
+            const sorted = [...state.tasks].sort((a, b) => new Date(b.created_at) - new Date(a.created_at));
+            const taskMap = new Map(sorted.map(t => [t.id, { ...t, children: [] }]));
+            const rootTasks = [];
+            taskMap.forEach(task => {
+                if (task.parent_task_id && taskMap.has(task.parent_task_id)) {
+                    taskMap.get(task.parent_task_id).children.push(task);
+                } else {
+                    rootTasks.push(task);
+                }
+            });
+            rootTasks.forEach(task => {
+                task.children.sort((a, b) => new Date(b.created_at) - new Date(a.created_at));
+            });
+            return rootTasks;
+        };
+
         const renderProcessGraph = () => {
             const container = document.getElementById('process-graph-content');
             if (!container) return;
 
-            const rootTasks = getProcessedTasks();
+            const rootTasks = getProcessGraphTasks();
             
             if (rootTasks.length === 0) {
                 container.innerHTML = `<div class="empty-state" style="padding: 24px;">NO PROCESS DATA</div>`;
@@ -3089,6 +3121,11 @@
                 } else {
                     doneToggleBtn.style.display = 'block';
                 }
+            }
+
+            if (filteredRootTasks.length === 0 && hiddenDoneCount > 0) {
+                container.innerHTML = `<div class="empty-state" style="padding: 24px;">ALL PROCESSES COMPLETE &mdash; ${hiddenDoneCount} done</div>`;
+                return;
             }
 
             const html = filteredRootTasks.map(root => {
@@ -3486,6 +3523,10 @@
                     if (data.codex.reviewEffort) document.getElementById('config-codex-review').value = data.codex.reviewEffort;
                     if (data.codex.maxAgents) document.getElementById('config-codex-slots').value = data.codex.maxAgents;
                 }
+                if (data.ciAutoFix) {
+                    if (data.ciAutoFix.enabled !== undefined) document.getElementById('config-ci-enabled').value = String(data.ciAutoFix.enabled);
+                    if (data.ciAutoFix.maxCycles) document.getElementById('config-ci-maxcycles').value = data.ciAutoFix.maxCycles;
+                }
             } catch (err) {
                 console.error('Error loading config:', err);
             }
@@ -3508,6 +3549,10 @@
                         effort: document.getElementById('config-codex-effort').value,
                         reviewEffort: document.getElementById('config-codex-review').value,
                         maxAgents: parseInt(document.getElementById('config-codex-slots').value) || 3
+                    },
+                    ciAutoFix: {
+                        enabled: document.getElementById('config-ci-enabled').value === 'true',
+                        maxCycles: parseInt(document.getElementById('config-ci-maxcycles').value) || 2
                     }
                 };
 
