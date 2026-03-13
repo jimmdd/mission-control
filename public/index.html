@@ -1821,14 +1821,16 @@
                         <textarea id="kb-text" class="kb-textarea" placeholder="Type knowledge — branch rules, conventions, gotchas..." required></textarea>
                         <div class="kb-form-footer">
                             <div class="kb-importance-selector">
+                                <span style="font-size: 9px; color: rgba(255,255,255,0.25); margin-right: 6px;">CRITICAL</span>
                                 <div id="kb-priority-pills">
-                                    <span class="kb-priority-select" data-val="5" onclick="setKbImportance(5)">P5</span>
-                                    <span class="kb-priority-select" data-val="4" onclick="setKbImportance(4)">P4</span>
+                                    <span class="kb-priority-select active-p1" data-val="5" onclick="setKbImportance(5)">P1</span>
+                                    <span class="kb-priority-select" data-val="4" onclick="setKbImportance(4)">P2</span>
                                     <span class="kb-priority-select" data-val="3" onclick="setKbImportance(3)">P3</span>
-                                    <span class="kb-priority-select" data-val="2" onclick="setKbImportance(2)">P2</span>
-                                    <span class="kb-priority-select active-p1" data-val="1" onclick="setKbImportance(1)">P1</span>
+                                    <span class="kb-priority-select" data-val="2" onclick="setKbImportance(2)">P4</span>
+                                    <span class="kb-priority-select" data-val="1" onclick="setKbImportance(1)">P5</span>
                                 </div>
-                                <input type="hidden" id="kb-importance" value="1">
+                                <span style="font-size: 9px; color: rgba(255,255,255,0.25); margin-left: 6px;">NICE TO KNOW</span>
+                                <input type="hidden" id="kb-importance" value="5">
                             </div>
                             <button type="submit" class="btn-send" id="btn-add-kb">Add Knowledge</button>
                         </div>
@@ -3386,8 +3388,9 @@
 
         window.setKbImportance = (val) => {
             document.getElementById('kb-importance').value = val;
+            const pLevel = 6 - val;
             document.querySelectorAll('#kb-priority-pills .kb-priority-select').forEach(pill => {
-                pill.className = 'kb-priority-select' + (parseInt(pill.dataset.val) === val ? ` active-p${val}` : '');
+                pill.className = 'kb-priority-select' + (parseInt(pill.dataset.val) === val ? ` active-p${pLevel}` : '');
             });
         };
 
@@ -3402,7 +3405,8 @@
                 const isAuto = entry.source === 'auto';
                 const sourceClass = isAuto ? 'auto' : 'human';
                 const sourceLabel = isAuto ? 'AUTO' : 'HUMAN';
-                const pLevel = Math.max(1, Math.min(5, Math.round(entry.importance || 3)));
+                const importance = Math.max(1, Math.min(5, Math.round(entry.importance || 3)));
+                const pLevel = 6 - importance;
                 const pLabel = `P${pLevel}`;
                 
                 let scopeLabel = 'global';
@@ -3547,7 +3551,7 @@
                 if (!res.ok) throw new Error('Failed to add knowledge');
 
                 textInput.value = '';
-                setKbImportance(1);
+                setKbImportance(5);
                 await loadKnowledge();
             } catch (err) {
                 console.error('Error adding knowledge:', err);
