@@ -26,6 +26,7 @@
             --status-active: #00ff88;
             --status-error: #ff4444;
             --status-testing: #a78bfa;
+            --status-on_hold: #f97316;
             --status-review: #818cf8;
 
             --priority-urgent: #ef4444;
@@ -709,6 +710,7 @@
         .badge-status.done { background: rgba(107, 114, 128, 0.15); color: var(--status-done); border: 1px solid rgba(107, 114, 128, 0.3); }
         .badge-status.failed { background: rgba(239, 68, 68, 0.15); color: var(--status-failed); border: 1px solid rgba(239, 68, 68, 0.3); }
         .badge-status.testing { background: rgba(167, 139, 250, 0.15); color: var(--status-testing); border: 1px solid rgba(167, 139, 250, 0.3); }
+        .badge-status.on_hold { background: rgba(249, 115, 22, 0.15); color: var(--status-on_hold); border: 1px solid rgba(249, 115, 22, 0.3); }
         .badge-status.review { background: rgba(129, 140, 248, 0.15); color: var(--status-review); border: 1px solid rgba(129, 140, 248, 0.3); }
 
         .badge-source {
@@ -1857,10 +1859,12 @@
                         <div class="config-row">
                             <label>Model</label>
                             <select id="config-codex-model" class="config-select">
-                                <option value="o3">o3</option>
-                                <option value="o4-mini">o4-mini</option>
-                                <option value="codex-mini">codex-mini</option>
-                                <option value="gpt-4.1">gpt-4.1</option>
+                                <option value="gpt-5.4">gpt-5.4</option>
+                                <option value="gpt-5.3-codex">gpt-5.3-codex</option>
+                                <option value="gpt-5.2-codex">gpt-5.2-codex</option>
+                                <option value="gpt-5.2">gpt-5.2</option>
+                                <option value="gpt-5.1-codex-max">gpt-5.1-codex-max</option>
+                                <option value="gpt-5.1-codex-mini">gpt-5.1-codex-mini</option>
                             </select>
                         </div>
                         <div class="config-row">
@@ -1982,7 +1986,7 @@
         };
 
         // Constants
-        const STATUSES = ['inbox', 'planning', 'in_progress', 'assigned', 'done', 'failed'];
+        const STATUSES = ['inbox', 'planning', 'in_progress', 'assigned', 'review', 'on_hold', 'done', 'failed'];
         const PRIORITIES = { urgent: 4, high: 3, normal: 2, low: 1 };
 
         // DOM Elements
@@ -2508,6 +2512,7 @@
                 { id: 'inbox', label: 'INBOX' },
                 { id: 'planning', label: 'PLANNING' },
                 { id: 'in_progress', label: 'IN PROGRESS' },
+                { id: 'on_hold', label: 'ON HOLD' },
                 { id: 'done', label: 'DONE' }
             ];
 
@@ -3146,7 +3151,7 @@
             const html = filteredRootTasks.map(root => {
                 const hasChildren = root.displayChildren && root.displayChildren.length > 0;
                 const rootStatusColor = `var(--status-${root.status})`;
-                const rootDoneStyle = root.isDone ? 'opacity: 0.5; filter: grayscale(100%);' : '';
+                const rootDoneStyle = root.isDone ? 'opacity: 0.7; filter: grayscale(60%);' : '';
                 
                 const rootTicketId = extractTicketId(root.title);
                 const rootTitle = root.title.replace(/^\[?[A-Z]+-\d+\]?:?\s*/, '');
@@ -3188,7 +3193,7 @@
                 if (hasChildren) {
                     const childrenNodes = root.displayChildren.map(child => {
                         const childStatusColor = `var(--status-${child.status})`;
-                        const childDoneStyle = child.status === 'done' ? 'opacity: 0.5; filter: grayscale(100%);' : '';
+                        const childDoneStyle = child.status === 'done' ? 'opacity: 0.7; filter: grayscale(60%);' : '';
                         const repo = extractTargetRepo(child.title) || 'task';
                         
                         let childAgentHtml = '';

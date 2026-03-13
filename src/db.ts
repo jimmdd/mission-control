@@ -12,6 +12,7 @@ export type TaskStatus =
   | "in_progress"
   | "testing"
   | "review"
+  | "on_hold"
   | "done";
 export type TaskPriority = "low" | "normal" | "high" | "urgent";
 
@@ -262,7 +263,7 @@ CREATE TABLE IF NOT EXISTS tasks (
   id TEXT PRIMARY KEY,
   title TEXT NOT NULL,
   description TEXT,
-  status TEXT DEFAULT 'inbox' CHECK (status IN ('pending_dispatch', 'planning', 'inbox', 'assigned', 'in_progress', 'testing', 'review', 'done')),
+  status TEXT DEFAULT 'inbox' CHECK (status IN ('pending_dispatch', 'planning', 'inbox', 'assigned', 'in_progress', 'testing', 'review', 'on_hold', 'done')),
   priority TEXT DEFAULT 'normal' CHECK (priority IN ('low', 'normal', 'high', 'urgent')),
   assigned_agent_id TEXT REFERENCES agents(id),
   created_by_agent_id TEXT REFERENCES agents(id),
@@ -354,6 +355,42 @@ export class MissionControlDB {
 
   initSchema(): void {
     this.db.exec(SCHEMA_SQL);
+    this.migrateTaskStatus();
+  }
+
+  private migrateTaskStatus(): void {
+    const row = this.db
+      .prepare("SELECT sql FROM sqlite_master WHERE type='table' AND name='tasks'")
+      .get() as { sql: string } | undefined;
+    if (!row || row.sql.includes("on_hold")) return;
+
+    this.db.exec(`
+      PRAGMA foreign_keys = OFF;
+      BEGIN;
+      CREATE TABLE tasks_migrated (
+        id TEXT PRIMARY KEY,
+        title TEXT NOT NULL,
+        description TEXT,
+        status TEXT DEFAULT 'inbox' CHECK (status IN ('pending_dispatch', 'planning', 'inbox', 'assigned', 'in_progress', 'testing', 'review', 'on_hold', 'done')),
+        priority TEXT DEFAULT 'normal' CHECK (priority IN ('low', 'normal', 'high', 'urgent')),
+        assigned_agent_id TEXT REFERENCES agents(id),
+        created_by_agent_id TEXT REFERENCES agents(id),
+        workspace_id TEXT DEFAULT 'default' REFERENCES workspaces(id),
+        due_date TEXT,
+        parent_task_id TEXT REFERENCES tasks(id),
+        linear_issue_id TEXT,
+        linear_issue_url TEXT,
+        source TEXT DEFAULT 'manual',
+        triage_state TEXT,
+        created_at TEXT DEFAULT (datetime('now')),
+        updated_at TEXT DEFAULT (datetime('now'))
+      );
+      INSERT INTO tasks_migrated SELECT * FROM tasks;
+      DROP TABLE tasks;
+      ALTER TABLE tasks_migrated RENAME TO tasks;
+      COMMIT;
+      PRAGMA foreign_keys = ON;
+    `);
   }
 
   seedDefaults(): void {
