@@ -1308,11 +1308,19 @@
             border: 1px solid rgba(255, 255, 255, 0.1);
         }
 
-        .kb-stars {
-            color: var(--status-planning);
-            font-size: 12px;
-            letter-spacing: 2px;
+        .kb-priority {
+            font-family: var(--font-mono);
+            font-size: 10px;
+            font-weight: 600;
+            padding: 2px 6px;
+            border-radius: 3px;
+            letter-spacing: 0.5px;
         }
+        .kb-priority.p1 { background: rgba(239,68,68,0.2); color: #ef4444; border: 1px solid rgba(239,68,68,0.3); }
+        .kb-priority.p2 { background: rgba(249,115,22,0.2); color: #f97316; border: 1px solid rgba(249,115,22,0.3); }
+        .kb-priority.p3 { background: rgba(234,179,8,0.2); color: #eab308; border: 1px solid rgba(234,179,8,0.3); }
+        .kb-priority.p4 { background: rgba(34,197,94,0.2); color: #22c55e; border: 1px solid rgba(34,197,94,0.3); }
+        .kb-priority.p5 { background: rgba(255,255,255,0.05); color: var(--text-secondary); border: 1px solid rgba(255,255,255,0.1); }
 
         .kb-delete {
             background: none;
@@ -1374,16 +1382,25 @@
             align-items: center;
         }
 
-        .kb-star-select {
+        .kb-priority-select {
             cursor: pointer;
+            font-family: var(--font-mono);
+            font-size: 10px;
+            font-weight: 600;
+            padding: 3px 8px;
+            border-radius: 3px;
+            border: 1px solid rgba(255,255,255,0.1);
+            background: rgba(255,255,255,0.03);
             color: var(--text-secondary);
-            font-size: 16px;
-            transition: color 0.2s;
+            transition: all 0.2s;
+            margin-right: 4px;
         }
-
-        .kb-star-select.active {
-            color: var(--status-planning);
-        }
+        .kb-priority-select:hover { border-color: rgba(255,255,255,0.3); }
+        .kb-priority-select.active-p1 { background: rgba(239,68,68,0.2); color: #ef4444; border-color: rgba(239,68,68,0.4); }
+        .kb-priority-select.active-p2 { background: rgba(249,115,22,0.2); color: #f97316; border-color: rgba(249,115,22,0.4); }
+        .kb-priority-select.active-p3 { background: rgba(234,179,8,0.2); color: #eab308; border-color: rgba(234,179,8,0.4); }
+        .kb-priority-select.active-p4 { background: rgba(34,197,94,0.2); color: #22c55e; border-color: rgba(34,197,94,0.4); }
+        .kb-priority-select.active-p5 { background: rgba(255,255,255,0.05); color: var(--text-primary); border-color: rgba(255,255,255,0.2); }
 
         /* Config Panel */
         .config-panel {
@@ -1804,15 +1821,14 @@
                         <textarea id="kb-text" class="kb-textarea" placeholder="Type knowledge — branch rules, conventions, gotchas..." required></textarea>
                         <div class="kb-form-footer">
                             <div class="kb-importance-selector">
-                                <span style="font-size: 11px; color: var(--text-secondary); margin-right: 8px;">Importance:</span>
-                                <div class="kb-stars" id="kb-stars">
-                                    <span class="kb-star-select active" data-val="1" onclick="setKbImportance(1)">★</span>
-                                    <span class="kb-star-select active" data-val="2" onclick="setKbImportance(2)">★</span>
-                                    <span class="kb-star-select active" data-val="3" onclick="setKbImportance(3)">★</span>
-                                    <span class="kb-star-select active" data-val="4" onclick="setKbImportance(4)">★</span>
-                                    <span class="kb-star-select active" data-val="5" onclick="setKbImportance(5)">★</span>
+                                <div id="kb-priority-pills">
+                                    <span class="kb-priority-select" data-val="5" onclick="setKbImportance(5)">P5</span>
+                                    <span class="kb-priority-select" data-val="4" onclick="setKbImportance(4)">P4</span>
+                                    <span class="kb-priority-select" data-val="3" onclick="setKbImportance(3)">P3</span>
+                                    <span class="kb-priority-select" data-val="2" onclick="setKbImportance(2)">P2</span>
+                                    <span class="kb-priority-select active-p1" data-val="1" onclick="setKbImportance(1)">P1</span>
                                 </div>
-                                <input type="hidden" id="kb-importance" value="5">
+                                <input type="hidden" id="kb-importance" value="1">
                             </div>
                             <button type="submit" class="btn-send" id="btn-add-kb">Add Knowledge</button>
                         </div>
@@ -3370,13 +3386,8 @@
 
         window.setKbImportance = (val) => {
             document.getElementById('kb-importance').value = val;
-            const stars = document.querySelectorAll('#kb-stars .kb-star-select');
-            stars.forEach(star => {
-                if (parseInt(star.dataset.val) <= val) {
-                    star.classList.add('active');
-                } else {
-                    star.classList.remove('active');
-                }
+            document.querySelectorAll('#kb-priority-pills .kb-priority-select').forEach(pill => {
+                pill.className = 'kb-priority-select' + (parseInt(pill.dataset.val) === val ? ` active-p${val}` : '');
             });
         };
 
@@ -3391,7 +3402,8 @@
                 const isAuto = entry.source === 'auto';
                 const sourceClass = isAuto ? 'auto' : 'human';
                 const sourceLabel = isAuto ? 'AUTO' : 'HUMAN';
-                const stars = '★'.repeat(entry.importance || 1) + '☆'.repeat(5 - (entry.importance || 1));
+                const pLevel = Math.max(1, Math.min(5, Math.round(entry.importance || 3)));
+                const pLabel = `P${pLevel}`;
                 
                 let scopeLabel = 'global';
                 if (entry.scope && entry.scope.startsWith('repo:')) {
@@ -3411,7 +3423,7 @@
                                 <span class="kb-badge" style="background: rgba(255,255,255,0.05); border: 1px solid rgba(255,255,255,0.1);">${escapeHtml(scopeLabel)}</span>
                             </div>
                             <div style="display: flex; align-items: center; gap: 12px;">
-                                <span class="kb-stars">${stars}</span>
+                                <span class="kb-priority p${pLevel}">${pLabel}</span>
                                 <button class="kb-delete" onclick="deleteKnowledge('${entry.id}')" title="Delete entry">×</button>
                             </div>
                         </div>
@@ -3535,7 +3547,7 @@
                 if (!res.ok) throw new Error('Failed to add knowledge');
 
                 textInput.value = '';
-                setKbImportance(5);
+                setKbImportance(1);
                 await loadKnowledge();
             } catch (err) {
                 console.error('Error adding knowledge:', err);
