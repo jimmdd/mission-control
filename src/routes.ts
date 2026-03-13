@@ -1,4 +1,4 @@
-import { readFileSync, writeFileSync, existsSync } from "node:fs";
+import { readFileSync, writeFileSync, existsSync, readdirSync } from "node:fs";
 import { join, dirname } from "node:path";
 import { homedir, cpus, totalmem, freemem, loadavg } from "node:os";
 import { fileURLToPath } from "node:url";
@@ -674,6 +674,27 @@ async function handleApiRequest(
             sendJson(res, 200, current);
             return;
           }
+        }
+
+        if (segments[0] === "repos" && segments.length === 1 && method === "GET") {
+          const gitProjectsDir = join(homedir(), "GitProjects");
+          const repos: Array<{ project: string; repo: string }> = [];
+          try {
+            const projects = readdirSync(gitProjectsDir, { withFileTypes: true })
+              .filter(d => d.isDirectory() && !d.name.startsWith("."));
+            for (const proj of projects) {
+              const projPath = join(gitProjectsDir, proj.name);
+              const children = readdirSync(projPath, { withFileTypes: true })
+                .filter(d => d.isDirectory() && !d.name.startsWith(".") && d.name !== "worktrees");
+              for (const child of children) {
+                if (existsSync(join(projPath, child.name, ".git"))) {
+                  repos.push({ project: proj.name, repo: child.name });
+                }
+              }
+            }
+          } catch {}
+          sendJson(res, 200, { repos });
+          return;
         }
 
         if (segments[0] === "knowledge") {

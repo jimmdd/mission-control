@@ -2465,7 +2465,7 @@
             if (state.lastEvent) {
                 if (state.lastEvent.created_at) {
                     const d = new Date(state.lastEvent.created_at);
-                    eventTime = d.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', hour12: false });
+                    eventTime = d.toLocaleTimeString('en-US', { timeZone: TZ, hour: '2-digit', minute: '2-digit', hour12: false });
                 }
                 eventMsg = state.lastEvent.message || state.lastEvent.type || 'UNKNOWN EVENT';
             }
@@ -2492,7 +2492,7 @@
 
         const updateLastUpdated = () => {
             if (state.lastUpdated) {
-                const timeString = state.lastUpdated.toLocaleTimeString([], { hour12: false });
+                const timeString = state.lastUpdated.toLocaleTimeString('en-US', { timeZone: TZ, hour12: false });
                 els.lastUpdated.textContent = `LAST SYNC: ${timeString}`;
             }
         };
@@ -3333,18 +3333,33 @@
         // Knowledge Base Logic
         let kbState = {
             entries: [],
+            knownRepos: [],
             projects: new Set(),
             repos: new Set(),
             selectedProject: '',
             selectedRepo: ''
         };
 
-        window.toggleKnowledgePanel = () => {
+        window.toggleKnowledgePanel = async () => {
             const content = document.getElementById('knowledge-content');
             const toggle = document.getElementById('knowledge-toggle');
             if (content.classList.contains('collapsed')) {
                 content.classList.remove('collapsed');
                 toggle.textContent = '(hide)';
+                if (kbState.knownRepos.length === 0) {
+                    try {
+                        const reposRes = await fetch(getApiUrl('/repos'));
+                        if (reposRes.ok) {
+                            const data = await reposRes.json();
+                            kbState.knownRepos = data.repos || [];
+                            kbState.knownRepos.forEach(r => {
+                                kbState.projects.add(r.project);
+                                kbState.repos.add(r.repo);
+                            });
+                            updateKbSelectors();
+                        }
+                    } catch {}
+                }
                 loadKnowledge();
             } else {
                 content.classList.add('collapsed');
@@ -3377,13 +3392,22 @@
                 const sourceLabel = isAuto ? 'AUTO' : 'HUMAN';
                 const stars = '★'.repeat(entry.importance || 1) + '☆'.repeat(5 - (entry.importance || 1));
                 
+                let scopeLabel = 'global';
+                if (entry.scope && entry.scope.startsWith('repo:')) {
+                    scopeLabel = entry.scope.slice(5);
+                } else if (entry.scope && entry.scope.startsWith('project:')) {
+                    scopeLabel = entry.scope.slice(8);
+                } else if (entry.scope && entry.scope !== 'global') {
+                    scopeLabel = entry.scope;
+                }
+
                 return `
                     <div class="kb-entry">
                         <div class="kb-entry-header">
                             <div class="kb-badges">
                                 <span class="kb-badge ${sourceClass}">${sourceLabel}</span>
                                 ${entry.category ? `<span class="kb-badge category">${escapeHtml(entry.category)}</span>` : ''}
-                                <span class="kb-badge" style="background: rgba(255,255,255,0.05); border: 1px solid rgba(255,255,255,0.1);">${escapeHtml(entry.project || 'global')}/${escapeHtml(entry.repo || 'global')}</span>
+                                <span class="kb-badge" style="background: rgba(255,255,255,0.05); border: 1px solid rgba(255,255,255,0.1);">${escapeHtml(scopeLabel)}</span>
                             </div>
                             <div style="display: flex; align-items: center; gap: 12px;">
                                 <span class="kb-stars">${stars}</span>
@@ -3435,11 +3459,14 @@
                 
                 // Extract unique projects and repos for selectors if not filtering
                 if (!kbState.selectedProject && !kbState.selectedRepo) {
-                    kbState.projects.clear();
-                    kbState.repos.clear();
                     kbState.entries.forEach(e => {
-                        if (e.project) kbState.projects.add(e.project);
-                        if (e.repo) kbState.repos.add(e.repo);
+                        if (e.scope && e.scope.startsWith('repo:')) {
+                            const parts = e.scope.slice(5).split('/');
+                            if (parts[0]) kbState.projects.add(parts[0]);
+                            if (parts[1]) kbState.repos.add(parts[1]);
+                        } else if (e.scope && e.scope.startsWith('project:')) {
+                            kbState.projects.add(e.scope.slice(8));
+                        }
                     });
                     updateKbSelectors();
                 }
@@ -3449,6 +3476,20 @@
                 console.error('Error loading knowledge:', err);
                 document.getElementById('knowledge-list').innerHTML = '<div style="color: var(--status-failed); font-size: 12px; padding: 12px;">Failed to load knowledge base.</div>';
             }
+        };
+
+        const detectRepoFromText = (text) => {
+            const lower = text.toLowerCase();
+            let bestMatch = null;
+            let bestLen = 0;
+            for (const r of kbState.knownRepos) {
+                const repoLower = r.repo.toLowerCase();
+                if (lower.includes(repoLower) && repoLower.length > bestLen) {
+                    bestMatch = r;
+                    bestLen = repoLower.length;
+                }
+            }
+            return bestMatch;
         };
 
         window.addKnowledge = async (e) => {
@@ -3462,10 +3503,17 @@
             const text = textInput.value.trim();
             if (!text) return;
 
-            // Default to current selection or 'global' if none
-            const project = projSelect.value || 'global';
-            const repo = repoSelect.value || 'global';
+            let project = projSelect.value || '';
+            let repo = repoSelect.value || '';
             const importance = parseInt(importanceInput.value) || 5;
+
+            if (!project && !repo) {
+                const detected = detectRepoFromText(text);
+                if (detected) {
+                    project = detected.project;
+                    repo = detected.repo;
+                }
+            }
 
             try {
                 btn.disabled = true;
