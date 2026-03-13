@@ -10,7 +10,7 @@ Orchestrates an autonomous coding pipeline: Linear ticket → triage → agent s
 Linear (ticket created)
   │
   ▼
-Linear Sync ─────────────────── pulls tickets with `hiveclaw` label
+Linear Sync ─────────────────── pulls tickets with a configured label
   │                              into Mission Control as tasks
   ▼
 Bridge (triage) ─────────────── asks codebase-aware questions,
@@ -161,11 +161,11 @@ During triage, the bridge calls `recall_knowledge()` which:
 
 ```
 ## Developer Notes (MUST FOLLOW)
-- (repo:hivemapper/hivemapper-hdc-os) Production branch is bee. Feature
-  branches from bee or ctp-ready. Only modify meta-luxonis layer.
+- (repo:acme/firmware) Production branch is main. Feature
+  branches from main or release-candidate. Only modify src/drivers.
 
 ## Past Learnings (REFERENCE)
-- [fact] (repo:hivemapper/odc-api) Tests require NODE_ENV=test
+- [fact] (repo:acme/backend-api) Tests require NODE_ENV=test
 ```
 
 Knowledge can be added through:
@@ -181,7 +181,7 @@ Mission Control is the central hub. The surrounding scripts live in `~/.openclaw
 | Component | Path | Interval | Purpose |
 |-----------|------|----------|---------|
 | Linear Sync | `~/.openclaw/sync/linear-sync.py` | 300s | Sync tickets from Linear, detect done state |
-| Bridge | `~/.openclaw/bridge/hiveclaw-bridge.py` | 60s | Triage tasks, spawn agents, handle Q&A |
+| Bridge | `~/.openclaw/bridge/bridge.py` | 60s | Triage tasks, spawn agents, handle Q&A |
 | Agent Monitor | `~/.openclaw/swarm/check-agents.sh` | 120s | Health checks, Codex reviews, retry logic |
 | PR Watcher | `~/.openclaw/swarm/watch-pr-reviews.sh` | 120s | Detect GitHub review comments and approvals |
 | Agent Launcher | `~/.openclaw/swarm/run-claude.sh` | On-demand | Launch Claude with prompt, retry, cost controls |

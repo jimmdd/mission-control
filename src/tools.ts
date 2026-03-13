@@ -294,8 +294,8 @@ export function registerTools(api: OpenClawPluginApi, db: MissionControlDB): voi
         "This knowledge is recalled during task triage and injected into agent prompts.",
       parameters: Type.Object({
         text: Type.String({ minLength: 1, description: "The knowledge to store (natural language)" }),
-        project: Type.Optional(Type.String({ description: "Project name (e.g. 'hivemapper')" })),
-        repo: Type.Optional(Type.String({ description: "Repo name (e.g. 'odc-api')" })),
+        project: Type.Optional(Type.String({ description: "Project name (e.g. 'acme')" })),
+        repo: Type.Optional(Type.String({ description: "Repo name (e.g. 'backend-api')" })),
         importance: Type.Optional(Type.Number({ minimum: 1, maximum: 5, description: "1-5, default 5" })),
         category: Type.Optional(
           Type.Union([
