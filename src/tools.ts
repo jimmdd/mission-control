@@ -38,10 +38,13 @@ export function registerTools(api: OpenClawPluginApi, db: MissionControlDB): voi
     () => ({
       name: "mc_create_task",
       label: "Mission Control: Create Task",
-      description: "Create a new mission task",
+      description:
+        "Create a new task in Mission Control. Works without Linear — " +
+        "tasks can be created directly via chat. Supports parent-child hierarchy " +
+        "for multi-repo work.",
       parameters: Type.Object({
-        title: Type.String({ minLength: 1 }),
-        description: Type.Optional(Type.String()),
+        title: Type.String({ minLength: 1, description: "Task title (e.g. '[CAP-99] Fix auth bug')" }),
+        description: Type.Optional(Type.String({ description: "Detailed task description with requirements" })),
         priority: Type.Optional(
           Type.Union([
             Type.Literal("low"),
@@ -50,8 +53,19 @@ export function registerTools(api: OpenClawPluginApi, db: MissionControlDB): voi
             Type.Literal("urgent"),
           ])
         ),
+        status: Type.Optional(
+          Type.Union([
+            Type.Literal("inbox"),
+            Type.Literal("planning"),
+            Type.Literal("in_progress"),
+            Type.Literal("review"),
+            Type.Literal("on_hold"),
+          ], { description: "Initial status, defaults to inbox" })
+        ),
+        parent_task_id: Type.Optional(Type.String({ description: "Parent task ID for multi-repo child tasks" })),
         workspace_id: Type.Optional(Type.String()),
         assigned_agent_id: Type.Optional(Type.String()),
+        source: Type.Optional(Type.String({ description: "Task source: manual, api, chat. Defaults to chat" })),
       }),
       async execute(_toolCallId: string, params: unknown) {
         if (!isRecord(params) || typeof params.title !== "string") {
@@ -61,10 +75,26 @@ export function registerTools(api: OpenClawPluginApi, db: MissionControlDB): voi
           };
         }
 
-        const input = params as unknown as CreateTaskInput;
+        const input: CreateTaskInput = {
+          title: params.title as string,
+          description: typeof params.description === "string" ? params.description : undefined,
+          priority: typeof params.priority === "string" ? params.priority as CreateTaskInput["priority"] : undefined,
+          status: typeof params.status === "string" ? params.status as CreateTaskInput["status"] : "inbox",
+          parent_task_id: typeof params.parent_task_id === "string" ? params.parent_task_id : undefined,
+          workspace_id: typeof params.workspace_id === "string" ? params.workspace_id : undefined,
+          assigned_agent_id: typeof params.assigned_agent_id === "string" ? params.assigned_agent_id : undefined,
+          source: typeof params.source === "string" ? params.source : "chat",
+        };
         const task = db.createTask(input);
+
+        db.createActivity({
+          task_id: task.id,
+          activity_type: "created",
+          message: `Task created via ${input.source ?? "chat"}`,
+        });
+
         return {
-          content: [{ type: "text", text: `Created task ${task.id}: ${task.title}` }],
+          content: [{ type: "text", text: `Created task ${task.id}: ${task.title} (status: ${task.status})` }],
           details: task,
         };
       },

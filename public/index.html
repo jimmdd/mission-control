@@ -1771,10 +1771,34 @@
         <div class="mc-bg-effects"></div>
         
         <div class="task-cards-panel" style="padding: 24px 24px 0 24px; position: relative; z-index: 1;">
-            <div class="task-cards-header" style="margin-bottom: 16px;">
-                <div class="section-title" style="margin: 0; cursor: pointer;" onclick="toggleTaskCards()">
+            <div class="task-cards-header" style="margin-bottom: 16px; display: flex; align-items: center; gap: 12px;">
+                <div class="section-title" style="margin: 0; cursor: pointer; flex: 1;" onclick="toggleTaskCards()">
                     TASK CARDS (<span id="task-cards-count">0</span>) <span id="task-cards-toggle" style="font-size: 10px; opacity: 0.5; margin-left: 4px;">(hide)</span>
                 </div>
+                <button id="btn-new-task" class="filter-pill" onclick="toggleNewTaskForm()">+ NEW</button>
+            </div>
+            <div id="new-task-form-container" style="display: none; margin-bottom: 16px; background: var(--bg-card); border: 1px solid var(--border-color); border-radius: 4px; padding: 16px; transition: all 0.3s ease;">
+                <form id="new-task-form" onsubmit="submitNewTask(event)">
+                    <input type="text" id="new-task-title" class="kb-textarea" style="height: 40px; min-height: 40px; margin-bottom: 8px;" placeholder="Task title..." required>
+                    <textarea id="new-task-desc" class="kb-textarea" style="margin-bottom: 12px; display: none;" placeholder="Task description (optional)..."></textarea>
+                    <div style="display: flex; justify-content: space-between; align-items: center;">
+                        <div style="display: flex; gap: 8px; align-items: center;">
+                            <span style="font-size: 10px; color: var(--text-secondary); font-family: var(--font-mono);">PRIORITY:</span>
+                            <div id="new-task-priority-pills" style="display: flex; gap: 4px;">
+                                <span class="filter-pill" data-val="low" onclick="setNewTaskPriority('low')">LOW</span>
+                                <span class="filter-pill active" data-val="normal" onclick="setNewTaskPriority('normal')">NORMAL</span>
+                                <span class="filter-pill" data-val="high" onclick="setNewTaskPriority('high')">HIGH</span>
+                                <span class="filter-pill" data-val="urgent" onclick="setNewTaskPriority('urgent')">URGENT</span>
+                            </div>
+                            <input type="hidden" id="new-task-priority" value="normal">
+                        </div>
+                        <div style="display: flex; gap: 8px; align-items: center;">
+                            <span id="new-task-error" style="color: var(--status-error); font-size: 12px; display: none;"></span>
+                            <button type="button" class="filter-pill" onclick="toggleNewTaskDesc()" style="border: none;">+ Desc</button>
+                            <button type="submit" class="btn-send">Create</button>
+                        </div>
+                    </div>
+                </form>
             </div>
             <div class="task-cards-content" id="task-cards-content" style="transition: all 0.3s ease;">
                 <div class="task-list" id="task-list" style="padding: 0;">
@@ -2680,6 +2704,46 @@
                     </div>
                 ` : '';
 
+                let triageDetailsHtml = '';
+                let hasTriage = false;
+                if (task.status === 'planning' && task.triage_state) {
+                    try {
+                        const triageState = typeof task.triage_state === 'string' ? JSON.parse(task.triage_state) : task.triage_state;
+                        if (triageState && triageState.questions && triageState.questions.length > 0) {
+                            hasTriage = true;
+                            triageDetailsHtml = `
+                                <div class="subtask-details">
+                                    <div class="subtask-details-inner">
+                                        <div style="font-family: var(--font-mono); font-size: 12px; width: 100%;">
+                                            <div style="color: var(--text-secondary); margin-bottom: 12px; font-weight: bold; letter-spacing: 1px;">TRIAGE QUESTIONS</div>
+                                            ${triageState.questions.map((q, idx) => {
+                                                const isAnswered = q.answered || q.answer;
+                                                return `
+                                                    <div style="margin-bottom: 12px; padding-bottom: 12px; border-bottom: 1px solid rgba(255,255,255,0.05);">
+                                                        <div style="color: var(--text-primary); margin-bottom: 6px;"><span style="color: var(--accent);">Q:</span> ${escapeHtml(q.q || q.question)}</div>
+                                                        ${isAnswered ? `
+                                                            <div style="color: var(--text-secondary);"><span style="color: rgba(0, 255, 136, 0.5);">A:</span> ${escapeHtml(q.answer)}</div>
+                                                        ` : `
+                                                            <div style="display: flex; gap: 8px; margin-top: 8px;">
+                                                                <input type="text" id="triage-ans-${task.id}-${idx}" class="kb-textarea" style="margin: 0; min-height: 30px; height: 30px; font-family: var(--font-body); padding: 4px 8px;" placeholder="Type answer..." onclick="event.stopPropagation()">
+                                                                <button class="btn-send" style="padding: 4px 12px;" onclick="submitTriageAnswer(event, '${task.id}', ${idx})">Submit</button>
+                                                            </div>
+                                                        `}
+                                                    </div>
+                                                `;
+                                            }).join('')}
+                                        </div>
+                                    </div>
+                                </div>
+                            `;
+                        }
+                    } catch (e) {
+                        console.error('Failed to parse triage_state', e);
+                    }
+                }
+                
+                const isExpandable = hasChildren || hasTriage;
+
                 const stageMap = [
                     { status: 'inbox', label: 'SYNCED', desc: 'Uplinked from Linear' },
                     { status: 'planning', label: 'TRIAGE', desc: 'Analyzing requirements' },
@@ -2717,9 +2781,9 @@
 
                 return `
                     <div class="task-card ${isExpanded} ${task.priority === 'urgent' ? 'priority-urgent' : task.priority === 'high' ? 'priority-high' : ''}" id="card-${task.id}" style="--card-status-color: ${statusColor}">
-                        <div class="card-header" onclick="${hasChildren ? `toggleChildren(event, '${task.id}')` : `handleTaskClick(event, '${task.id}')`}">
+                        <div class="card-header" onclick="${isExpandable ? `toggleChildren(event, '${task.id}')` : `handleTaskClick(event, '${task.id}')`}">
                             <div class="card-top">
-                                ${hasChildren ? `<div class="card-expand-icon">▼</div>` : `<div class="card-expand-icon" style="opacity: 0"></div>`}
+                                ${isExpandable ? `<div class="card-expand-icon">▼</div>` : `<div class="card-expand-icon" style="opacity: 0"></div>`}
                                 <div class="card-priority ${task.priority || 'normal'}" title="${task.priority || 'normal'}"></div>
                                 <div class="card-title" onclick="handleTaskClick(event, '${task.id}')" title="${escapeHtml(task.title)}">${escapeHtml(task.title)}</div>
                                 ${agentBadgeHtml}
@@ -2732,6 +2796,7 @@
                             ${milestoneHtml}
                         </div>
                         ${subtaskDetailsHtml}
+                        ${triageDetailsHtml}
                     </div>
                 `;
             }).join('');
@@ -2754,6 +2819,45 @@
             const card = document.getElementById(`card-${parentId}`);
             if (card) {
                 card.classList.toggle('expanded');
+            }
+        };
+
+        window.submitTriageAnswer = async (event, taskId, questionIdx) => {
+            event.stopPropagation();
+            const inputEl = document.getElementById(`triage-ans-${taskId}-${questionIdx}`);
+            const answer = inputEl.value.trim();
+            if (!answer) return;
+
+            const task = state.tasks.find(t => t.id === taskId);
+            if (!task || !task.triage_state) return;
+
+            try {
+                const triageState = typeof task.triage_state === 'string' ? JSON.parse(task.triage_state) : task.triage_state;
+                if (triageState.questions && triageState.questions[questionIdx]) {
+                    triageState.questions[questionIdx].answer = answer;
+                    triageState.questions[questionIdx].answered = true;
+                    
+                    // Check if all answered
+                    const allAnswered = triageState.questions.every(q => q.answered || q.answer);
+                    if (allAnswered) {
+                        triageState.status = 'answered';
+                    }
+
+                    const res = await fetch(getApiUrl(`/tasks/${taskId}`), {
+                        method: 'PATCH',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify({ triage_state: JSON.stringify(triageState) })
+                    });
+
+                    if (!res.ok) throw new Error('Failed to submit answer');
+                    
+                    // Update local state and re-render
+                    task.triage_state = JSON.stringify(triageState);
+                    renderTasks();
+                }
+            } catch (err) {
+                console.error('Error submitting triage answer:', err);
+                alert('Failed to submit answer: ' + err.message);
             }
         };
 
@@ -3317,6 +3421,74 @@
             }).join('');
 
             container.innerHTML = html;
+        };
+
+        window.toggleNewTaskForm = () => {
+            const container = document.getElementById('new-task-form-container');
+            const btn = document.getElementById('btn-new-task');
+            if (container.style.display === 'none') {
+                container.style.display = 'block';
+                btn.classList.add('active');
+                document.getElementById('new-task-title').focus();
+            } else {
+                container.style.display = 'none';
+                btn.classList.remove('active');
+            }
+        };
+
+        window.toggleNewTaskDesc = () => {
+            const desc = document.getElementById('new-task-desc');
+            if (desc.style.display === 'none') {
+                desc.style.display = 'block';
+                desc.focus();
+            } else {
+                desc.style.display = 'none';
+            }
+        };
+
+        window.setNewTaskPriority = (val) => {
+            document.getElementById('new-task-priority').value = val;
+            document.querySelectorAll('#new-task-priority-pills .filter-pill').forEach(pill => {
+                if (pill.dataset.val === val) {
+                    pill.classList.add('active');
+                } else {
+                    pill.classList.remove('active');
+                }
+            });
+        };
+
+        window.submitNewTask = async (e) => {
+            e.preventDefault();
+            const title = document.getElementById('new-task-title').value.trim();
+            const description = document.getElementById('new-task-desc').value.trim();
+            const priority = document.getElementById('new-task-priority').value;
+            const errorEl = document.getElementById('new-task-error');
+            
+            if (!title) return;
+            
+            try {
+                const res = await fetch(getApiUrl('/tasks'), {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ title, description, priority, source: 'dashboard' })
+                });
+                
+                if (!res.ok) throw new Error('Failed to create task');
+                
+                // Reset form
+                document.getElementById('new-task-title').value = '';
+                document.getElementById('new-task-desc').value = '';
+                document.getElementById('new-task-desc').style.display = 'none';
+                setNewTaskPriority('normal');
+                errorEl.style.display = 'none';
+                
+                // Hide form and refresh
+                toggleNewTaskForm();
+                fetchData();
+            } catch (err) {
+                errorEl.textContent = err.message;
+                errorEl.style.display = 'block';
+            }
         };
 
         window.toggleTaskCards = () => {

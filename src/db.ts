@@ -55,8 +55,8 @@ export interface TaskRecord {
   workspace_id: string;
   due_date: string | null;
   parent_task_id: string | null;
-  linear_issue_id: string | null;
-  linear_issue_url: string | null;
+  external_id: string | null;
+  external_url: string | null;
   source: string;
   triage_state: string | null;
   created_at: string;
@@ -127,8 +127,8 @@ export interface CreateTaskInput {
   workspace_id?: string;
   due_date?: string;
   parent_task_id?: string;
-  linear_issue_id?: string;
-  linear_issue_url?: string;
+  external_id?: string;
+  external_url?: string;
   source?: string;
   triage_state?: string;
 }
@@ -143,8 +143,8 @@ export interface UpdateTaskInput {
   workspace_id?: string;
   due_date?: string | null;
   parent_task_id?: string | null;
-  linear_issue_id?: string | null;
-  linear_issue_url?: string | null;
+  external_id?: string | null;
+  external_url?: string | null;
   source?: string;
   triage_state?: string | null;
 }
@@ -270,8 +270,8 @@ CREATE TABLE IF NOT EXISTS tasks (
   workspace_id TEXT DEFAULT 'default' REFERENCES workspaces(id),
   due_date TEXT,
   parent_task_id TEXT REFERENCES tasks(id),
-  linear_issue_id TEXT,
-  linear_issue_url TEXT,
+external_id TEXT,
+            external_url TEXT,
   source TEXT DEFAULT 'manual',
   triage_state TEXT,
   created_at TEXT DEFAULT (datetime('now')),
@@ -331,7 +331,7 @@ CREATE INDEX IF NOT EXISTS idx_activities_task ON task_activities(task_id, creat
 CREATE INDEX IF NOT EXISTS idx_deliverables_task ON task_deliverables(task_id);
 CREATE INDEX IF NOT EXISTS idx_openclaw_sessions_task ON openclaw_sessions(task_id);
 CREATE INDEX IF NOT EXISTS idx_tasks_parent ON tasks(parent_task_id);
-CREATE UNIQUE INDEX IF NOT EXISTS idx_tasks_linear_issue ON tasks(linear_issue_id);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_tasks_external_id ON tasks(external_id);
 `;
 
 function generateSlug(name: string): string {
@@ -356,6 +356,50 @@ export class MissionControlDB {
   initSchema(): void {
     this.db.exec(SCHEMA_SQL);
     this.migrateTaskStatus();
+    this.migrateLinearColumns();
+  }
+
+  private migrateLinearColumns(): void {
+    const row = this.db
+      .prepare("SELECT sql FROM sqlite_master WHERE type='table' AND name='tasks'")
+      .get() as { sql: string } | undefined;
+    if (!row || !row.sql.includes("linear_issue_id")) return;
+
+    this.db.exec(`
+      PRAGMA foreign_keys = OFF;
+      BEGIN;
+      CREATE TABLE tasks_v2 (
+        id TEXT PRIMARY KEY,
+        title TEXT NOT NULL,
+        description TEXT,
+        status TEXT DEFAULT 'inbox' CHECK (status IN ('pending_dispatch', 'planning', 'inbox', 'assigned', 'in_progress', 'testing', 'review', 'on_hold', 'done')),
+        priority TEXT DEFAULT 'normal' CHECK (priority IN ('low', 'normal', 'high', 'urgent')),
+        assigned_agent_id TEXT REFERENCES agents(id),
+        created_by_agent_id TEXT REFERENCES agents(id),
+        workspace_id TEXT DEFAULT 'default' REFERENCES workspaces(id),
+        due_date TEXT,
+        parent_task_id TEXT REFERENCES tasks(id),
+        external_id TEXT,
+        external_url TEXT,
+        source TEXT DEFAULT 'manual',
+        triage_state TEXT,
+        created_at TEXT DEFAULT (datetime('now')),
+        updated_at TEXT DEFAULT (datetime('now'))
+      );
+      INSERT INTO tasks_v2(id, title, description, status, priority,
+        assigned_agent_id, created_by_agent_id, workspace_id, due_date,
+        parent_task_id, external_id, external_url, source, triage_state,
+        created_at, updated_at)
+      SELECT id, title, description, status, priority,
+        assigned_agent_id, created_by_agent_id, workspace_id, due_date,
+        parent_task_id, linear_issue_id, linear_issue_url, source, triage_state,
+        created_at, updated_at
+      FROM tasks;
+      DROP TABLE tasks;
+      ALTER TABLE tasks_v2 RENAME TO tasks;
+      COMMIT;
+      PRAGMA foreign_keys = ON;
+    `);
   }
 
   private migrateTaskStatus(): void {
@@ -378,14 +422,22 @@ export class MissionControlDB {
         workspace_id TEXT DEFAULT 'default' REFERENCES workspaces(id),
         due_date TEXT,
         parent_task_id TEXT REFERENCES tasks(id),
-        linear_issue_id TEXT,
-        linear_issue_url TEXT,
+        external_id TEXT,
+        external_url TEXT,
         source TEXT DEFAULT 'manual',
         triage_state TEXT,
         created_at TEXT DEFAULT (datetime('now')),
         updated_at TEXT DEFAULT (datetime('now'))
       );
-      INSERT INTO tasks_migrated SELECT * FROM tasks;
+      INSERT INTO tasks_migrated(id, title, description, status, priority,
+        assigned_agent_id, created_by_agent_id, workspace_id, due_date,
+        parent_task_id, external_id, external_url, source, triage_state,
+        created_at, updated_at)
+      SELECT id, title, description, status, priority,
+        assigned_agent_id, created_by_agent_id, workspace_id, due_date,
+        parent_task_id, linear_issue_id, linear_issue_url, source, triage_state,
+        created_at, updated_at
+      FROM tasks;
       DROP TABLE tasks;
       ALTER TABLE tasks_migrated RENAME TO tasks;
       COMMIT;
@@ -437,7 +489,7 @@ export class MissionControlDB {
       .prepare(
         `INSERT INTO tasks (
           id, title, description, status, priority, assigned_agent_id, created_by_agent_id,
-          workspace_id, due_date, parent_task_id, linear_issue_id, linear_issue_url,
+          workspace_id, due_date, parent_task_id, external_id, external_url,
           source, triage_state, created_at, updated_at
         ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
       )
@@ -452,8 +504,8 @@ export class MissionControlDB {
         data.workspace_id ?? "default",
         data.due_date ?? null,
         data.parent_task_id ?? null,
-        data.linear_issue_id ?? null,
-        data.linear_issue_url ?? null,
+        data.external_id ?? null,
+        data.external_url ?? null,
         data.source ?? "manual",
         data.triage_state ?? null,
         now,
@@ -491,11 +543,11 @@ export class MissionControlDB {
     if (data.parent_task_id !== undefined) {
       setValue("parent_task_id", data.parent_task_id);
     }
-    if (data.linear_issue_id !== undefined) {
-      setValue("linear_issue_id", data.linear_issue_id);
+    if (data.external_id !== undefined) {
+      setValue("external_id", data.external_id);
     }
-    if (data.linear_issue_url !== undefined) {
-      setValue("linear_issue_url", data.linear_issue_url);
+    if (data.external_url !== undefined) {
+      setValue("external_url", data.external_url);
     }
     if (data.source !== undefined) setValue("source", data.source);
     if (data.triage_state !== undefined) {

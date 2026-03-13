@@ -141,6 +141,16 @@ async function handleApiRequest(
               return;
             }
 
+            // Backward compat: accept old linear_issue_id/url field names
+            if (body.linear_issue_id && !body.external_id) {
+              body.external_id = body.linear_issue_id;
+              delete body.linear_issue_id;
+            }
+            if (body.linear_issue_url && !body.external_url) {
+              body.external_url = body.linear_issue_url;
+              delete body.linear_issue_url;
+            }
+
             const task = db.createTask(body as unknown as CreateTaskInput);
             sendJson(res, 201, task);
             return;
@@ -164,6 +174,14 @@ async function handleApiRequest(
               if (!isRecord(body)) {
                 sendJson(res, 400, { error: "Invalid request body" });
                 return;
+              }
+              if (body.linear_issue_id !== undefined && body.external_id === undefined) {
+                body.external_id = body.linear_issue_id;
+                delete body.linear_issue_id;
+              }
+              if (body.linear_issue_url !== undefined && body.external_url === undefined) {
+                body.external_url = body.linear_issue_url;
+                delete body.linear_issue_url;
               }
               const task = db.updateTask(taskId, body as unknown as UpdateTaskInput);
               if (!task) {
