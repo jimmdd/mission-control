@@ -2,7 +2,7 @@ import { readFileSync, writeFileSync, existsSync, readdirSync } from "node:fs";
 import { join, dirname } from "node:path";
 import { homedir, cpus, totalmem, freemem, loadavg } from "node:os";
 import { fileURLToPath } from "node:url";
-import { execFile } from "node:child_process";
+import { execFile, spawn } from "node:child_process";
 import type { IncomingMessage, ServerResponse } from "node:http";
 import type { OpenClawPluginApi } from "openclaw/plugin-sdk";
 import type {
@@ -52,6 +52,98 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 
 const PLUGIN_PREFIX = "/ext/mission-control";
 const API_PREFIX = `${PLUGIN_PREFIX}/api`;
+
+function getSwarmConfig(): Record<string, unknown> {
+  try {
+    const p = join(homedir(), ".openclaw", "swarm", "swarm-config.json");
+    if (existsSync(p)) return JSON.parse(readFileSync(p, "utf-8"));
+  } catch {}
+  return {};
+}
+
+function getLinearConfig(): { enabled: boolean; label: string; triageLabel: string; mentionTag: string; botName: string } {
+  const cfg = getSwarmConfig();
+  const linear = (cfg.linear ?? {}) as Record<string, unknown>;
+  return {
+    enabled: linear.enabled !== false,
+    label: typeof linear.label === "string" ? linear.label : "",
+    triageLabel: typeof linear.triageLabel === "string" ? linear.triageLabel : "",
+    mentionTag: typeof linear.mentionTag === "string" ? linear.mentionTag : "",
+    botName: typeof linear.botName === "string" ? linear.botName : "Mission Control",
+  };
+}
+
+const LINEAR_API = "https://api.linear.app/graphql";
+
+async function linearGraphQL(query: string, variables?: Record<string, unknown>): Promise<Record<string, unknown>> {
+  const apiKey = process.env.LINEAR_API_KEY;
+  if (!apiKey) throw new Error("LINEAR_API_KEY not set");
+
+  const resp = await fetch(LINEAR_API, {
+    method: "POST",
+    headers: { "Content-Type": "application/json", Authorization: apiKey },
+    body: JSON.stringify({ query, variables }),
+  });
+
+  if (!resp.ok) throw new Error(`Linear API ${resp.status}: ${resp.statusText}`);
+  const json = (await resp.json()) as Record<string, unknown>;
+  if (json.errors) {
+    const msgs = (json.errors as Array<{ message: string }>).map(e => e.message).join("; ");
+    throw new Error(`Linear GraphQL: ${msgs}`);
+  }
+  return (json.data ?? {}) as Record<string, unknown>;
+}
+
+async function fetchLinearTeams(): Promise<Array<{ id: string; name: string; key: string }>> {
+  const data = await linearGraphQL(`{ teams { nodes { id name key } } }`);
+  const teams = data.teams as { nodes: Array<{ id: string; name: string; key: string }> };
+  return teams.nodes;
+}
+
+let labelIdCache: Record<string, string> = {};
+
+async function resolveLinearLabelId(labelName: string): Promise<string | null> {
+  if (labelIdCache[labelName]) return labelIdCache[labelName];
+
+  const data = await linearGraphQL(
+    `query($name: String!) { issueLabels(filter: { name: { eq: $name } }) { nodes { id name } } }`,
+    { name: labelName },
+  );
+  const labels = data.issueLabels as { nodes: Array<{ id: string; name: string }> };
+  if (labels.nodes.length > 0) {
+    labelIdCache[labelName] = labels.nodes[0].id;
+    return labels.nodes[0].id;
+  }
+  return null;
+}
+
+const MC_PRIORITY_TO_LINEAR: Record<string, number> = { urgent: 1, high: 2, normal: 3, low: 4 };
+
+async function createLinearIssue(
+  teamId: string,
+  title: string,
+  description: string | undefined,
+  priority: string,
+  labelName: string,
+): Promise<{ id: string; identifier: string; url: string }> {
+  const labelId = await resolveLinearLabelId(labelName);
+  const linearPriority = MC_PRIORITY_TO_LINEAR[priority] ?? 3;
+  const labelIds = labelId ? [labelId] : [];
+
+  const data = await linearGraphQL(
+    `mutation($input: IssueCreateInput!) {
+      issueCreate(input: $input) {
+        success
+        issue { id identifier url }
+      }
+    }`,
+    { input: { title, description: description ?? "", teamId, priority: linearPriority, labelIds } },
+  );
+
+  const result = data.issueCreate as { success: boolean; issue: { id: string; identifier: string; url: string } };
+  if (!result.success) throw new Error("Linear issue creation failed");
+  return result.issue;
+}
 
 function getDashboardHtml(): string | null {
   try {
@@ -151,7 +243,45 @@ async function handleApiRequest(
               delete body.linear_issue_url;
             }
 
-            const task = db.createTask(body as unknown as CreateTaskInput);
+            const syncToLinear = body.sync_to_linear === true;
+            const linearTeamId = typeof body.linear_team_id === "string" ? body.linear_team_id : "";
+            delete body.sync_to_linear;
+            delete body.linear_team_id;
+
+            let task = db.createTask(body as unknown as CreateTaskInput);
+
+            if (syncToLinear && linearTeamId) {
+              try {
+                const linearCfg = getLinearConfig();
+                const taskType = typeof body.task_type === "string" ? body.task_type : "implementation";
+                const linearLabel = taskType === "investigation" && linearCfg.triageLabel
+                  ? linearCfg.triageLabel
+                  : linearCfg.label;
+                const issue = await createLinearIssue(
+                  linearTeamId,
+                  body.title as string,
+                  typeof body.description === "string" ? body.description : undefined,
+                  typeof body.priority === "string" ? body.priority : "normal",
+                  linearLabel,
+                );
+                task = db.updateTask(task.id, {
+                  external_id: issue.id,
+                  external_url: issue.url,
+                }) ?? task;
+                db.createActivity({
+                  task_id: task.id,
+                  activity_type: "synced",
+                  message: `Synced to Linear as ${issue.identifier}`,
+                });
+              } catch (err) {
+                db.createActivity({
+                  task_id: task.id,
+                  activity_type: "sync_failed",
+                  message: `Linear sync failed: ${err instanceof Error ? err.message : "Unknown error"}`,
+                });
+              }
+            }
+
             sendJson(res, 201, task);
             return;
           }
@@ -694,6 +824,29 @@ async function handleApiRequest(
           }
         }
 
+        if (segments[0] === "linear" && segments.length >= 2) {
+          if (segments[1] === "config" && method === "GET") {
+            const cfg = getLinearConfig();
+            const hasApiKey = !!process.env.LINEAR_API_KEY;
+            sendJson(res, 200, { ...cfg, hasApiKey });
+            return;
+          }
+
+          if (segments[1] === "teams" && method === "GET") {
+            if (!process.env.LINEAR_API_KEY) {
+              sendJson(res, 200, { teams: [], error: "LINEAR_API_KEY not set" });
+              return;
+            }
+            try {
+              const teams = await fetchLinearTeams();
+              sendJson(res, 200, { teams });
+            } catch (err) {
+              sendJson(res, 500, { teams: [], error: err instanceof Error ? err.message : "Failed to fetch teams" });
+            }
+            return;
+          }
+        }
+
         if (segments[0] === "repos" && segments.length === 1 && method === "GET") {
           const gitProjectsDir = join(homedir(), "GitProjects");
           const repos: Array<{ project: string; repo: string }> = [];
@@ -760,6 +913,51 @@ async function handleApiRequest(
             return;
           }
 
+          if (segments.length === 2 && segments[1] === "fetch-url" && method === "POST") {
+            const body = await parseBody(req);
+            if (!isRecord(body) || typeof body.url !== "string") {
+              sendJson(res, 400, { error: "url is required" });
+              return;
+            }
+
+            const targetUrl = body.url.startsWith("http") ? body.url : `https://${body.url}`;
+            const method_ = typeof body.method === "string" ? body.method : "direct";
+
+            if (method_ === "claude") {
+              try {
+                const prompt = `Read this page: ${targetUrl} — Use available MCP tools (Notion, WebFetch) to access it. Return ONLY the page text content, no commentary or tool explanations.`;
+                const result = await runClaude(prompt, 90000);
+                sendJson(res, 200, { title: "", text: result.slice(0, 50000), url: targetUrl, length: result.length, method: "claude" });
+              } catch (err) {
+                sendJson(res, 502, { error: `Claude fetch failed: ${err instanceof Error ? err.message : "Unknown"}` });
+              }
+              return;
+            }
+
+            try {
+              const resp = await fetch(targetUrl, {
+                headers: { "User-Agent": "Mozilla/5.0 (compatible; MissionControl/1.0)" },
+                signal: AbortSignal.timeout(15000),
+                redirect: "follow",
+              });
+
+              if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
+              const html = await resp.text();
+              const text = stripHtmlToText(html);
+              const title = extractTitle(html);
+
+              if (targetUrl.includes("notion.so") && text.includes("JavaScript must be enabled")) {
+                sendJson(res, 200, { title: "", text: "", url: targetUrl, length: 0, needsClaude: true });
+                return;
+              }
+
+              sendJson(res, 200, { title, text: text.slice(0, 50000), url: targetUrl, length: text.length });
+            } catch (err) {
+              sendJson(res, 502, { error: `Failed to fetch: ${err instanceof Error ? err.message : "Unknown"}` });
+            }
+            return;
+          }
+
           if (segments.length === 2 && method === "DELETE") {
             const entryId = segments[1];
             const args = [knowledgeScript, "delete", "--id", entryId];
@@ -775,6 +973,71 @@ async function handleApiRequest(
         api.logger.error(`mission-control routes error: ${message}`);
         sendJson(res, 500, { error: message });
   }
+}
+
+function extractTitle(html: string): string {
+  const match = html.match(/<title[^>]*>([\s\S]*?)<\/title>/i);
+  return match ? match[1].replace(/\s+/g, " ").trim() : "";
+}
+
+function stripHtmlToText(html: string): string {
+  let text = html;
+  text = text.replace(/<script[\s\S]*?<\/script>/gi, "");
+  text = text.replace(/<style[\s\S]*?<\/style>/gi, "");
+  text = text.replace(/<nav[\s\S]*?<\/nav>/gi, "");
+  text = text.replace(/<footer[\s\S]*?<\/footer>/gi, "");
+  text = text.replace(/<header[\s\S]*?<\/header>/gi, "");
+  text = text.replace(/<(h[1-6])[^>]*>/gi, "\n\n");
+  text = text.replace(/<\/(h[1-6])>/gi, "\n");
+  text = text.replace(/<(p|div|br|li|tr)[^>]*\/?>/gi, "\n");
+  text = text.replace(/<[^>]+>/g, "");
+  text = text.replace(/&nbsp;/g, " ");
+  text = text.replace(/&amp;/g, "&");
+  text = text.replace(/&lt;/g, "<");
+  text = text.replace(/&gt;/g, ">");
+  text = text.replace(/&quot;/g, '"');
+  text = text.replace(/&#39;/g, "'");
+  text = text.replace(/\n{3,}/g, "\n\n");
+  text = text.replace(/[ \t]+/g, " ");
+  return text.trim();
+}
+
+function runClaude(prompt: string, timeout = 120000): Promise<string> {
+  const home = process.env.HOME || homedir();
+  const escaped = prompt.replace(/'/g, "'\\''");
+  const cmd = `/opt/homebrew/bin/claude -p '${escaped}' --allowedTools 'mcp__notion__*,WebFetch' --no-session-persistence --model sonnet`;
+
+  return new Promise((resolve, reject) => {
+    let stdout = "";
+    let stderr = "";
+    const child = spawn("/bin/bash", ["-lc", cmd], {
+      cwd: home,
+      stdio: ["pipe", "pipe", "pipe"],
+      env: { HOME: home, USER: process.env.USER || "mm", PATH: process.env.PATH || "/opt/homebrew/bin:/usr/bin:/bin" },
+    });
+    child.stdin.end();
+
+    child.stdout.on("data", (d: Buffer) => { stdout += d.toString(); });
+    child.stderr.on("data", (d: Buffer) => { stderr += d.toString(); });
+
+    const timer = setTimeout(() => {
+      child.kill();
+      reject(new Error("Claude timed out"));
+    }, timeout);
+
+    child.on("close", (code) => {
+      clearTimeout(timer);
+      if (code !== 0) {
+        reject(new Error(stderr.trim() || stdout.trim() || `Claude exited with code ${code}`));
+        return;
+      }
+      if (!stdout.trim()) {
+        reject(new Error("Claude returned empty response"));
+        return;
+      }
+      resolve(stdout.trim());
+    });
+  });
 }
 
 function runPython(args: string[]): Promise<Record<string, unknown>> {

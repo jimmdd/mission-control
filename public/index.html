@@ -1009,6 +1009,8 @@
         .timeline-item.type-status_changed::before { border-color: var(--accent); }
         .timeline-item.type-spawned::before { border-color: var(--status-in_progress); }
         .timeline-item.type-failed::before { border-color: var(--status-failed); }
+        .timeline-item.type-investigation_findings::before { border-color: #9382ff; }
+        .timeline-item.findings-highlight { border-left: 2px solid rgba(147, 130, 255, 0.3); padding-left: 8px; margin-left: -10px; }
 
         .timeline-header {
             display: flex;
@@ -1676,11 +1678,11 @@
             box-shadow: 0 0 4px currentColor;
         }
 
-        .prompt-content, .description {
+        .prompt-content, .findings-content, .description {
             transition: max-height 0.3s ease;
         }
 
-        .prompt-content.collapsed, .description.collapsed {
+        .prompt-content.collapsed, .findings-content.collapsed, .description.collapsed {
             max-height: 42px;
             overflow: hidden;
             cursor: pointer;
@@ -1781,7 +1783,7 @@
                 <form id="new-task-form" onsubmit="submitNewTask(event)">
                     <input type="text" id="new-task-title" class="kb-textarea" style="height: 40px; min-height: 40px; margin-bottom: 8px;" placeholder="Task title..." required>
                     <textarea id="new-task-desc" class="kb-textarea" style="margin-bottom: 12px; display: none;" placeholder="Task description (optional)..."></textarea>
-                    <div style="display: flex; justify-content: space-between; align-items: center;">
+                    <div style="display: flex; justify-content: space-between; align-items: center; flex-wrap: wrap; gap: 8px;">
                         <div style="display: flex; gap: 8px; align-items: center;">
                             <span style="font-size: 10px; color: var(--text-secondary); font-family: var(--font-mono);">PRIORITY:</span>
                             <div id="new-task-priority-pills" style="display: flex; gap: 4px;">
@@ -1792,9 +1794,27 @@
                             </div>
                             <input type="hidden" id="new-task-priority" value="normal">
                         </div>
+                        <div style="display: flex; gap: 4px; align-items: center;">
+                            <span style="font-size: 10px; color: var(--text-secondary); font-family: var(--font-mono);">TYPE:</span>
+                            <div id="new-task-type-pills" style="display: flex; gap: 4px;">
+                                <span class="filter-pill active" data-val="implementation" onclick="setNewTaskType('implementation')">IMPL</span>
+                                <span class="filter-pill" data-val="investigation" onclick="setNewTaskType('investigation')">INVESTIGATE</span>
+                            </div>
+                            <input type="hidden" id="new-task-type" value="implementation">
+                        </div>
                         <div style="display: flex; gap: 8px; align-items: center;">
+                            <div id="linear-sync-row" style="display: none; align-items: center; gap: 6px;">
+                                <label style="display: flex; align-items: center; gap: 4px; cursor: pointer; font-size: 10px; color: var(--text-secondary); font-family: var(--font-mono);">
+                                    <input type="checkbox" id="new-task-sync-linear" onchange="toggleLinearTeamSelect()" style="accent-color: var(--accent-color);">
+                                    SYNC TO LINEAR
+                                </label>
+                                <select id="new-task-linear-team" style="display: none; background: var(--bg-panel); color: var(--text-primary); border: 1px solid var(--border-color); border-radius: 3px; padding: 2px 6px; font-size: 11px; font-family: var(--font-mono);">
+                                    <option value="">Select team...</option>
+                                </select>
+                            </div>
                             <span id="new-task-error" style="color: var(--status-error); font-size: 12px; display: none;"></span>
                             <button type="button" class="filter-pill" onclick="toggleNewTaskDesc()" style="border: none;">+ Desc</button>
+                            <button type="button" class="filter-pill" onclick="toggleNewTaskForm()" style="border: none;">Cancel</button>
                             <button type="submit" class="btn-send">Create</button>
                         </div>
                     </div>
@@ -1842,7 +1862,19 @@
                 </div>
                 <div class="knowledge-add-form">
                     <form id="add-kb-form" onsubmit="addKnowledge(event)">
-                        <textarea id="kb-text" class="kb-textarea" placeholder="Type knowledge — branch rules, conventions, gotchas..." required></textarea>
+                        <textarea id="kb-text" class="kb-textarea" placeholder="Type knowledge, or paste a URL to import..." required oninput="detectKbUrl()"></textarea>
+                        <div id="kb-url-bar" style="display: none; margin: -8px 0 12px 0; padding: 8px 12px; background: rgba(0,0,0,0.3); border: 1px solid var(--border-color); border-radius: 4px; font-size: 11px;">
+                            <div style="display: flex; justify-content: space-between; align-items: center;">
+                                <span style="color: var(--text-secondary); font-family: var(--font-mono); font-size: 10px;">URL DETECTED</span>
+                                <div style="display: flex; gap: 6px;">
+                                    <button type="button" class="filter-pill" onclick="kbUrlAction('fetch')" id="kb-url-fetch-btn" style="border: none; font-size: 10px;">FETCH &amp; EXTRACT</button>
+                                    <button type="button" class="filter-pill" onclick="kbUrlAction('claude')" id="kb-url-claude-btn" style="border: none; font-size: 10px;">VIA CLAUDE</button>
+                                    <button type="button" class="filter-pill" onclick="kbUrlAction('reference')" style="border: none; font-size: 10px;">STORE AS REFERENCE</button>
+                                    <button type="button" class="filter-pill" onclick="kbUrlAction('dismiss')" style="border: none; font-size: 10px;">DISMISS</button>
+                                </div>
+                            </div>
+                            <div id="kb-url-preview" style="display: none; margin-top: 8px; max-height: 200px; overflow-y: auto; padding: 8px; background: rgba(0,0,0,0.2); border-radius: 3px; font-size: 12px; color: var(--text-secondary); white-space: pre-wrap; word-break: break-word;"></div>
+                        </div>
                         <div class="kb-form-footer">
                             <div class="kb-importance-selector">
                                 <span style="font-size: 9px; color: rgba(255,255,255,0.25); margin-right: 6px;">CRITICAL</span>
@@ -2565,8 +2597,8 @@
                 </button>
             `).join('');
 
-            // Add event listeners
-            document.querySelectorAll('.filter-pill').forEach(btn => {
+            // Add event listeners — scope to pills with data-filter only
+            els.filters.querySelectorAll('.filter-pill[data-filter]').forEach(btn => {
                 btn.addEventListener('click', (e) => {
                     state.filter = e.currentTarget.dataset.filter;
                     renderFilters();
@@ -2790,6 +2822,7 @@
                             </div>
                             <div class="card-subtitle">
                                 <div class="badge badge-status ${task.status}">${task.status.replace('_', ' ')}</div>
+                                ${task.task_type === 'investigation' ? '<div class="badge" style="background: rgba(147, 130, 255, 0.15); color: #9382ff; font-size: 9px; padding: 1px 6px;">INVESTIGATION</div>' : ''}
                                 <div class="card-time">${timeAgo(task.created_at)}</div>
                             </div>
                             ${subtaskChipsHtml}
@@ -2902,8 +2935,13 @@
                 `;
             }
 
+            const taskTypeBadge = task.task_type === 'investigation'
+                ? '<div class="badge" style="background: rgba(147, 130, 255, 0.15); color: #9382ff;">INVESTIGATION</div>'
+                : '';
+
             els.drawerMeta.innerHTML = `
                 <div class="badge badge-status ${task.status}">${task.status.replace('_', ' ')}</div>
+                ${taskTypeBadge}
                 <div class="badge badge-source">${sourceHtml}</div>
                 <div class="priority-picker" id="priority-picker">
                     ${['urgent','high','normal','low'].map(p => {
@@ -2987,16 +3025,19 @@
 
             let timelineHtml = visibleActivities.map(act => {
                 const isPrompt = act.activity_type === 'prompt_sent';
-                const contentHtml = act.message ? (isPrompt
-                    ? `<div class="timeline-content prompt-content collapsed" onclick="this.classList.toggle('collapsed')">${parseMarkdown(act.message)}</div>`
+                const isFindings = act.activity_type === 'investigation_findings';
+                const isCollapsible = isPrompt || isFindings;
+                const contentHtml = act.message ? (isCollapsible
+                    ? `<div class="timeline-content ${isPrompt ? 'prompt-content' : 'findings-content'} collapsed" onclick="this.classList.toggle('collapsed')">${parseMarkdown(act.message)}</div>`
                     : `<div class="timeline-content">${parseMarkdown(act.message)}</div>`
                 ) : '';
+                const typeLabel = isPrompt ? 'agent prompt' : isFindings ? 'investigation findings' : act.activity_type.replace('_', ' ');
                 return `
-                    <div class="timeline-item type-${act.activity_type}">
+                    <div class="timeline-item type-${act.activity_type}${isFindings ? ' findings-highlight' : ''}">
                         <div class="timeline-header">
-                            <span class="timeline-type">${escapeHtml(isPrompt ? 'agent prompt' : act.activity_type.replace('_', ' '))}</span>
+                            <span class="timeline-type" ${isFindings ? 'style="color: #9382ff;"' : ''}>${escapeHtml(typeLabel)}</span>
                             <span class="timeline-time">${timeAgo(act.created_at)}</span>
-                            ${isPrompt ? '<span style="font-size:9px;color:rgba(255,255,255,0.3);margin-left:4px;cursor:pointer;" onclick="this.parentElement.nextElementSibling.classList.toggle(\'collapsed\')">(click to expand)</span>' : ''}
+                            ${isCollapsible ? '<span style="font-size:9px;color:rgba(255,255,255,0.3);margin-left:4px;cursor:pointer;" onclick="this.parentElement.nextElementSibling.classList.toggle(\'collapsed\')">(click to expand)</span>' : ''}
                         </div>
                         ${contentHtml}
                     </div>
@@ -3423,6 +3464,8 @@
             container.innerHTML = html;
         };
 
+        let linearTeamsLoaded = false;
+
         window.toggleNewTaskForm = () => {
             const container = document.getElementById('new-task-form-container');
             const btn = document.getElementById('btn-new-task');
@@ -3430,10 +3473,43 @@
                 container.style.display = 'block';
                 btn.classList.add('active');
                 document.getElementById('new-task-title').focus();
+                if (!linearTeamsLoaded) loadLinearConfig();
             } else {
                 container.style.display = 'none';
                 btn.classList.remove('active');
+                document.getElementById('new-task-title').value = '';
+                document.getElementById('new-task-desc').value = '';
+                document.getElementById('new-task-desc').style.display = 'none';
+                document.getElementById('new-task-error').style.display = 'none';
+                document.getElementById('new-task-sync-linear').checked = false;
+                document.getElementById('new-task-linear-team').style.display = 'none';
+                setNewTaskPriority('normal');
+                setNewTaskType('implementation');
             }
+        };
+
+        async function loadLinearConfig() {
+            try {
+                const res = await fetch(getApiUrl('/linear/config'));
+                if (!res.ok) return;
+                const cfg = await res.json();
+                if (!cfg.enabled || !cfg.hasApiKey) return;
+
+                document.getElementById('linear-sync-row').style.display = 'flex';
+
+                const teamsRes = await fetch(getApiUrl('/linear/teams'));
+                if (!teamsRes.ok) return;
+                const { teams } = await teamsRes.json();
+                const select = document.getElementById('new-task-linear-team');
+                select.innerHTML = '<option value="">Select team...</option>' +
+                    teams.map(t => `<option value="${t.id}">${t.key} — ${t.name}</option>`).join('');
+                linearTeamsLoaded = true;
+            } catch {}
+        }
+
+        window.toggleLinearTeamSelect = () => {
+            const checked = document.getElementById('new-task-sync-linear').checked;
+            document.getElementById('new-task-linear-team').style.display = checked ? 'inline-block' : 'none';
         };
 
         window.toggleNewTaskDesc = () => {
@@ -3457,6 +3533,17 @@
             });
         };
 
+        window.setNewTaskType = (val) => {
+            document.getElementById('new-task-type').value = val;
+            document.querySelectorAll('#new-task-type-pills .filter-pill').forEach(pill => {
+                if (pill.dataset.val === val) {
+                    pill.classList.add('active');
+                } else {
+                    pill.classList.remove('active');
+                }
+            });
+        };
+
         window.submitNewTask = async (e) => {
             e.preventDefault();
             const title = document.getElementById('new-task-title').value.trim();
@@ -3467,10 +3554,19 @@
             if (!title) return;
             
             try {
+                const taskType = document.getElementById('new-task-type').value || 'implementation';
+                const payload = { title, description, priority, task_type: taskType, source: 'dashboard' };
+                const syncLinear = document.getElementById('new-task-sync-linear')?.checked;
+                const linearTeamId = document.getElementById('new-task-linear-team')?.value;
+                if (syncLinear && linearTeamId) {
+                    payload.sync_to_linear = true;
+                    payload.linear_team_id = linearTeamId;
+                }
+
                 const res = await fetch(getApiUrl('/tasks'), {
                     method: 'POST',
                     headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify({ title, description, priority, source: 'dashboard' })
+                    body: JSON.stringify(payload)
                 });
                 
                 if (!res.ok) throw new Error('Failed to create task');
@@ -3479,10 +3575,12 @@
                 document.getElementById('new-task-title').value = '';
                 document.getElementById('new-task-desc').value = '';
                 document.getElementById('new-task-desc').style.display = 'none';
+                document.getElementById('new-task-sync-linear').checked = false;
+                document.getElementById('new-task-linear-team').style.display = 'none';
                 setNewTaskPriority('normal');
+                setNewTaskType('implementation');
                 errorEl.style.display = 'none';
                 
-                // Hide form and refresh
                 toggleNewTaskForm();
                 fetchData();
             } catch (err) {
@@ -3724,6 +3822,9 @@
 
                 textInput.value = '';
                 setKbImportance(5);
+                kbUrlDismissed = false;
+                kbDetectedUrl = '';
+                document.getElementById('kb-url-bar').style.display = 'none';
                 await loadKnowledge();
             } catch (err) {
                 console.error('Error adding knowledge:', err);
@@ -3731,6 +3832,105 @@
             } finally {
                 btn.disabled = false;
                 btn.textContent = 'Add Knowledge';
+            }
+        };
+
+        let kbUrlDismissed = false;
+        let kbDetectedUrl = '';
+
+        window.detectKbUrl = () => {
+            const text = document.getElementById('kb-text').value.trim();
+            const bar = document.getElementById('kb-url-bar');
+            const preview = document.getElementById('kb-url-preview');
+
+            const urlMatch = text.match(/^(https?:\/\/[^\s]+)$/);
+            if (urlMatch && !kbUrlDismissed) {
+                kbDetectedUrl = urlMatch[1];
+                bar.style.display = 'block';
+                preview.style.display = 'none';
+                preview.textContent = '';
+            } else {
+                bar.style.display = 'none';
+                kbDetectedUrl = '';
+            }
+        };
+
+        window.kbUrlAction = async (action) => {
+            const bar = document.getElementById('kb-url-bar');
+            const preview = document.getElementById('kb-url-preview');
+            const textInput = document.getElementById('kb-text');
+            const fetchBtn = document.getElementById('kb-url-fetch-btn');
+
+            if (action === 'dismiss') {
+                kbUrlDismissed = true;
+                bar.style.display = 'none';
+                return;
+            }
+
+            if (action === 'reference') {
+                textInput.value = `Reference: ${kbDetectedUrl}\n\n(Stored as URL reference — agents should visit this link for details)`;
+                bar.style.display = 'none';
+                kbUrlDismissed = true;
+                return;
+            }
+
+            if (action === 'fetch' || action === 'claude') {
+                const isClaude = action === 'claude';
+                const activeBtn = isClaude ? document.getElementById('kb-url-claude-btn') : fetchBtn;
+                const origText = activeBtn.textContent;
+
+                try {
+                    activeBtn.disabled = true;
+                    activeBtn.textContent = isClaude ? 'READING...' : 'FETCHING...';
+                    preview.style.display = 'block';
+                    preview.style.color = 'var(--text-secondary)';
+                    preview.textContent = isClaude ? 'Claude is reading the page via MCP... (may take 30-60s)' : 'Fetching content...';
+
+                    const payload = { url: kbDetectedUrl };
+                    if (isClaude) payload.method = 'claude';
+
+                    const res = await fetch(getApiUrl('/knowledge/fetch-url'), {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify(payload)
+                    });
+
+                    if (!res.ok) {
+                        const err = await res.json();
+                        throw new Error(err.error || 'Fetch failed');
+                    }
+
+                    const data = await res.json();
+
+                    if (data.needsClaude) {
+                        preview.textContent = 'This page requires JavaScript (e.g. Notion). Use "VIA CLAUDE" to read it with MCP.';
+                        preview.style.color = 'var(--status-warning, #f5a623)';
+                        return;
+                    }
+
+                    if (!data.text) {
+                        preview.textContent = 'No content extracted. Try "VIA CLAUDE" for JS-heavy pages.';
+                        preview.style.color = 'var(--status-warning, #f5a623)';
+                        return;
+                    }
+
+                    const title = data.title ? `${data.title}\n\n` : '';
+                    const extracted = `${title}Source: ${data.url}\n\n${data.text}`;
+
+                    preview.textContent = data.text.slice(0, 500) + (data.text.length > 500 ? '\n\n... (truncated preview)' : '');
+                    preview.style.display = 'block';
+
+                    textInput.value = extracted;
+                    bar.style.display = 'none';
+                    kbUrlDismissed = true;
+                } catch (err) {
+                    preview.textContent = `Error: ${err.message}`;
+                    preview.style.color = 'var(--status-error)';
+                } finally {
+                    activeBtn.disabled = false;
+                    activeBtn.textContent = origText;
+                }
+                return;
             }
         };
 

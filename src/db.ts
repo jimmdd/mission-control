@@ -15,6 +15,7 @@ export type TaskStatus =
   | "on_hold"
   | "done";
 export type TaskPriority = "low" | "normal" | "high" | "urgent";
+export type TaskType = "implementation" | "investigation";
 
 export interface WorkspaceRecord {
   id: string;
@@ -58,6 +59,7 @@ export interface TaskRecord {
   external_id: string | null;
   external_url: string | null;
   source: string;
+  task_type: string;
   triage_state: string | null;
   created_at: string;
   updated_at: string;
@@ -130,6 +132,7 @@ export interface CreateTaskInput {
   external_id?: string;
   external_url?: string;
   source?: string;
+  task_type?: TaskType;
   triage_state?: string;
 }
 
@@ -146,6 +149,7 @@ export interface UpdateTaskInput {
   external_id?: string | null;
   external_url?: string | null;
   source?: string;
+  task_type?: TaskType;
   triage_state?: string | null;
 }
 
@@ -273,6 +277,7 @@ CREATE TABLE IF NOT EXISTS tasks (
 external_id TEXT,
             external_url TEXT,
   source TEXT DEFAULT 'manual',
+  task_type TEXT DEFAULT 'implementation' CHECK (task_type IN ('implementation', 'investigation')),
   triage_state TEXT,
   created_at TEXT DEFAULT (datetime('now')),
   updated_at TEXT DEFAULT (datetime('now'))
@@ -357,6 +362,7 @@ export class MissionControlDB {
     this.db.exec(SCHEMA_SQL);
     this.migrateTaskStatus();
     this.migrateLinearColumns();
+    this.migrateTaskType();
   }
 
   private migrateLinearColumns(): void {
@@ -400,6 +406,15 @@ export class MissionControlDB {
       COMMIT;
       PRAGMA foreign_keys = ON;
     `);
+  }
+
+  private migrateTaskType(): void {
+    const row = this.db
+      .prepare("SELECT sql FROM sqlite_master WHERE type='table' AND name='tasks'")
+      .get() as { sql: string } | undefined;
+    if (!row || row.sql.includes("task_type")) return;
+
+    this.db.exec(`ALTER TABLE tasks ADD COLUMN task_type TEXT DEFAULT 'implementation' CHECK (task_type IN ('implementation', 'investigation'))`);
   }
 
   private migrateTaskStatus(): void {
@@ -490,8 +505,8 @@ export class MissionControlDB {
         `INSERT INTO tasks (
           id, title, description, status, priority, assigned_agent_id, created_by_agent_id,
           workspace_id, due_date, parent_task_id, external_id, external_url,
-          source, triage_state, created_at, updated_at
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+          source, task_type, triage_state, created_at, updated_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
       )
       .run(
         id,
@@ -507,6 +522,7 @@ export class MissionControlDB {
         data.external_id ?? null,
         data.external_url ?? null,
         data.source ?? "manual",
+        data.task_type ?? "implementation",
         data.triage_state ?? null,
         now,
         now
@@ -550,6 +566,7 @@ export class MissionControlDB {
       setValue("external_url", data.external_url);
     }
     if (data.source !== undefined) setValue("source", data.source);
+    if (data.task_type !== undefined) setValue("task_type", data.task_type);
     if (data.triage_state !== undefined) {
       setValue("triage_state", data.triage_state);
     }
