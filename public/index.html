@@ -3228,6 +3228,8 @@
                                     pendingStep = { type: 'pending-review', label: 'AWAITING REVIEW', agent: '', css: 'feedback' };
                                 } else if (child.status === 'in_progress' && effectiveAgentStatus !== 'running') {
                                     pendingStep = { type: 'pending-idle', label: 'IDLE', agent: '', css: 'respawn' };
+                                } else if (child.status === 'on_hold') {
+                                    pendingStep = { type: 'pending-hold', label: 'ON HOLD', agent: '', css: 'feedback' };
                                 } else if (child.status === 'done') {
                                     pendingStep = { type: 'done', label: 'LINEAR DONE', agent: 'linear', css: 'complete', isMilestone: true };
                                 }
