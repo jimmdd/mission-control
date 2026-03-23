@@ -47,60 +47,88 @@ Linear Sync (done) ──────────── detects Linear ticket cl
                                  MC parent + children as done
 ```
 
-### Planner
+### Orchestrator (Planner)
 
-The planner sits between triage and execution, converting vague tickets into precise execution contracts. Inspired by [oh-my-openagent](https://github.com/code-yeongyu/oh-my-openagent)'s spec-driven approach but optimized for minimal token cost.
+The orchestrator sits between triage and execution. For simple single-repo tasks, agents go direct to GSD. For complex multi-repo or multi-step work, the orchestrator decomposes the task into coordinated agent sessions. Inspired by [oh-my-openagent](https://github.com/code-yeongyu/oh-my-openagent)'s spec-driven approach.
 
-**Model allocation:**
+**Key principle: the orchestrator defines WHAT, GSD defines HOW.** The orchestrator breaks work into steps with acceptance criteria. Each step agent runs the full GSD cycle internally (`/gsd:plan-phase` → `/gsd:execute-phase` → `/gsd:verify-work`). This creates a verifiable proof-of-work chain:
 
-| Role | Model | Cost |
-|------|-------|------|
-| Plan generation | Claude Sonnet (API) | ~$0.05-0.15/plan |
-| Step routing/classification | MiniMax M2.7 (Ollama, local) | Free |
-| Step verification | MiniMax M2.7 (Ollama, local) | Free |
+```
+Orchestrator Plan (plan.json)          ← what to achieve, in what order
+  └─ Step 1 Agent Session
+       ├─ GSD PLAN.md                  ← how the agent will implement it
+       ├─ GSD SUMMARY.md              ← what was actually done
+       ├─ GSD VERIFICATION.md         ← did it meet acceptance criteria
+       └─ git commits                  ← the actual code
+  └─ Step 2 Agent Session (branches from step 1)
+       ├─ GSD PLAN.md
+       ├─ GSD VERIFICATION.md
+       └─ git commits
+  └─ Orchestrator Verification         ← MiniMax checks agent output vs criteria
+  └─ PR Created                        ← final deliverable
+Progress Tracker (progress.json)       ← real-time status of every step
+```
+
+**When does orchestration activate?**
+
+| Scenario | Route |
+|----------|-------|
+| Single repo, clear requirements | Direct → GSD agent (no orchestrator overhead) |
+| Multi-repo task | Orchestrator → step per repo, ordered by data flow |
+| Complex task with sequential dependencies | Orchestrator → dependency-chained steps |
+| Investigation task | Direct → read-only agent (no plan needed) |
+
+The planner (Sonnet) evaluates every task and returns `needs_orchestration: true/false`. If false or single-step, it skips itself and dispatches directly.
+
+**Model allocation (all configurable via `swarm-config.json`):**
+
+| Role | Default Model | Cost |
+|------|--------------|------|
+| Orchestration planning | Claude Sonnet (API) | ~$0.05-0.15/plan |
+| Step routing/classification | MiniMax M2.7 (Ollama) | Free |
+| Step verification | MiniMax M2.7 (Ollama) | Free |
 | Worker agents | Claude Code / Codex (subscription) | Free |
+| GSD planning (inside agent) | Agent's own model | Free (part of agent session) |
 
 **Plan structure** (saved as JSON + markdown in `~/.openclaw/bridge/plans/`):
 
 ```json
 {
-  "summary": "Add rate limiting to API gateway",
-  "estimated_complexity": "moderate",
+  "summary": "Add rate limiting across API gateway and client SDK",
+  "needs_orchestration": true,
+  "reasoning": "Cross-repo: API changes must land before client SDK update",
   "steps": [
     {
       "step": 1,
-      "title": "Add rate limiter middleware",
+      "title": "Add rate limiting middleware to API gateway",
       "repo": "acme/backend-api",
-      "files_to_modify": ["src/middleware/rate-limit.ts"],
-      "done_when": ["Rate limiter configured at 100 req/s", "Middleware registered in app.ts"],
-      "verify_command": "npm test -- --grep rate-limit",
+      "description": "Add configurable rate limiter that returns 429 with Retry-After header",
+      "acceptance_criteria": [
+        "Rate limiter returns 429 after 100 req/s per client",
+        "Retry-After header set correctly",
+        "All existing tests pass"
+      ],
+      "verify_command": "npm test",
       "depends_on": [],
       "category": "deep"
     },
     {
       "step": 2,
-      "title": "Add rate limit tests",
+      "title": "Update client SDK to handle 429 with backoff",
+      "repo": "acme/client-sdk",
       "depends_on": [1],
-      "category": "test"
+      "category": "deep",
+      "context_from_prior_steps": "API now returns 429 with Retry-After header"
     }
-  ],
-  "parallel_groups": [[1], [2]]
+  ]
 }
 ```
 
-**Step dispatch prompts** are scoped and precise — each agent gets:
-- TASK: what to do (from plan step)
-- SCOPE: exact files to modify/create
-- DONE WHEN: verifiable criteria
-- MUST NOT: boundary constraints
-- CONTEXT: summary of completed prior steps
-- VERIFY: command to confirm work
-
 **Progress tracking** (`~/.openclaw/bridge/progress/{task-id}.json`):
-- Tracks per-step status: pending → in_progress → completed/failed
-- Enables session resumption if bridge restarts mid-plan
-- Failed steps retry up to 2x before escalating to on_hold
-- Dependent steps branch from the previous step's git branch (not origin/main)
+- Per-step status: pending → in_progress → completed/failed
+- Session resumption: bridge restarts pick up where they left off
+- Retry logic: failed verification retries up to 2x before escalating
+- Branch chaining: dependent steps branch from the prior step's branch (inheriting commits)
 
 **Configuration** (all models configurable via `swarm-config.json`):
 
@@ -131,11 +159,9 @@ The planner sits between triage and execution, converting vague tickets into pre
 }
 ```
 
-Supported providers: `anthropic`, `ollama`, `gemini`. Any model available through these providers can be used — swap in your preferred local models, use Gemini for planning to stay free, or route everything through Ollama.
+Supported providers: `anthropic`, `ollama`, `gemini`. Swap in your preferred models — use Gemini for planning to stay free, or route everything through Ollama.
 
-Environment variables (`ANTHROPIC_API_KEY`, `GOOGLE_GENERATIVE_AI_API_KEY`, `OLLAMA_URL`) can also override config values. Set `ENABLE_PLANNER=0` to bypass the planner entirely.
-
-Investigation tasks bypass the planner and go directly to agent dispatch (read-only, no plan needed).
+Environment variables (`ANTHROPIC_API_KEY`, `GOOGLE_GENERATIVE_AI_API_KEY`, `OLLAMA_URL`) override config values. Set `ENABLE_PLANNER=0` to bypass the orchestrator entirely.
 
 ### Dashboard
 
