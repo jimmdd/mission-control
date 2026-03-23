@@ -280,26 +280,83 @@ curl http://localhost:18789/ext/mission-control/api/tasks
 
 Mission Control integrates with [claw-memory-ultra](https://github.com/jimmdd/claw-memory-ultra) (LanceDB-backed vector memory) to give agents context about repositories they're working on.
 
-Knowledge flows through two paths:
+### Three Knowledge Tiers
 
-1. **Auto-distilled** — When an agent completes a task, `knowledge-distill.py` extracts learnings (API contracts, gotchas, architectural decisions) and stores them in LanceDB with Gemini embeddings.
-2. **Human-injected** — Developers add knowledge directly via the dashboard, gateway chat, or API. These entries are marked `source: human` and get priority during recall.
+Knowledge is stored in LanceDB with Gemini embeddings and retrieved via similarity search, scoped per repo/project.
 
-During triage, the bridge calls `recall_knowledge()` which:
-- Searches LanceDB for entries scoped to the target repo/project
-- Separates results into **Developer Notes** (human-injected, always surfaced) and **Past Learnings** (auto-distilled, similarity-ranked)
-- Injects both into the agent prompt with clear hierarchy
-
+**Tier 1 — Developer Notes** (human-injected, always surface with priority boost):
 ```
 ## Developer Notes (MUST FOLLOW)
 - (repo:acme/firmware) Production branch is main. Feature
   branches from main or release-candidate. Only modify src/drivers.
-
-## Past Learnings (REFERENCE)
-- [fact] (repo:acme/backend-api) Tests require NODE_ENV=test
 ```
 
+**Tier 2 — Procedural Skills** (auto-created from complex tasks, full content injected):
+```
+# Skill: Adding API endpoints to odc-api
+Domain: api
+
+Add new REST endpoints following the existing pattern.
+
+## Steps
+1. Define route in src/routes/ following existing naming convention
+2. Add validation schema in src/schemas/ using Zod
+3. Add handler in src/handlers/ — use existing DB helpers, don't raw-query
+4. Register route in src/app.ts
+5. Run tests: `npm test -- --grep "api"`
+
+## Pitfalls
+- DB migrations must run first: `npm run migrate:test`
+- The CI runs on Node 18 — avoid Node 20 APIs
+- Rate limiter is applied globally; test with `X-Test-Bypass: true` header
+
+## Verification
+- `npm test` exits 0
+- `tsc --noEmit` exits 0
+- New endpoint responds with correct status codes
+```
+
+**Tier 3 — Atomic Facts** (auto-distilled one-liners, compact):
+```
+## Past Learnings (REFERENCE)
+- [fact] (repo:acme/backend-api) Tests require NODE_ENV=test
+- [decision] (repo:acme/network) Config loader reads from /etc/bee/config.json
+```
+
+### Skill Auto-Creation
+
+Skills are automatically created when a completed task shows complexity signals:
+- **5+ commits** — multi-step work worth documenting
+- **4+ files changed** — broad impact across the codebase
+- **Error recovery detected** — retry, fix, revert keywords in artifacts (hard-won knowledge)
+
+When a skill already exists for the same repo+domain, it gets **patched** (merged with new learnings) rather than replaced. Over time, skills become battle-tested procedures.
+
+### Progressive Disclosure
+
+Token-efficient retrieval with three levels:
+1. **Metadata scan** — titles and domains loaded first (~3k tokens)
+2. **Full content** — top 3 matching skills loaded in full
+3. **Overflow summary** — remaining skills show title + summary + char count
+
+### Feedback Loop (Knowledge Lineage)
+
+Each knowledge entry tracks:
+- `recall_count` — how many times it was retrieved for a task
+- `helped_count` — how many of those tasks succeeded
+- `task_outcome` — whether the originating task succeeded or failed
+
+During retrieval, entries with high help ratios (helped/recalled) get a scoring boost. Knowledge that consistently helps gets surfaced more; knowledge that doesn't help naturally decays in relevance.
+
+```
+knowledge-feedback.py --task-id TASK_ID --outcome success   # boost entries that helped
+knowledge-feedback.py --entry-id ENTRY_ID --action recall   # track individual recall
+```
+
+### Knowledge Sources
+
 Knowledge can be added through:
+- **Auto-distillation** — `knowledge-distill.py` runs after each task, producing skills or facts
 - **Dashboard** — Knowledge Base panel with scope picker and text input
 - **Gateway chat** — Agent calls `mc_add_knowledge` tool
 - **REST API** — `POST /ext/mission-control/api/knowledge`
@@ -319,7 +376,8 @@ Mission Control is the central hub. The surrounding scripts live in `~/.openclaw
 | Agent Launcher | `~/.openclaw/swarm/run-claude.sh` | On-demand | Launch Claude with prompt, retry, cost controls |
 | Spawn Script | `~/.openclaw/swarm/spawn-agent.sh` | On-demand | Create worktree, register agent, start tmux |
 | Knowledge Manager | `~/.openclaw/swarm/knowledge-manage.py` | On-demand | Inject/list/delete knowledge entries in LanceDB |
-| Knowledge Distiller | `~/.openclaw/swarm/knowledge-distill.py` | On-demand | Extract learnings from completed tasks into LanceDB |
+| Knowledge Distiller | `~/.openclaw/swarm/knowledge-distill.py` | On-demand | Extract skills + facts from completed tasks into LanceDB |
+| Knowledge Feedback | `~/.openclaw/swarm/knowledge-feedback.py` | On-demand | Track recall/helped counts for knowledge quality scoring |
 
 ### Concurrency
 
