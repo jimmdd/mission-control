@@ -1,0 +1,776 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Mission Control Space</title>
+  <style>
+    :root {
+      --bg: #050712;
+      --panel: #0b1327;
+      --panel-2: #080f1f;
+      --line: rgba(88, 235, 255, 0.22);
+      --line-soft: rgba(151, 94, 255, 0.2);
+      --text: #d9efff;
+      --muted: #8ea7c7;
+      --accent: #58ebff;
+      --accent-2: #9c6cff;
+      --ok: #23f4a3;
+      --warn: #ffc046;
+      --danger: #ff5c9d;
+      --glow-cyan: 0 0 0 1px rgba(88, 235, 255, 0.22), 0 0 20px rgba(88, 235, 255, 0.18);
+      --glow-purple: 0 0 0 1px rgba(156, 108, 255, 0.2), 0 0 20px rgba(156, 108, 255, 0.18);
+    }
+
+    * { box-sizing: border-box; }
+
+    body {
+      margin: 0;
+      background:
+        radial-gradient(1000px 500px at 110% -5%, rgba(88, 235, 255, 0.18), transparent 70%),
+        radial-gradient(900px 520px at -10% 20%, rgba(156, 108, 255, 0.2), transparent 72%),
+        linear-gradient(180deg, rgba(88, 235, 255, 0.04), transparent 16%),
+        var(--bg);
+      color: var(--text);
+      font-family: "IBM Plex Sans", "Avenir Next", "Segoe UI", sans-serif;
+      min-height: 100vh;
+      position: relative;
+    }
+
+    body::before {
+      content: "";
+      position: fixed;
+      inset: 0;
+      pointer-events: none;
+      background-image:
+        linear-gradient(rgba(88, 235, 255, 0.035) 1px, transparent 1px),
+        linear-gradient(90deg, rgba(156, 108, 255, 0.03) 1px, transparent 1px);
+      background-size: 34px 34px;
+      opacity: 0.25;
+    }
+
+    .wrap {
+      max-width: 1320px;
+      margin: 0 auto;
+      padding: 18px;
+    }
+
+    .head {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 12px;
+      margin-bottom: 14px;
+      padding: 12px;
+      border: 1px solid var(--line-soft);
+      border-radius: 12px;
+      background: linear-gradient(180deg, rgba(11, 19, 39, 0.95), rgba(8, 15, 31, 0.95));
+      box-shadow: var(--glow-purple);
+    }
+
+    .title {
+      display: flex;
+      flex-direction: column;
+      gap: 4px;
+    }
+
+    .title h1 {
+      margin: 0;
+      font-size: 28px;
+      letter-spacing: -0.01em;
+      font-family: "IBM Plex Mono", Menlo, monospace;
+      text-shadow: 0 0 16px rgba(88, 235, 255, 0.25);
+    }
+
+    .title p {
+      margin: 0;
+      color: var(--muted);
+      font-size: 13px;
+    }
+
+    .top-actions {
+      display: flex;
+      gap: 8px;
+      align-items: center;
+    }
+
+    .btn, .link-btn {
+      border: 1px solid var(--line);
+      background: linear-gradient(180deg, rgba(88, 235, 255, 0.1), rgba(88, 235, 255, 0.04));
+      color: var(--text);
+      padding: 7px 10px;
+      border-radius: 8px;
+      font-size: 12px;
+      cursor: pointer;
+      text-decoration: none;
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+    }
+
+    .btn:hover, .link-btn:hover {
+      border-color: rgba(88, 235, 255, 0.65);
+      box-shadow: var(--glow-cyan);
+    }
+
+    .status-pill {
+      border: 1px solid var(--line);
+      background: linear-gradient(180deg, rgba(156, 108, 255, 0.14), rgba(156, 108, 255, 0.06));
+      border-radius: 999px;
+      padding: 6px 10px;
+      font-size: 12px;
+      color: var(--muted);
+      font-family: "IBM Plex Mono", Menlo, monospace;
+    }
+
+    .kpis {
+      display: grid;
+      grid-template-columns: repeat(6, minmax(0, 1fr));
+      gap: 8px;
+      margin: 10px 0 12px;
+    }
+
+    .kpi {
+      background: linear-gradient(180deg, var(--panel), var(--panel-2));
+      border: 1px solid var(--line);
+      border-radius: 10px;
+      padding: 10px;
+      box-shadow: inset 0 0 0 1px rgba(255,255,255,0.02), var(--glow-cyan);
+    }
+
+    .kpi .l {
+      font-size: 11px;
+      color: var(--muted);
+      text-transform: uppercase;
+      letter-spacing: 0.6px;
+      margin-bottom: 6px;
+    }
+
+    .kpi .v {
+      font-size: 20px;
+      font-family: "IBM Plex Mono", Menlo, monospace;
+      text-shadow: 0 0 12px rgba(88, 235, 255, 0.25);
+    }
+
+    .filters {
+      display: grid;
+      grid-template-columns: 1.3fr repeat(4, 0.9fr);
+      gap: 8px;
+      margin-bottom: 12px;
+    }
+
+    .shortcut-hint {
+      margin-top: -4px;
+      margin-bottom: 12px;
+      color: var(--muted);
+      font-size: 11px;
+      display: flex;
+      gap: 8px;
+      align-items: center;
+      flex-wrap: wrap;
+      letter-spacing: 0.2px;
+    }
+
+    .shortcut-hint .key {
+      border: 1px solid var(--line);
+      border-radius: 6px;
+      padding: 1px 6px;
+      background: rgba(88, 235, 255, 0.08);
+      color: #dff8ff;
+      font-family: "IBM Plex Mono", Menlo, monospace;
+      box-shadow: inset 0 0 0 1px rgba(255,255,255,0.03);
+    }
+
+    .field {
+      display: flex;
+      flex-direction: column;
+      gap: 5px;
+    }
+
+    .field label {
+      font-size: 11px;
+      color: var(--muted);
+      text-transform: uppercase;
+      letter-spacing: 0.6px;
+    }
+
+    .field input, .field select {
+      width: 100%;
+      border: 1px solid var(--line);
+      background: rgba(88, 235, 255, 0.05);
+      color: var(--text);
+      border-radius: 8px;
+      padding: 8px 9px;
+      font-size: 13px;
+    }
+
+    .field input:focus, .field select:focus {
+      outline: none;
+      border-color: rgba(88, 235, 255, 0.7);
+      box-shadow: var(--glow-cyan);
+    }
+
+    .grid {
+      display: grid;
+      grid-template-columns: 1.2fr 2.3fr;
+      gap: 10px;
+    }
+
+    .panel {
+      background: linear-gradient(180deg, var(--panel), var(--panel-2));
+      border: 1px solid var(--line);
+      border-radius: 12px;
+      overflow: hidden;
+      box-shadow: var(--glow-cyan);
+    }
+
+    .panel-h {
+      padding: 10px 12px;
+      border-bottom: 1px solid var(--line);
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      font-size: 12px;
+      color: #b3c8e7;
+      text-transform: uppercase;
+      letter-spacing: 0.6px;
+    }
+
+    .queue {
+      max-height: calc(100vh - 320px);
+      overflow: auto;
+      padding: 10px;
+      display: grid;
+      gap: 8px;
+    }
+
+    .item {
+      border: 1px solid var(--line);
+      border-radius: 10px;
+      padding: 10px;
+      background: linear-gradient(180deg, rgba(88, 235, 255, 0.08), rgba(156, 108, 255, 0.06));
+      box-shadow: inset 0 0 0 1px rgba(255,255,255,0.02);
+    }
+
+    .item .t {
+      font-size: 13px;
+      margin-bottom: 6px;
+      line-height: 1.35;
+    }
+
+    .item .m {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 6px;
+      font-size: 11px;
+      color: var(--muted);
+    }
+
+    .tag {
+      border: 1px solid var(--line);
+      border-radius: 999px;
+      padding: 2px 7px;
+      font-family: "IBM Plex Mono", Menlo, monospace;
+      background: rgba(88, 235, 255, 0.07);
+    }
+
+    .tag.warn { border-color: rgba(255, 192, 70, 0.7); color: #ffd782; box-shadow: 0 0 12px rgba(255, 192, 70, 0.22); }
+    .tag.bad { border-color: rgba(255, 92, 157, 0.72); color: #ffc4db; box-shadow: 0 0 12px rgba(255, 92, 157, 0.22); }
+    .tag.ok { border-color: rgba(35, 244, 163, 0.68); color: #a8ffd8; box-shadow: 0 0 12px rgba(35, 244, 163, 0.22); }
+
+    table {
+      width: 100%;
+      border-collapse: collapse;
+      font-size: 13px;
+    }
+
+    thead th {
+      text-align: left;
+      padding: 10px;
+      color: var(--muted);
+      border-bottom: 1px solid var(--line);
+      font-size: 11px;
+      letter-spacing: 0.5px;
+      text-transform: uppercase;
+      position: sticky;
+      top: 0;
+      background: #0d1730;
+      z-index: 1;
+    }
+
+    tbody td {
+      padding: 10px;
+      border-bottom: 1px solid rgba(255, 255, 255, 0.06);
+      vertical-align: top;
+    }
+
+    tbody tr:hover {
+      background: linear-gradient(90deg, rgba(88, 235, 255, 0.12), rgba(156, 108, 255, 0.1));
+    }
+
+    .table-wrap {
+      max-height: calc(100vh - 320px);
+      overflow: auto;
+    }
+
+    .mono { font-family: "IBM Plex Mono", Menlo, monospace; }
+    .muted { color: var(--muted); }
+
+    .actions {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 6px;
+    }
+
+    .actions button, .actions a {
+      border: 1px solid var(--line);
+      background: linear-gradient(180deg, rgba(88, 235, 255, 0.11), rgba(88, 235, 255, 0.05));
+      color: var(--text);
+      border-radius: 8px;
+      padding: 5px 8px;
+      font-size: 11px;
+      cursor: pointer;
+      text-decoration: none;
+    }
+
+    .actions button:hover, .actions a:hover {
+      border-color: rgba(88, 235, 255, 0.7);
+      box-shadow: var(--glow-cyan);
+    }
+
+    @media (max-width: 1140px) {
+      .kpis { grid-template-columns: repeat(3, minmax(0, 1fr)); }
+      .filters { grid-template-columns: 1fr 1fr; }
+      .grid { grid-template-columns: 1fr; }
+      .queue, .table-wrap { max-height: 420px; }
+    }
+  </style>
+</head>
+<body>
+  <div class="wrap">
+    <div class="head">
+      <div class="title">
+        <h1>Mission Control Space</h1>
+        <p>Operational workspace for triage, follow-up, heartbeat risk, and explicit transitions.</p>
+      </div>
+      <div class="top-actions">
+        <span class="status-pill" id="conn">Connecting...</span>
+        <button class="btn" id="refresh">Refresh</button>
+        <a class="link-btn" href="/ext/mission-control/">Dashboard</a>
+      </div>
+    </div>
+
+    <div class="kpis">
+      <div class="kpi"><div class="l">Total Tasks</div><div class="v" id="k-total">--</div></div>
+      <div class="kpi"><div class="l">Running Agents</div><div class="v" id="k-run">--</div></div>
+      <div class="kpi"><div class="l">Stale HB</div><div class="v" id="k-stale">--</div></div>
+      <div class="kpi"><div class="l">Missing HB</div><div class="v" id="k-missing">--</div></div>
+      <div class="kpi"><div class="l">Review</div><div class="v" id="k-review">--</div></div>
+      <div class="kpi"><div class="l">Done</div><div class="v" id="k-done">--</div></div>
+    </div>
+
+    <div class="filters">
+      <div class="field">
+        <label>Search</label>
+        <input id="f-q" placeholder="title, task id, repo, branch" />
+      </div>
+      <div class="field">
+        <label>Status</label>
+        <select id="f-status">
+          <option value="all">all</option>
+          <option value="inbox">inbox</option>
+          <option value="planning">planning</option>
+          <option value="in_progress">in_progress</option>
+          <option value="review">review</option>
+          <option value="testing">testing</option>
+          <option value="done">done</option>
+          <option value="failed">failed</option>
+        </select>
+      </div>
+      <div class="field">
+        <label>Task Type</label>
+        <select id="f-type">
+          <option value="all">all</option>
+          <option value="implementation">implementation</option>
+          <option value="investigation">investigation</option>
+        </select>
+      </div>
+      <div class="field">
+        <label>Heartbeat</label>
+        <select id="f-hb">
+          <option value="all">all</option>
+          <option value="stale">stale only</option>
+          <option value="missing">missing only</option>
+          <option value="risk">stale + missing</option>
+        </select>
+      </div>
+      <div class="field">
+        <label>Sort</label>
+        <select id="f-sort">
+          <option value="updated">latest update</option>
+          <option value="heartbeat">heartbeat age</option>
+          <option value="status">status</option>
+        </select>
+      </div>
+    </div>
+
+    <div class="shortcut-hint">
+      <span>Shortcuts:</span>
+      <span><span class="key">f</span> focus search</span>
+      <span><span class="key">r</span> refresh board</span>
+    </div>
+
+    <div class="grid">
+      <section class="panel">
+        <div class="panel-h">
+          <span>Needs Attention</span>
+          <span id="att-count">0</span>
+        </div>
+        <div class="queue" id="attention"></div>
+      </section>
+
+      <section class="panel">
+        <div class="panel-h">
+          <span>Task Grid</span>
+          <span id="grid-count">0</span>
+        </div>
+        <div class="table-wrap">
+          <table>
+            <thead>
+              <tr>
+                <th>Task</th>
+                <th>Status</th>
+                <th>Type</th>
+                <th>Swarm</th>
+                <th>Heartbeat</th>
+                <th>Updated</th>
+                <th>Actions</th>
+              </tr>
+            </thead>
+            <tbody id="rows"></tbody>
+          </table>
+        </div>
+      </section>
+    </div>
+  </div>
+
+  <script>
+    const state = {
+      tasks: [],
+      summary: null,
+      readOnly: false,
+      accessToken: null,
+      hbThresholdMs: 300000,
+    };
+
+    const E = {
+      conn: document.getElementById('conn'),
+      refresh: document.getElementById('refresh'),
+      rows: document.getElementById('rows'),
+      attention: document.getElementById('attention'),
+      attCount: document.getElementById('att-count'),
+      gridCount: document.getElementById('grid-count'),
+      kTotal: document.getElementById('k-total'),
+      kRun: document.getElementById('k-run'),
+      kStale: document.getElementById('k-stale'),
+      kMissing: document.getElementById('k-missing'),
+      kReview: document.getElementById('k-review'),
+      kDone: document.getElementById('k-done'),
+      q: document.getElementById('f-q'),
+      status: document.getElementById('f-status'),
+      type: document.getElementById('f-type'),
+      hb: document.getElementById('f-hb'),
+      sort: document.getElementById('f-sort'),
+    };
+
+    function api(path) {
+      const sep = path.includes('?') ? '&' : '?';
+      if (!state.accessToken) return `/ext/mission-control/api${path}`;
+      return `/ext/mission-control/api${path}${sep}token=${encodeURIComponent(state.accessToken)}`;
+    }
+
+    function ago(ts) {
+      if (!ts) return '--';
+      const ms = Date.now() - new Date(ts).getTime();
+      if (Number.isNaN(ms)) return '--';
+      const s = Math.floor(ms / 1000);
+      if (s < 60) return `${s}s`;
+      const m = Math.floor(s / 60);
+      if (m < 60) return `${m}m`;
+      const h = Math.floor(m / 60);
+      if (h < 24) return `${h}h ${m % 60}m`;
+      const d = Math.floor(h / 24);
+      return `${d}d ${h % 24}h`;
+    }
+
+    function hbMeta(task) {
+      const swarm = task.swarm || {};
+      const interval = Number(swarm.heartbeatIntervalSec || 0);
+      const threshold = Math.max(state.hbThresholdMs, interval > 0 ? interval * 3000 : 0);
+      const at = Number(swarm.lastHeartbeatAt || 0);
+      const age = at > 0 ? Date.now() - at : null;
+      const running = (swarm.liveStatus || '').toLowerCase() === 'running';
+      const stale = running && age !== null && age > threshold;
+      const missing = running && !at;
+      return { age, stale, missing, running };
+    }
+
+    function statusTag(status) {
+      const s = String(status || '').toLowerCase();
+      if (s === 'done') return `<span class="tag ok">done</span>`;
+      if (s === 'failed') return `<span class="tag bad">failed</span>`;
+      if (s === 'review' || s === 'testing') return `<span class="tag warn">${s}</span>`;
+      return `<span class="tag">${s || 'unknown'}</span>`;
+    }
+
+    function text(v) {
+      return String(v ?? '').replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
+    }
+
+    function applyFilters(tasks) {
+      const q = E.q.value.trim().toLowerCase();
+      const fs = E.status.value;
+      const ft = E.type.value;
+      const fh = E.hb.value;
+      const sort = E.sort.value;
+
+      let out = tasks.filter((t) => {
+        const s = String(t.status || '').toLowerCase();
+        const ty = String(t.task_type || '').toLowerCase();
+        const hb = hbMeta(t);
+        if (fs !== 'all' && s !== fs) return false;
+        if (ft !== 'all' && ty !== ft) return false;
+        if (fh === 'stale' && !hb.stale) return false;
+        if (fh === 'missing' && !hb.missing) return false;
+        if (fh === 'risk' && !(hb.stale || hb.missing)) return false;
+        if (!q) return true;
+        const hay = [t.id, t.title, t.description, t.status, t.task_type, t.external_url, t?.swarm?.branch].join(' ').toLowerCase();
+        return hay.includes(q);
+      });
+
+      if (sort === 'heartbeat') {
+        out.sort((a, b) => {
+          const aa = hbMeta(a).age ?? -1;
+          const bb = hbMeta(b).age ?? -1;
+          return bb - aa;
+        });
+      } else if (sort === 'status') {
+        out.sort((a, b) => String(a.status || '').localeCompare(String(b.status || '')));
+      } else {
+        out.sort((a, b) => String(b.updated_at || '').localeCompare(String(a.updated_at || '')));
+      }
+
+      return out;
+    }
+
+    function renderKpis(tasks) {
+      const statusCounts = tasks.reduce((acc, t) => {
+        const k = String(t.status || 'unknown');
+        acc[k] = (acc[k] || 0) + 1;
+        return acc;
+      }, {});
+
+      let running = 0;
+      let stale = 0;
+      let missing = 0;
+      tasks.forEach((t) => {
+        const hb = hbMeta(t);
+        if (hb.running) running += 1;
+        if (hb.stale) stale += 1;
+        if (hb.missing) missing += 1;
+      });
+
+      E.kTotal.textContent = String(tasks.length);
+      E.kRun.textContent = String(running);
+      E.kStale.textContent = String(stale);
+      E.kMissing.textContent = String(missing);
+      E.kReview.textContent = String((statusCounts.review || 0) + (statusCounts.testing || 0));
+      E.kDone.textContent = String(statusCounts.done || 0);
+    }
+
+    function renderAttention(tasks) {
+      const need = tasks
+        .map((t) => ({ t, hb: hbMeta(t) }))
+        .filter(({ t, hb }) => hb.stale || hb.missing || ['failed', 'review', 'testing'].includes(String(t.status || '').toLowerCase()))
+        .slice(0, 20);
+
+      E.attCount.textContent = String(need.length);
+      if (!need.length) {
+        E.attention.innerHTML = `<div class="item"><div class="t">No immediate attention items.</div><div class="m"><span class="tag ok">healthy</span></div></div>`;
+        return;
+      }
+
+      E.attention.innerHTML = need.map(({ t, hb }) => {
+        const hbTag = hb.stale ? `<span class="tag bad">stale heartbeat</span>` : hb.missing ? `<span class="tag bad">missing heartbeat</span>` : '';
+        const updated = t.updated_at ? ago(t.updated_at) : '--';
+        return `
+          <div class="item">
+            <div class="t">${text(t.title || t.id)}</div>
+            <div class="m">
+              ${statusTag(t.status)}
+              <span class="tag">${text(t.task_type || 'task')}</span>
+              ${hbTag}
+              <span class="tag">updated ${text(updated)}</span>
+            </div>
+          </div>`;
+      }).join('');
+    }
+
+    function actionButtons(t) {
+      const out = [];
+      const external = t.external_url ? `<a href="${text(t.external_url)}" target="_blank" rel="noopener noreferrer">Open Link</a>` : '';
+      if (external) out.push(external);
+      if (!state.readOnly && String(t.status || '').toLowerCase() !== 'done') {
+        out.push(`<button data-action="done" data-id="${text(t.id)}">Mark Done</button>`);
+      }
+      if (!state.readOnly && String(t.task_type || '').toLowerCase() === 'investigation') {
+        out.push(`<button data-action="promote" data-id="${text(t.id)}">Promote</button>`);
+      }
+      if (!state.readOnly && ['review', 'testing', 'failed'].includes(String(t.status || '').toLowerCase())) {
+        out.push(`<button data-action="retry" data-id="${text(t.id)}">Retry</button>`);
+      }
+      return out.join('');
+    }
+
+    function renderTable(tasks) {
+      E.gridCount.textContent = String(tasks.length);
+      if (!tasks.length) {
+        E.rows.innerHTML = `<tr><td colspan="7" class="muted">No tasks match current filters.</td></tr>`;
+        return;
+      }
+
+      E.rows.innerHTML = tasks.map((t) => {
+        const hb = hbMeta(t);
+        const hbLabel = hb.missing ? 'missing' : hb.stale ? `${ago(new Date(Date.now() - hb.age).toISOString())} stale` : hb.age === null ? '--' : `${ago(new Date(Date.now() - hb.age).toISOString())} ago`;
+        const swarm = t.swarm || {};
+        return `
+          <tr>
+            <td>
+              <div class="mono">${text(String(t.id || '').slice(0, 8))}</div>
+              <div>${text(t.title || '')}</div>
+            </td>
+            <td>${statusTag(t.status)}</td>
+            <td><span class="tag">${text(t.task_type || 'task')}</span></td>
+            <td>
+              <div class="mono">${text(swarm.agent || '--')}</div>
+              <div class="muted">${text(swarm.liveStatus || swarm.status || '--')}</div>
+            </td>
+            <td>
+              <span class="tag ${hb.missing ? 'bad' : hb.stale ? 'warn' : 'ok'}">${text(hbLabel)}</span>
+            </td>
+            <td class="muted">${text(ago(t.updated_at || t.created_at))}</td>
+            <td><div class="actions">${actionButtons(t)}</div></td>
+          </tr>`;
+      }).join('');
+    }
+
+    async function act(id, action) {
+      try {
+        let path = '';
+        let body = {};
+        if (action === 'done') {
+          const reason = prompt('Optional reason for marking done:') || '';
+          path = `/tasks/${id}/done`;
+          body = { reason: reason.trim() };
+        } else if (action === 'promote') {
+          const reason = prompt('Reason for promoting investigation to coding (required):');
+          if (!reason || reason.trim().length < 5) {
+            alert('Reason must be at least 5 characters.');
+            return;
+          }
+          path = `/tasks/${id}/promote`;
+          body = { reason: reason.trim() };
+        } else if (action === 'retry') {
+          path = `/tasks/${id}/retry`;
+          body = {};
+        }
+
+        const res = await fetch(api(path), {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(body),
+        });
+        if (!res.ok) {
+          const data = await res.json().catch(() => ({}));
+          throw new Error(data.error || 'Action failed');
+        }
+        await load();
+      } catch (e) {
+        alert(`Action failed: ${e.message || 'unknown error'}`);
+      }
+    }
+
+    async function loadMeta() {
+      try {
+        const res = await fetch(api('/meta'));
+        if (!res.ok) return;
+        const meta = await res.json();
+        state.readOnly = Boolean(meta.readOnly);
+      } catch {}
+    }
+
+    async function load() {
+      E.conn.textContent = 'Syncing...';
+      try {
+        await loadMeta();
+        const res = await fetch(api('/board?limit=500'));
+        if (!res.ok) throw new Error('board unavailable');
+        const data = await res.json();
+        state.summary = data.summary || null;
+        state.hbThresholdMs = Number(state.summary?.heartbeatThresholdMs || 300000);
+        state.tasks = Array.isArray(data.tasks) ? data.tasks : [];
+
+        const filtered = applyFilters(state.tasks);
+        renderKpis(filtered);
+        renderAttention(filtered);
+        renderTable(filtered);
+
+        E.conn.textContent = state.readOnly ? 'Read-only' : 'Live';
+      } catch {
+        E.conn.textContent = 'Offline';
+      }
+    }
+
+    function bind() {
+      E.refresh.addEventListener('click', load);
+      [E.q, E.status, E.type, E.hb, E.sort].forEach((el) => el.addEventListener('input', load));
+      document.addEventListener('keydown', (ev) => {
+        const target = ev.target;
+        const inTypingField = target && (
+          target.tagName === 'INPUT' ||
+          target.tagName === 'TEXTAREA' ||
+          target.isContentEditable
+        );
+        if (ev.metaKey || ev.ctrlKey || ev.altKey) return;
+        if (!inTypingField && ev.key.toLowerCase() === 'f') {
+          ev.preventDefault();
+          E.q.focus();
+          E.q.select();
+          return;
+        }
+        if (!inTypingField && ev.key.toLowerCase() === 'r') {
+          ev.preventDefault();
+          load();
+        }
+      });
+      E.rows.addEventListener('click', (ev) => {
+        const btn = ev.target.closest('button[data-action]');
+        if (!btn) return;
+        const action = btn.getAttribute('data-action');
+        const id = btn.getAttribute('data-id');
+        if (!action || !id) return;
+        act(id, action);
+      });
+    }
+
+    (function init() {
+      const url = new URL(window.location.href);
+      const token = url.searchParams.get('token');
+      if (token) state.accessToken = token;
+      bind();
+      load();
+      setInterval(load, 12000);
+    })();
+  </script>
+</body>
+</html>

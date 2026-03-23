@@ -33,7 +33,7 @@ export async function parseBody(req: IncomingMessage): Promise<unknown> {
         }
         resolve(JSON.parse(body));
       } catch {
-        resolve({});
+        reject(new Error("Malformed JSON body"));
       }
     });
     req.on("error", reject);
@@ -46,10 +46,135 @@ function sendJson(res: ServerResponse, status: number, data: unknown): void {
   res.end(JSON.stringify(data));
 }
 
+function isTruthyEnv(name: string): boolean {
+  const raw = (process.env[name] ?? "").trim().toLowerCase();
+  return raw === "1" || raw === "true" || raw === "yes" || raw === "on";
+}
+
+function getReadAccessToken(): string {
+  return (process.env.MISSION_CONTROL_READ_ACCESS_TOKEN ?? "").trim();
+}
+
+function extractProvidedToken(req: IncomingMessage, url: URL): string {
+  const auth = req.headers.authorization;
+  if (typeof auth === "string" && auth.startsWith("Bearer ")) {
+    return auth.slice(7).trim();
+  }
+  const queryToken = url.searchParams.get("token");
+  return typeof queryToken === "string" ? queryToken.trim() : "";
+}
+
+function isReadAuthorized(req: IncomingMessage, url: URL): boolean {
+  const required = getReadAccessToken();
+  if (!required) return true;
+  const provided = extractProvidedToken(req, url);
+  return provided === required;
+}
+
+function requireStringField(body: Record<string, unknown>, field: string): string | null {
+  const val = body[field];
+  return typeof val === "string" && val.trim() ? val : null;
+}
+
+function parsePagination(url: URL): { limit: number; offset: number } {
+  const rawLimit = Number.parseInt(url.searchParams.get("limit") ?? "100", 10);
+  const rawOffset = Number.parseInt(url.searchParams.get("offset") ?? "0", 10);
+  return {
+    limit: Number.isFinite(rawLimit) && rawLimit > 0 ? Math.min(rawLimit, 1000) : 100,
+    offset: Number.isFinite(rawOffset) && rawOffset >= 0 ? rawOffset : 0,
+  };
+}
+
+function parseIsoMs(value: unknown): number | null {
+  if (typeof value !== "string" || !value) return null;
+  const ms = Date.parse(value);
+  return Number.isFinite(ms) ? ms : null;
+}
+
+function isUrlSafe(urlStr: string): { safe: boolean; reason?: string } {
+  let parsed: URL;
+  try {
+    parsed = new URL(urlStr);
+  } catch {
+    return { safe: false, reason: "Invalid URL" };
+  }
+
+  if (!["http:", "https:"].includes(parsed.protocol)) {
+    return { safe: false, reason: "Only http and https URLs are allowed" };
+  }
+
+  const host = parsed.hostname.toLowerCase();
+  if (
+    host === "localhost" ||
+    host === "127.0.0.1" ||
+    host === "0.0.0.0" ||
+    host === "[::1]" ||
+    host === "::1" ||
+    host.endsWith(".local")
+  ) {
+    return { safe: false, reason: "Local/private hosts are not allowed" };
+  }
+
+  const ipParts = host.split(".").map(Number);
+  if (ipParts.length === 4 && ipParts.every(n => !isNaN(n))) {
+    if (ipParts[0] === 10) return { safe: false, reason: "Private IP range blocked" };
+    if (ipParts[0] === 172 && ipParts[1] >= 16 && ipParts[1] <= 31) return { safe: false, reason: "Private IP range blocked" };
+    if (ipParts[0] === 192 && ipParts[1] === 168) return { safe: false, reason: "Private IP range blocked" };
+    if (ipParts[0] === 169 && ipParts[1] === 254) return { safe: false, reason: "Link-local IP range blocked" };
+  }
+
+  return { safe: true };
+}
+
+function sanitizeConfig(config: Record<string, unknown>): Record<string, unknown> {
+  const result: Record<string, unknown> = { ...config };
+
+  const claudeDefaults = { model: "claude-opus-4-6", fallbackModel: "", maxAgents: 10 };
+  const codexDefaults = { model: "codex-mini", effort: "high", reviewEffort: "xhigh", maxAgents: 3 };
+  const ciDefaults = { enabled: false, maxCycles: 3 };
+
+  const rawClaude = isRecord(config.claude) ? config.claude : {};
+  result.claude = {
+    model: typeof rawClaude.model === "string" ? rawClaude.model : claudeDefaults.model,
+    fallbackModel: typeof rawClaude.fallbackModel === "string" ? rawClaude.fallbackModel : claudeDefaults.fallbackModel,
+    maxAgents:
+      typeof rawClaude.maxAgents === "number" && Number.isFinite(rawClaude.maxAgents) && rawClaude.maxAgents >= 1 && rawClaude.maxAgents <= 20
+        ? rawClaude.maxAgents
+        : claudeDefaults.maxAgents,
+  };
+
+  const rawCodex = isRecord(config.codex) ? config.codex : {};
+  result.codex = {
+    model: typeof rawCodex.model === "string" ? rawCodex.model : codexDefaults.model,
+    effort: typeof rawCodex.effort === "string" ? rawCodex.effort : codexDefaults.effort,
+    reviewEffort: typeof rawCodex.reviewEffort === "string" ? rawCodex.reviewEffort : codexDefaults.reviewEffort,
+    maxAgents:
+      typeof rawCodex.maxAgents === "number" && Number.isFinite(rawCodex.maxAgents) && rawCodex.maxAgents >= 1 && rawCodex.maxAgents <= 20
+        ? rawCodex.maxAgents
+        : codexDefaults.maxAgents,
+  };
+
+  const rawCi = isRecord(config.ci) ? config.ci : {};
+  let enabled = ciDefaults.enabled;
+  if (typeof rawCi.enabled === "boolean") {
+    enabled = rawCi.enabled;
+  } else if (typeof rawCi.enabled === "string" && ["true", "false"].includes(rawCi.enabled.toLowerCase())) {
+    enabled = rawCi.enabled.toLowerCase() === "true";
+  }
+  result.ci = {
+    enabled,
+    maxCycles:
+      typeof rawCi.maxCycles === "number" && Number.isFinite(rawCi.maxCycles) && rawCi.maxCycles >= 1 && rawCi.maxCycles <= 5
+        ? rawCi.maxCycles
+        : ciDefaults.maxCycles,
+  };
+
+  return result;
+}
+
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
 }
-
 const PLUGIN_PREFIX = "/ext/mission-control";
 const API_PREFIX = `${PLUGIN_PREFIX}/api`;
 
@@ -59,6 +184,64 @@ function getSwarmConfig(): Record<string, unknown> {
     if (existsSync(p)) return JSON.parse(readFileSync(p, "utf-8"));
   } catch {}
   return {};
+}
+
+async function getSwarmAgentStatusMap(
+  logger: OpenClawPluginApi["logger"]
+): Promise<Record<string, Record<string, unknown>>> {
+  const registryPath = join(homedir(), ".openclaw", "swarm", "active-tasks.json");
+  const raw = readFileSync(registryPath, "utf-8");
+  const entries = JSON.parse(raw) as Array<Record<string, unknown>>;
+
+  let aliveSessions: Set<string> = new Set();
+  try {
+    const { execSync } = await import("node:child_process");
+    const tmuxOut = execSync("tmux list-sessions -F '#{session_name}' 2>/dev/null || true", {
+      encoding: "utf-8",
+      timeout: 3000,
+    });
+    for (const line of tmuxOut.split("\n")) {
+      const trimmed = line.trim();
+      if (trimmed) aliveSessions.add(trimmed);
+    }
+  } catch {
+    logger.info("mission-control agent-status: no tmux sessions or tmux unavailable");
+  }
+
+  const byTask: Record<string, Record<string, unknown>> = {};
+  for (const entry of entries) {
+    const mcId = entry.mcTaskId as string;
+    if (!mcId) continue;
+
+    const tmuxName = entry.tmuxSession as string;
+    const tmuxAlive = tmuxName ? aliveSessions.has(tmuxName) : false;
+    const registryStatus = entry.status as string;
+
+    let liveStatus = registryStatus;
+    if (tmuxAlive && registryStatus !== "failed") {
+      liveStatus = "running";
+    } else if (!tmuxAlive && registryStatus === "running") {
+      liveStatus = "completed_by_agent";
+    }
+
+    byTask[mcId] = {
+      agent: entry.agent,
+      status: registryStatus,
+      liveStatus,
+      tmuxAlive,
+      tmuxSession: tmuxName,
+      reviewCycles: entry.reviewCycles,
+      retryCount: entry.retryCount,
+      branch: entry.branch,
+      startedAt: entry.startedAt,
+      pr: entry.pr,
+      changeRequestAt: entry.changeRequestAt,
+      lastHeartbeatAt: entry.lastHeartbeatAt,
+      heartbeatIntervalSec: entry.heartbeatIntervalSec,
+    };
+  }
+
+  return byTask;
 }
 
 function getLinearConfig(): { enabled: boolean; label: string; triageLabel: string; mentionTag: string; botName: string } {
@@ -92,6 +275,95 @@ async function linearGraphQL(query: string, variables?: Record<string, unknown>)
     throw new Error(`Linear GraphQL: ${msgs}`);
   }
   return (json.data ?? {}) as Record<string, unknown>;
+}
+
+interface TriageQuestion {
+  question?: string;
+  q?: string;
+  answer?: string;
+  answered?: boolean;
+  options?: string[];
+  linear_comment_id?: string;
+}
+
+interface TriageState {
+  questions?: TriageQuestion[];
+  status?: string;
+}
+
+function parseTriageState(raw: unknown): TriageState | null {
+  if (!raw) return null;
+  try {
+    const parsed = typeof raw === "string" ? JSON.parse(raw) : raw;
+    if (parsed && Array.isArray(parsed.questions)) return parsed as TriageState;
+  } catch {}
+  return null;
+}
+
+/** Post triage answers back to Linear as a formatted comment. Fire-and-forget. */
+function syncTriageAnswersToLinear(
+  externalId: string,
+  oldState: TriageState | null,
+  newState: TriageState,
+): void {
+  const apiKey = process.env.LINEAR_API_KEY;
+  if (!apiKey) return;
+
+  const cfg = getLinearConfig();
+  if (!cfg.enabled) return;
+
+  const newQs = newState.questions ?? [];
+  const oldQs = oldState?.questions ?? [];
+  const prefix = `${cfg.mentionTag} **${cfg.botName}**`;
+
+  const threadMutation = `mutation($issueId: String!, $body: String!, $parentId: String!) {
+    commentCreate(input: { issueId: $issueId, body: $body, parentId: $parentId }) { success }
+  }`;
+  const topLevelMutation = `mutation($issueId: String!, $body: String!) {
+    commentCreate(input: { issueId: $issueId, body: $body }) { success }
+  }`;
+
+  const unthreaded: { question: string; answer: string }[] = [];
+
+  for (let i = 0; i < newQs.length; i++) {
+    const nq = newQs[i];
+    const oq = oldQs[i];
+    const hasNewAnswer = !!(nq.answer || nq.answered);
+    const hadOldAnswer = !!(oq?.answer || oq?.answered);
+    if (!hasNewAnswer || hadOldAnswer) continue;
+
+    const answer = nq.answer ?? "(no text)";
+    const linearCommentId = nq.linear_comment_id;
+
+    if (linearCommentId) {
+      const body = `${prefix}: **A:** ${answer}`;
+      linearGraphQL(threadMutation, {
+        issueId: externalId,
+        body,
+        parentId: linearCommentId,
+      }).catch(err => {
+        console.error(`[MC] Failed to reply to Q${i + 1} thread: ${err}`);
+      });
+    } else {
+      unthreaded.push({
+        question: nq.question ?? nq.q ?? `Question ${i + 1}`,
+        answer,
+      });
+    }
+  }
+
+  if (unthreaded.length > 0) {
+    const body = unthreaded.map(qa =>
+      `**Q:** ${qa.question}\n**A:** ${qa.answer}`
+    ).join("\n\n");
+
+    linearGraphQL(topLevelMutation, {
+      issueId: externalId,
+      body: `${prefix}: Triage answers via Mission Control:\n\n${body}`,
+    }).catch(err => {
+      console.error(`[MC] Failed to sync triage answers to Linear: ${err}`);
+    });
+  }
 }
 
 async function fetchLinearTeams(): Promise<Array<{ id: string; name: string; key: string }>> {
@@ -169,6 +441,30 @@ function serveDashboard(res: ServerResponse): void {
   res.end(html);
 }
 
+function getSpaceHtml(): string | null {
+  try {
+    const thisDir = dirname(fileURLToPath(import.meta.url));
+    const htmlPath = join(thisDir, "..", "public", "space.html");
+    return readFileSync(htmlPath, "utf-8");
+  } catch {
+    return null;
+  }
+}
+
+function serveSpace(res: ServerResponse): void {
+  const html = getSpaceHtml();
+  if (!html) {
+    res.statusCode = 404;
+    res.setHeader("Content-Type", "text/plain");
+    res.end("Space not found");
+    return;
+  }
+  res.statusCode = 200;
+  res.setHeader("Content-Type", "text/html; charset=utf-8");
+  res.setHeader("Cache-Control", "no-cache");
+  res.end(html);
+}
+
 export function registerRoutes(api: OpenClawPluginApi, db: MissionControlDB): void {
   api.logger.info(`mission-control: registering HTTP handler at ${API_PREFIX}`);
 
@@ -179,6 +475,17 @@ export function registerRoutes(api: OpenClawPluginApi, db: MissionControlDB): vo
     const url = new URL(req.url ?? "/", "http://localhost");
     const pathname = url.pathname;
 
+    if (pathname.startsWith(PLUGIN_PREFIX) && !isReadAuthorized(req, url)) {
+      if (pathname.startsWith(API_PREFIX)) {
+        sendJson(res, 401, { error: "Unauthorized" });
+      } else {
+        res.statusCode = 401;
+        res.setHeader("Content-Type", "text/plain; charset=utf-8");
+        res.end("Unauthorized");
+      }
+      return true;
+    }
+
     // Serve dashboard UI at /ext/mission-control/ or /ext/mission-control
     if (
       pathname === PLUGIN_PREFIX ||
@@ -187,6 +494,11 @@ export function registerRoutes(api: OpenClawPluginApi, db: MissionControlDB): vo
       pathname === `${PLUGIN_PREFIX}/dashboard/`
     ) {
       serveDashboard(res);
+      return true;
+    }
+
+    if (pathname === `${PLUGIN_PREFIX}/space` || pathname === `${PLUGIN_PREFIX}/space/`) {
+      serveSpace(res);
       return true;
     }
 
@@ -210,49 +522,60 @@ async function handleApiRequest(
   try {
     const pathname = url.pathname;
     const method = req.method ?? "GET";
+    const readOnly = isTruthyEnv("MISSION_CONTROL_READ_ONLY");
 
     const routePath = pathname.replace(API_PREFIX, "");
-        const segments = routePath.split("/").filter(Boolean);
+    const segments = routePath.split("/").filter(Boolean);
 
-        if (segments[0] === "tasks") {
-          if (segments.length === 1 && method === "GET") {
-            const tasks = db.listTasks({
-              status: url.searchParams.get("status") ?? undefined,
-              workspace_id: url.searchParams.get("workspace_id") ?? undefined,
-              assigned_agent_id:
-                url.searchParams.get("assigned_agent_id") ?? undefined,
-            });
-            sendJson(res, 200, tasks);
-            return;
-          }
+    if (segments[0] === "meta" && segments.length === 1 && method === "GET") {
+      sendJson(res, 200, {
+        readOnly,
+        tokenRequired: Boolean(getReadAccessToken()),
+      });
+      return;
+    }
 
-          if (segments.length === 1 && method === "POST") {
-            const body = await parseBody(req);
-            if (!isRecord(body) || typeof body.title !== "string") {
-              sendJson(res, 400, { error: "Task title is required" });
-              return;
-            }
+    if (readOnly && !["GET", "HEAD", "OPTIONS"].includes(method)) {
+      sendJson(res, 403, { error: "Mission Control is running in read-only mode" });
+      return;
+    }
 
-            // Backward compat: accept old linear_issue_id/url field names
-            if (body.linear_issue_id && !body.external_id) {
-              body.external_id = body.linear_issue_id;
-              delete body.linear_issue_id;
-            }
-            if (body.linear_issue_url && !body.external_url) {
-              body.external_url = body.linear_issue_url;
-              delete body.linear_issue_url;
-            }
+    if (segments[0] === "tasks") {
+      if (segments.length === 1 && method === "GET") {
+        const tasks = db.listTasks({
+          status: url.searchParams.get("status") ?? undefined,
+          workspace_id: url.searchParams.get("workspace_id") ?? undefined,
+          assigned_agent_id: url.searchParams.get("assigned_agent_id") ?? undefined,
+        });
+        sendJson(res, 200, tasks);
+        return;
+      }
 
-            const syncToLinear = body.sync_to_linear === true;
-            const linearTeamId = typeof body.linear_team_id === "string" ? body.linear_team_id : "";
-            delete body.sync_to_linear;
-            delete body.linear_team_id;
+      if (segments.length === 1 && method === "POST") {
+        const body = await parseBody(req);
+        if (!isRecord(body) || typeof body.title !== "string") {
+          sendJson(res, 400, { error: "Task title is required" });
+          return;
+        }
 
-            let task = db.createTask(body as unknown as CreateTaskInput);
+        // Backward compat: accept old linear_issue_id/url field names
+        if (body.linear_issue_id && !body.external_id) {
+          body.external_id = body.linear_issue_id;
+          delete body.linear_issue_id;
+        }
+        if (body.linear_issue_url && !body.external_url) {
+          body.external_url = body.linear_issue_url;
+          delete body.linear_issue_url;
+        }
 
-            if (syncToLinear && linearTeamId) {
-              try {
-                const linearCfg = getLinearConfig();
+        const syncToLinear = body.sync_to_linear === true;
+        const linearTeamId = typeof body.linear_team_id === "string" ? body.linear_team_id : "";
+        delete body.sync_to_linear;
+        delete body.linear_team_id;
+
+        let task = db.createTask(body as unknown as CreateTaskInput);
+        if (syncToLinear && linearTeamId) {
+          try {                const linearCfg = getLinearConfig();
                 const taskType = typeof body.task_type === "string" ? body.task_type : "implementation";
                 const linearLabel = taskType === "investigation" && linearCfg.triageLabel
                   ? linearCfg.triageLabel
@@ -282,10 +605,9 @@ async function handleApiRequest(
               }
             }
 
-            sendJson(res, 201, task);
-            return;
-          }
-
+        sendJson(res, 201, task);
+        return;
+      }
           if (segments.length >= 2) {
             const taskId = segments[1];
 
@@ -313,11 +635,40 @@ async function handleApiRequest(
                 body.external_url = body.linear_issue_url;
                 delete body.linear_issue_url;
               }
+
+              const needsTriageCheck = typeof body.triage_state === "string";
+              const needsPriorityCheck = typeof body.priority === "string" && ["urgent", "high"].includes(body.priority);
+              const oldTask = (needsTriageCheck || needsPriorityCheck) ? db.getTask(taskId) : null;
+              const oldTriageState = needsTriageCheck && oldTask ? parseTriageState(oldTask.triage_state) : null;
+
+              if (needsPriorityCheck && oldTask) {
+                const stalled = ["on_hold", "inbox", "planning"];
+                if (stalled.includes(oldTask.status) && !["urgent", "high"].includes(oldTask.priority)) {
+                  body.status = "inbox";
+                }
+              }
+
               const task = db.updateTask(taskId, body as unknown as UpdateTaskInput);
               if (!task) {
                 sendJson(res, 404, { error: "Task not found" });
                 return;
               }
+
+              if (needsPriorityCheck && oldTask && body.status === "inbox" && oldTask.status !== "inbox") {
+                db.createActivity({
+                  task_id: taskId,
+                  activity_type: "status_changed",
+                  message: `Priority escalated to ${body.priority} — moved from ${oldTask.status} to inbox for immediate dispatch`,
+                });
+              }
+
+              if (needsTriageCheck && task.external_id) {
+                const newTriageState = parseTriageState(body.triage_state);
+                if (newTriageState) {
+                  syncTriageAnswersToLinear(task.external_id, oldTriageState, newTriageState);
+                }
+              }
+
               sendJson(res, 200, task);
               return;
             }
@@ -329,6 +680,146 @@ async function handleApiRequest(
                 return;
               }
               sendJson(res, 200, { success: true });
+              return;
+            }
+
+            if (segments.length === 3 && segments[2] === "retry" && method === "POST") {
+              const task = db.getTask(taskId);
+              if (!task) {
+                sendJson(res, 404, { error: "Task not found" });
+                return;
+              }
+              db.updateTask(taskId, { status: "planning" } as unknown as UpdateTaskInput);
+              db.clearBlockingActivities(taskId);
+              db.createActivity({
+                task_id: taskId,
+                activity_type: "status_changed",
+                message: "Agent retry requested — re-dispatching (triage preserved)",
+              });
+              sendJson(res, 200, { success: true, status: "planning" });
+              return;
+            }
+
+            if (segments.length === 3 && segments[2] === "done" && method === "POST") {
+              const task = db.getTask(taskId);
+              if (!task) {
+                sendJson(res, 404, { error: "Task not found" });
+                return;
+              }
+
+              if (task.status === "done") {
+                sendJson(res, 200, { success: true, alreadyDone: true, task });
+                return;
+              }
+
+              const body = await parseBody(req);
+              const reason = isRecord(body) && typeof body.reason === "string" ? body.reason.trim() : "";
+
+              const updated = db.updateTask(taskId, { status: "done" } as unknown as UpdateTaskInput);
+              if (!updated) {
+                sendJson(res, 500, { error: "Failed to close task" });
+                return;
+              }
+
+              db.createActivity({
+                task_id: taskId,
+                activity_type: "status_changed",
+                message: reason
+                  ? `Task marked done in Mission Control. Reason: ${reason}`
+                  : "Task marked done in Mission Control.",
+              });
+
+              if (task.external_id) {
+                const cfg = getLinearConfig();
+                const note = reason
+                  ? `${cfg.mentionTag} **${cfg.botName}**: Task marked done in Mission Control.\n\nReason: ${reason}`
+                  : `${cfg.mentionTag} **${cfg.botName}**: Task marked done in Mission Control.`;
+                linearGraphQL(
+                  `mutation($id: String!, $body: String!) { commentCreate(input: { issueId: $id, body: $body }) { success } }`,
+                  { id: task.external_id, body: note },
+                ).catch(err => console.error(`[MC] Failed to post done note to Linear: ${err}`));
+              }
+
+              sendJson(res, 200, { success: true, task: updated });
+              return;
+            }
+
+            if (segments.length === 3 && segments[2] === "promote" && method === "POST") {
+              const task = db.getTask(taskId);
+              if (!task) {
+                sendJson(res, 404, { error: "Task not found" });
+                return;
+              }
+              let existingTriage: Record<string, unknown> = {};
+              if (typeof task.triage_state === "string" && task.triage_state.trim()) {
+                try {
+                  const parsed = JSON.parse(task.triage_state);
+                  if (isRecord(parsed)) existingTriage = parsed;
+                } catch {}
+              }
+
+              const existingPromotion = isRecord(existingTriage.promotion) ? existingTriage.promotion : null;
+
+              if (
+                task.task_type === "implementation"
+                && existingPromotion
+                && existingPromotion.mode === "implementation"
+              ) {
+                sendJson(res, 200, { success: true, alreadyPromoted: true, task });
+                return;
+              }
+
+              if (task.task_type !== "investigation") {
+                sendJson(res, 400, { error: "Only investigation tasks can be promoted" });
+                return;
+              }
+
+              const body = await parseBody(req);
+              if (!isRecord(body) || typeof body.reason !== "string" || body.reason.trim().length < 5) {
+                sendJson(res, 400, { error: "Promotion reason is required (min 5 chars)" });
+                return;
+              }
+
+              const reason = body.reason.trim();
+              const currentTriage = existingTriage;
+              const nextTriage = {
+                ...currentTriage,
+                promotion: {
+                  mode: "implementation",
+                  reason,
+                  promoted_at: new Date().toISOString(),
+                  promoted_by: "mission-control",
+                },
+              };
+
+              const updated = db.updateTask(taskId, {
+                task_type: "implementation",
+                status: "planning",
+                triage_state: JSON.stringify(nextTriage),
+              } as unknown as UpdateTaskInput);
+
+              if (!updated) {
+                sendJson(res, 500, { error: "Failed to promote task" });
+                return;
+              }
+
+              db.clearBlockingActivities(taskId);
+              db.createActivity({
+                task_id: taskId,
+                activity_type: "status_changed",
+                message: `Investigation promoted to implementation — moved ${task.status} -> planning. Reason: ${reason}`,
+              });
+
+              if (task.external_id) {
+                const cfg = getLinearConfig();
+                const line = `${cfg.mentionTag} **${cfg.botName}**: Investigation promoted to implementation in Mission Control.\n\nReason: ${reason}`;
+                linearGraphQL(
+                  `mutation($id: String!, $body: String!) { commentCreate(input: { issueId: $id, body: $body }) { success } }`,
+                  { id: task.external_id, body: line },
+                ).catch(err => console.error(`[MC] Failed to post promotion note to Linear: ${err}`));
+              }
+
+              sendJson(res, 200, { success: true, task: updated });
               return;
             }
 
@@ -358,7 +849,53 @@ async function handleApiRequest(
                   metadata:
                     typeof body.metadata === "string" ? body.metadata : undefined,
                 };
-                sendJson(res, 201, db.createActivity(input));
+                const activity = db.createActivity(input);
+
+                if (input.activity_type === "investigation_findings") {
+                  const task = db.getTask(taskId);
+                  const externalId = task?.external_id;
+                  if (externalId) {
+                    const cfg = getLinearConfig();
+                    const prefix = `${cfg.mentionTag} **${cfg.botName}**`;
+                    const header = `${prefix}: 🔍 Investigation findings:\n\n`;
+                    const maxChunk = 10000;
+                    const fullText = input.message;
+
+                    if (fullText.length <= maxChunk) {
+                      linearGraphQL(
+                        `mutation($id: String!, $body: String!) { commentCreate(input: { issueId: $id, body: $body }) { success } }`,
+                        { id: externalId, body: header + fullText },
+                      ).catch(err => console.error(`[MC] Failed to post findings to Linear: ${err}`));
+                    } else {
+                      const chunks: string[] = [];
+                      let remaining = fullText;
+                      while (remaining.length > 0) {
+                        if (remaining.length <= maxChunk) {
+                          chunks.push(remaining);
+                          break;
+                        }
+                        let splitAt = remaining.lastIndexOf("\n", maxChunk);
+                        if (splitAt < maxChunk * 0.5) splitAt = maxChunk;
+                        chunks.push(remaining.slice(0, splitAt));
+                        remaining = remaining.slice(splitAt).trimStart();
+                      }
+
+                      const postChunks = async () => {
+                        for (let i = 0; i < chunks.length; i++) {
+                          const label = chunks.length > 1 ? ` (${i + 1}/${chunks.length})` : "";
+                          const body = (i === 0 ? header : `${prefix}: 🔍 Findings continued${label}:\n\n`) + chunks[i];
+                          await linearGraphQL(
+                            `mutation($id: String!, $body: String!) { commentCreate(input: { issueId: $id, body: $body }) { success } }`,
+                            { id: externalId, body },
+                          );
+                        }
+                      };
+                      postChunks().catch(err => console.error(`[MC] Failed to post findings to Linear: ${err}`));
+                    }
+                  }
+                }
+
+                sendJson(res, 201, activity);
                 return;
               }
             }
@@ -560,12 +1097,11 @@ async function handleApiRequest(
           if (segments.length === 1 && method === "GET") {
             const limitRaw = url.searchParams.get("limit") ?? "50";
             const limit = Number.parseInt(limitRaw, 10);
-            const safeLimit = Number.isFinite(limit) && limit > 0 ? limit : 50;
+            const safeLimit = Number.isFinite(limit) && limit > 0 ? Math.min(limit, 1000) : 50;
             const since = url.searchParams.get("since") ?? undefined;
             sendJson(res, 200, db.listEvents(safeLimit, since));
             return;
           }
-
           if (segments.length === 1 && method === "POST") {
             const body = await parseBody(req);
             if (
@@ -696,61 +1232,128 @@ async function handleApiRequest(
 
         if (segments[0] === "agent-status" && segments.length === 1 && method === "GET") {
           try {
-            const registryPath = join(homedir(), ".openclaw", "swarm", "active-tasks.json");
-            const raw = readFileSync(registryPath, "utf-8");
-            const entries = JSON.parse(raw) as Array<Record<string, unknown>>;
+            const byTask = await getSwarmAgentStatusMap(api.logger);
+            sendJson(res, 200, byTask);
+          } catch (error) {
+            const message = error instanceof Error ? error.message : "Failed to read agent status";
+            api.logger.error(`mission-control agent-status error: ${message}`);
+            sendJson(res, 500, { error: message });
+          }
+          return;
+        }
 
-            // Check which tmux sessions are alive
-            let aliveSessions: Set<string> = new Set();
-            try {
-              const { execSync } = await import("node:child_process");
-              const tmuxOut = execSync("tmux list-sessions -F '#{session_name}' 2>/dev/null || true", {
-                encoding: "utf-8",
-                timeout: 3000,
-              });
-              for (const line of tmuxOut.split("\n")) {
-                const trimmed = line.trim();
-                if (trimmed) aliveSessions.add(trimmed);
-              }
-            } catch {
-              // tmux not running or no sessions — aliveSessions stays empty
-            }
+        if (segments[0] === "board" && segments.length === 1 && method === "GET") {
+          try {
+            const { limit, offset } = parsePagination(url);
+            const since = url.searchParams.get("since") ?? undefined;
+            const liveMode = url.searchParams.get("live") === "true";
 
-            const byTask: Record<string, Record<string, unknown>> = {};
-            for (const entry of entries) {
-              const mcId = entry.mcTaskId as string;
-              if (mcId) {
-                const tmuxName = entry.tmuxSession as string;
-                const tmuxAlive = tmuxName ? aliveSessions.has(tmuxName) : false;
-                const registryStatus = entry.status as string;
+            const allTasks = db.listTasks({});
+            const sortedTasks = [...allTasks].sort((a, b) =>
+              String(b.updated_at ?? "").localeCompare(String(a.updated_at ?? ""))
+            );
+            const swarmStatus = await getSwarmAgentStatusMap(api.logger);
 
-                // Compute live status: if tmux is alive, agent is running
-                // If registry says running/ready but tmux is dead, it's completed
-                let liveStatus = registryStatus;
-                if (tmuxAlive && registryStatus !== "failed") {
-                  liveStatus = "running";
-                } else if (!tmuxAlive && registryStatus === "running") {
-                  liveStatus = "completed_by_agent";
+            const sinceMs = parseIsoMs(since);
+            const pagedTasks = liveMode
+              ? sortedTasks
+                  .filter((task) => {
+                    const updatedMs = parseIsoMs(task.updated_at);
+                    if (sinceMs === null) return true;
+                    const swarm = swarmStatus[task.id];
+                    const heartbeatMs =
+                      typeof swarm?.lastHeartbeatAt === "number"
+                        ? (swarm.lastHeartbeatAt as number)
+                        : null;
+                    return (
+                      (updatedMs !== null && updatedMs > sinceMs) ||
+                      (heartbeatMs !== null && heartbeatMs > sinceMs)
+                    );
+                  })
+                  .slice(0, limit)
+              : sortedTasks.slice(offset, offset + limit);
+
+            const statusCounts = allTasks.reduce<Record<string, number>>((acc, task) => {
+              const key = task.status;
+              acc[key] = (acc[key] ?? 0) + 1;
+              return acc;
+            }, {});
+
+            const heartbeatThresholdMs = Number.parseInt(
+              url.searchParams.get("heartbeatThresholdMs") ?? "300000",
+              10
+            );
+            const nowMs = Date.now();
+            const heartbeatStats = Object.values(swarmStatus).reduce<{
+              runningAgents: number;
+              staleHeartbeat: number;
+              missingHeartbeat: number;
+            }>(
+              (acc, swarmEntry) => {
+                const live = swarmEntry.liveStatus === "running";
+                if (!live) return acc;
+                acc.runningAgents += 1;
+
+                const lastHeartbeatAt =
+                  typeof swarmEntry.lastHeartbeatAt === "number"
+                    ? (swarmEntry.lastHeartbeatAt as number)
+                    : null;
+                const heartbeatIntervalSec =
+                  typeof swarmEntry.heartbeatIntervalSec === "number"
+                    ? (swarmEntry.heartbeatIntervalSec as number)
+                    : null;
+
+                if (lastHeartbeatAt === null) {
+                  acc.missingHeartbeat += 1;
+                  return acc;
                 }
 
-                byTask[mcId] = {
-                  agent: entry.agent,
-                  status: registryStatus,
-                  liveStatus,
-                  tmuxAlive,
-                  tmuxSession: tmuxName,
-                  reviewCycles: entry.reviewCycles,
-                  retryCount: entry.retryCount,
-                  branch: entry.branch,
-                  startedAt: entry.startedAt,
-                  pr: entry.pr,
-                  changeRequestAt: entry.changeRequestAt,
-                };
-              }
-            }
-            sendJson(res, 200, byTask);
-          } catch {
-            sendJson(res, 200, {});
+                const ageMs = nowMs - lastHeartbeatAt;
+                const effectiveThreshold = heartbeatIntervalSec
+                  ? Math.max(heartbeatThresholdMs, heartbeatIntervalSec * 3000)
+                  : heartbeatThresholdMs;
+
+                if (ageMs > effectiveThreshold) {
+                  acc.staleHeartbeat += 1;
+                }
+                return acc;
+              },
+              { runningAgents: 0, staleHeartbeat: 0, missingHeartbeat: 0 }
+            );
+
+            const tasks = pagedTasks.map((task) => ({
+              ...task,
+              swarm: swarmStatus[task.id] ?? null,
+              recent_activity: db.listActivities(task.id, 3, 0),
+            }));
+
+            const recentEvents = db.listEvents(Math.min(limit, 200), since, 0);
+            const nextCursor =
+              tasks.length > 0
+                ? String(tasks[tasks.length - 1]?.updated_at ?? "") || new Date().toISOString()
+                : new Date().toISOString();
+
+            sendJson(res, 200, {
+              summary: {
+                totalTasks: allTasks.length,
+                statusCounts,
+                runningSwarmAgents: heartbeatStats.runningAgents,
+                staleHeartbeat: heartbeatStats.staleHeartbeat,
+                missingHeartbeat: heartbeatStats.missingHeartbeat,
+                heartbeatThresholdMs,
+                liveMode,
+                cursorMode: liveMode ? "since" : "offset",
+                boardGeneratedAt: new Date().toISOString(),
+              },
+              tasks,
+              swarm: swarmStatus,
+              recentEvents,
+              nextCursor,
+            });
+          } catch (error) {
+            const message = error instanceof Error ? error.message : "Failed to build board";
+            api.logger.error(`mission-control board error: ${message}`);
+            sendJson(res, 500, { error: message });
           }
           return;
         }
@@ -761,7 +1364,6 @@ async function handleApiRequest(
           const usedMem = totalMem - freeMem;
           const load = loadavg();
           const numCpus = cpus().length;
-
           sendJson(res, 200, {
             cpu: {
               cores: numCpus,
@@ -795,9 +1397,9 @@ async function handleApiRequest(
             return {
               claude: { model: "claude-opus-4-6", fallbackModel: "", maxAgents: 10 },
               codex: { model: "codex-mini", effort: "high", reviewEffort: "xhigh", maxAgents: 3 },
+              ci: { enabled: false, maxCycles: 3 },
             };
           };
-
           if (method === "GET") {
             sendJson(res, 200, readConfig());
             return;
@@ -810,20 +1412,21 @@ async function handleApiRequest(
               return;
             }
 
-            const current = readConfig() as Record<string, Record<string, unknown>>;
+            const current = readConfig() as Record<string, unknown>;
 
-            for (const key of ["claude", "codex"] as const) {
+            for (const key of ["claude", "codex", "ci"] as const) {
               if (isRecord(body[key])) {
-                current[key] = { ...current[key], ...(body[key] as Record<string, unknown>) };
+                const base = isRecord(current[key]) ? (current[key] as Record<string, unknown>) : {};
+                current[key] = { ...base, ...(body[key] as Record<string, unknown>) };
               }
             }
 
-            writeFileSync(configPath, JSON.stringify(current, null, 2) + "\n", "utf-8");
-            sendJson(res, 200, current);
+            const sanitized = sanitizeConfig(current);
+            writeFileSync(configPath, JSON.stringify(sanitized, null, 2) + "\n", "utf-8");
+            sendJson(res, 200, sanitized);
             return;
           }
         }
-
         if (segments[0] === "linear" && segments.length >= 2) {
           if (segments[1] === "config" && method === "GET") {
             const cfg = getLinearConfig();
@@ -915,12 +1518,24 @@ async function handleApiRequest(
 
           if (segments.length === 2 && segments[1] === "fetch-url" && method === "POST") {
             const body = await parseBody(req);
-            if (!isRecord(body) || typeof body.url !== "string") {
+            if (!isRecord(body)) {
               sendJson(res, 400, { error: "url is required" });
               return;
             }
 
-            const targetUrl = body.url.startsWith("http") ? body.url : `https://${body.url}`;
+            const urlField = requireStringField(body, "url");
+            if (!urlField) {
+              sendJson(res, 400, { error: "url is required" });
+              return;
+            }
+
+            const targetUrl = urlField.startsWith("http") ? urlField : `https://${urlField}`;
+            const safety = isUrlSafe(targetUrl);
+            if (!safety.safe) {
+              sendJson(res, 400, { error: safety.reason ?? "Unsafe URL" });
+              return;
+            }
+
             const method_ = typeof body.method === "string" ? body.method : "direct";
 
             if (method_ === "claude") {
@@ -957,7 +1572,6 @@ async function handleApiRequest(
             }
             return;
           }
-
           if (segments.length === 2 && method === "DELETE") {
             const entryId = segments[1];
             const args = [knowledgeScript, "delete", "--id", entryId];
@@ -970,9 +1584,13 @@ async function handleApiRequest(
         sendJson(res, 404, { error: "Not found" });
       } catch (error) {
         const message = error instanceof Error ? error.message : "Internal server error";
+        if (message === "Malformed JSON body") {
+          sendJson(res, 400, { error: message });
+          return;
+        }
         api.logger.error(`mission-control routes error: ${message}`);
         sendJson(res, 500, { error: message });
-  }
+      }
 }
 
 function extractTitle(html: string): string {
@@ -983,8 +1601,7 @@ function extractTitle(html: string): string {
 function stripHtmlToText(html: string): string {
   let text = html;
   text = text.replace(/<script[\s\S]*?<\/script>/gi, "");
-  text = text.replace(/<style[\s\S]*?<\/style>/gi, "");
-  text = text.replace(/<nav[\s\S]*?<\/nav>/gi, "");
+  text = text.replace(/<style[\s\S]*?<\/style>/gi, "");  text = text.replace(/<nav[\s\S]*?<\/nav>/gi, "");
   text = text.replace(/<footer[\s\S]*?<\/footer>/gi, "");
   text = text.replace(/<header[\s\S]*?<\/header>/gi, "");
   text = text.replace(/<(h[1-6])[^>]*>/gi, "\n\n");
@@ -1004,19 +1621,18 @@ function stripHtmlToText(html: string): string {
 
 function runClaude(prompt: string, timeout = 120000): Promise<string> {
   const home = process.env.HOME || homedir();
-  const escaped = prompt.replace(/'/g, "'\\''");
-  const cmd = `/opt/homebrew/bin/claude -p '${escaped}' --allowedTools 'mcp__notion__*,WebFetch' --no-session-persistence --model sonnet`;
+  const claudePath = "/opt/homebrew/bin/claude";
+  const args = ["-p", prompt, "--allowedTools", "mcp__notion__*,WebFetch", "--no-session-persistence", "--model", "sonnet"];
 
   return new Promise((resolve, reject) => {
     let stdout = "";
     let stderr = "";
-    const child = spawn("/bin/bash", ["-lc", cmd], {
+    const child = spawn(claudePath, args, {
       cwd: home,
       stdio: ["pipe", "pipe", "pipe"],
       env: { HOME: home, USER: process.env.USER || "mm", PATH: process.env.PATH || "/opt/homebrew/bin:/usr/bin:/bin" },
     });
     child.stdin.end();
-
     child.stdout.on("data", (d: Buffer) => { stdout += d.toString(); });
     child.stderr.on("data", (d: Buffer) => { stderr += d.toString(); });
 

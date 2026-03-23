@@ -3,6 +3,7 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <meta name="referrer" content="no-referrer">
     <title>Mission Control</title>
     <link rel="icon" type="image/svg+xml" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='6' fill='%230a0a0f'/%3E%3Ccircle cx='16' cy='16' r='10' fill='none' stroke='%2300ff88' stroke-width='1.5' opacity='0.3'/%3E%3Ccircle cx='16' cy='16' r='6' fill='none' stroke='%2300ff88' stroke-width='1.5' opacity='0.5'/%3E%3Ccircle cx='16' cy='16' r='2.5' fill='%2300ff88'/%3E%3Cline x1='16' y1='4' x2='16' y2='12' stroke='%2300ff88' stroke-width='1.5' opacity='0.6'/%3E%3Cline x1='16' y1='20' x2='16' y2='28' stroke='%2300ff88' stroke-width='1.5' opacity='0.6'/%3E%3Cline x1='4' y1='16' x2='12' y2='16' stroke='%2300ff88' stroke-width='1.5' opacity='0.6'/%3E%3Cline x1='20' y1='16' x2='28' y2='16' stroke='%2300ff88' stroke-width='1.5' opacity='0.6'/%3E%3C/svg%3E">
     <link rel="preconnect" href="https://fonts.googleapis.com">
@@ -116,6 +117,39 @@
             gap: 6px;
         }
 
+        .metric-chip-health {
+            gap: 8px;
+        }
+
+        .metric-chip-health.warn {
+            border-color: rgba(245, 158, 11, 0.45);
+            background: rgba(245, 158, 11, 0.09);
+        }
+
+        .metric-chip-health.alert {
+            border-color: rgba(239, 68, 68, 0.55);
+            background: rgba(239, 68, 68, 0.12);
+        }
+
+        .health-item {
+            display: inline-flex;
+            align-items: center;
+            gap: 4px;
+            font-size: 11px;
+        }
+
+        .health-label {
+            color: var(--text-secondary);
+            font-size: 10px;
+            letter-spacing: 0.4px;
+        }
+
+        .health-value {
+            color: var(--text-primary);
+            min-width: 14px;
+            text-align: right;
+        }
+
         .chip-icon {
             font-size: 10px;
         }
@@ -124,6 +158,25 @@
             display: flex;
             align-items: center;
             gap: 16px;
+        }
+
+        .nav-link-pill {
+            border: 1px solid var(--border-color);
+            color: var(--text-secondary);
+            text-decoration: none;
+            padding: 6px 10px;
+            border-radius: 4px;
+            font-family: var(--font-mono);
+            font-size: 11px;
+            letter-spacing: 0.4px;
+            transition: all 150ms ease;
+            white-space: nowrap;
+        }
+
+        .nav-link-pill:hover {
+            border-color: var(--accent);
+            color: var(--accent);
+            background: rgba(0, 212, 255, 0.08);
         }
 
         .filters {
@@ -504,6 +557,23 @@
 
         .task-card.priority-high {
             border-color: rgba(249, 115, 22, 0.2);
+        }
+
+        .task-card.task-done {
+            opacity: 0.58;
+            filter: saturate(0.7);
+            border-color: rgba(255, 255, 255, 0.08);
+            box-shadow: 0 1px 2px rgba(0,0,0,0.22);
+        }
+
+        .task-card.task-done:hover {
+            background: var(--bg-card);
+            border-color: rgba(255, 255, 255, 0.08);
+        }
+
+        .task-card.task-done .card-priority {
+            box-shadow: none;
+            opacity: 0.4;
         }
 
         .task-card:hover {
@@ -1011,6 +1081,31 @@
         .timeline-item.type-failed::before { border-color: var(--status-failed); }
         .timeline-item.type-investigation_findings::before { border-color: #9382ff; }
         .timeline-item.findings-highlight { border-left: 2px solid rgba(147, 130, 255, 0.3); padding-left: 8px; margin-left: -10px; }
+        .timeline-item.type-planning_questions::before { border-color: var(--stage-triage); }
+        .timeline-item.type-linear_comment::before { border-color: #6366f1; }
+        .timeline-item.type-heartbeat::before { border-color: #22c55e; }
+        .timeline-item.heartbeat-stale::before { border-color: #ef4444; }
+
+        .heartbeat-pill {
+            display: inline-flex;
+            align-items: center;
+            gap: 5px;
+            font-family: var(--font-mono);
+            font-size: 9px;
+            letter-spacing: 0.4px;
+            padding: 2px 7px;
+            border-radius: 999px;
+            border: 1px solid rgba(34, 197, 94, 0.4);
+            color: #86efac;
+            background: rgba(34, 197, 94, 0.12);
+            margin-left: 8px;
+        }
+
+        .heartbeat-pill.stale {
+            border-color: rgba(239, 68, 68, 0.45);
+            color: #fca5a5;
+            background: rgba(239, 68, 68, 0.12);
+        }
 
         .timeline-header {
             display: flex;
@@ -1083,6 +1178,42 @@
             letter-spacing: 0.5px;
             transition: all 150ms ease;
             margin-left: auto;
+        }
+
+        .btn-promote {
+            background: rgba(0, 255, 136, 0.14);
+            border: 1px solid rgba(0, 255, 136, 0.35);
+            color: var(--accent);
+            padding: 5px 10px;
+            font-size: 11px;
+            cursor: pointer;
+            transition: all var(--transition-fast);
+            font-family: var(--font-mono);
+            text-transform: uppercase;
+            letter-spacing: 0.4px;
+        }
+
+        .btn-promote:hover {
+            background: rgba(0, 255, 136, 0.22);
+            border-color: rgba(0, 255, 136, 0.55);
+        }
+
+        .btn-done {
+            background: rgba(56, 189, 248, 0.14);
+            border: 1px solid rgba(56, 189, 248, 0.35);
+            color: #7dd3fc;
+            padding: 5px 10px;
+            font-size: 11px;
+            cursor: pointer;
+            transition: all var(--transition-fast);
+            font-family: var(--font-mono);
+            text-transform: uppercase;
+            letter-spacing: 0.4px;
+        }
+
+        .btn-done:hover {
+            background: rgba(56, 189, 248, 0.22);
+            border-color: rgba(56, 189, 248, 0.55);
         }
 
         .btn-triage:hover {
@@ -1626,6 +1757,10 @@
             border-radius: 50%;
         }
 
+        .pg-tl-step.intake .pg-tl-dot { background: var(--stage-intake); color: var(--stage-intake); }
+        .pg-tl-step.triage .pg-tl-dot { background: var(--stage-triage); color: var(--stage-triage); }
+        .pg-tl-step.triage-done .pg-tl-dot { background: var(--stage-triage); color: var(--stage-triage); }
+        .pg-tl-step.dispatch .pg-tl-dot { background: var(--stage-dispatch); color: var(--stage-dispatch); }
         .pg-tl-step.prompt .pg-tl-dot { background: var(--accent); color: var(--accent); }
         .pg-tl-step.spawn .pg-tl-dot { background: var(--status-in_progress); color: var(--status-in_progress); }
         .pg-tl-step.review-pass .pg-tl-dot { background: var(--accent); color: var(--accent); }
@@ -1699,6 +1834,126 @@
             color: rgba(255,255,255,0.35);
             font-style: italic;
         }
+        /* Triage Modal */
+        .triage-modal-overlay {
+            position: fixed;
+            top: 0;
+            left: 0;
+            right: 0;
+            bottom: 0;
+            background-color: rgba(0, 0, 0, 0.7);
+            backdrop-filter: blur(4px);
+            z-index: 2000;
+            display: none;
+            opacity: 0;
+            transition: opacity 0.2s ease;
+        }
+
+        .triage-modal-overlay.open {
+            display: block;
+            opacity: 1;
+        }
+
+        .triage-modal {
+            position: fixed;
+            top: 50%;
+            left: 50%;
+            transform: translate(-50%, -50%) scale(0.95);
+            width: 600px;
+            max-width: 90vw;
+            max-height: 80vh;
+            background-color: var(--bg-card);
+            border: 1px solid rgba(255, 255, 255, 0.06);
+            border-radius: 8px;
+            z-index: 2001;
+            display: none;
+            opacity: 0;
+            flex-direction: column;
+            transition: all 0.2s ease;
+            box-shadow: 0 20px 40px rgba(0, 0, 0, 0.5);
+        }
+
+        .triage-modal.open {
+            display: flex;
+            opacity: 1;
+            transform: translate(-50%, -50%) scale(1);
+        }
+
+        .triage-modal-header {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            padding: 16px 20px;
+            border-bottom: 1px solid rgba(255, 255, 255, 0.06);
+            background-color: rgba(0, 0, 0, 0.2);
+            border-radius: 8px 8px 0 0;
+        }
+
+        .triage-modal-title {
+            font-family: var(--font-mono);
+            font-size: 14px;
+            font-weight: bold;
+            letter-spacing: 1px;
+            color: var(--stage-triage);
+        }
+
+        .triage-modal-content {
+            padding: 20px;
+            overflow-y: auto;
+            font-family: var(--font-mono);
+            font-size: 12px;
+        }
+
+        .triage-options {
+            display: flex;
+            flex-wrap: wrap;
+            gap: 6px;
+            margin-top: 8px;
+        }
+
+        .triage-option-chip {
+            background: rgba(255, 255, 255, 0.04);
+            border: 1px solid rgba(255, 255, 255, 0.1);
+            color: var(--text-secondary);
+            padding: 5px 12px;
+            border-radius: 4px;
+            font-family: var(--font-mono);
+            font-size: 11px;
+            cursor: pointer;
+            transition: all 0.15s ease;
+        }
+
+        .triage-option-chip:hover {
+            background: rgba(245, 158, 11, 0.1);
+            border-color: rgba(245, 158, 11, 0.3);
+            color: var(--stage-triage);
+        }
+
+        .triage-custom-row {
+            display: flex;
+            gap: 8px;
+            margin-top: 8px;
+        }
+
+        .triage-indicator-btn {
+            display: inline-flex;
+            align-items: center;
+            gap: 6px;
+            background: rgba(245, 158, 11, 0.1);
+            color: var(--stage-triage);
+            border: 1px solid rgba(245, 158, 11, 0.2);
+            border-radius: 4px;
+            padding: 4px 8px;
+            font-family: var(--font-mono);
+            font-size: 10px;
+            cursor: pointer;
+            transition: all 0.2s ease;
+        }
+
+        .triage-indicator-btn:hover {
+            background: rgba(245, 158, 11, 0.2);
+            border-color: rgba(245, 158, 11, 0.4);
+        }
     </style>
 </head>
 <body>
@@ -1712,9 +1967,16 @@
             <div class="metric-chip"><span class="chip-icon" style="color: var(--accent)">■</span> <span id="chip-tasks-val">0</span> TASKS</div>
             <div class="metric-chip"><span class="chip-icon" style="color: var(--status-active)">●</span> <span id="chip-agents-val">0</span> AGENTS</div>
             <div class="metric-chip"><span class="chip-icon" style="color: var(--status-planning)">▲</span> <span id="chip-triage-val">0</span> TRIAGE</div>
+            <div class="metric-chip metric-chip-health" id="chip-health">
+                <span class="chip-icon" style="color: #22c55e">♥</span>
+                <span class="health-item"><span class="health-label">RUN</span><span class="health-value" id="chip-hb-running">0</span></span>
+                <span class="health-item"><span class="health-label">STALE</span><span class="health-value" id="chip-hb-stale">0</span></span>
+                <span class="health-item"><span class="health-label">MISS</span><span class="health-value" id="chip-hb-missing">0</span></span>
+            </div>
             <div class="metric-chip"><span class="chip-icon" style="color: var(--text-secondary)">⏱</span> <span id="chip-uptime-val">00:00:00</span></div>
         </div>
         <div class="controls">
+            <a class="nav-link-pill" href="/ext/mission-control/space">SPACE OPS</a>
             <div class="filters" id="filters">
                 <!-- Filters rendered here -->
             </div>
@@ -1875,6 +2137,14 @@
                             </div>
                             <div id="kb-url-preview" style="display: none; margin-top: 8px; max-height: 200px; overflow-y: auto; padding: 8px; background: rgba(0,0,0,0.2); border-radius: 3px; font-size: 12px; color: var(--text-secondary); white-space: pre-wrap; word-break: break-word;"></div>
                         </div>
+                        <div style="display: flex; gap: 8px; margin: -4px 0 8px 0;">
+                            <select id="kb-scope-project" class="kb-select" style="flex: 1;" onchange="updateKbScopeRepo()">
+                                <option value="">Global (no project)</option>
+                            </select>
+                            <select id="kb-scope-repo" class="kb-select" style="flex: 1;">
+                                <option value="">All repos in project</option>
+                            </select>
+                        </div>
                         <div class="kb-form-footer">
                             <div class="kb-importance-selector">
                                 <span style="font-size: 9px; color: rgba(255,255,255,0.25); margin-right: 6px;">CRITICAL</span>
@@ -1987,6 +2257,17 @@
         </div>
     </div>
 
+    <div class="triage-modal-overlay" id="triage-modal-overlay"></div>
+    <div class="triage-modal" id="triage-modal">
+        <div class="triage-modal-header">
+            <div class="triage-modal-title">TRIAGE QUESTIONS</div>
+            <button class="close-btn" id="close-triage-modal">&times;</button>
+        </div>
+        <div class="triage-modal-content" id="triage-modal-content">
+            <!-- Questions rendered here -->
+        </div>
+    </div>
+
     <div class="drawer-overlay" id="drawer-overlay"></div>
     <div class="drawer" id="drawer">
         <div class="drawer-header">
@@ -2030,10 +2311,15 @@
 
     <script>
         const getApiUrl = (path) => {
+            const withToken = (base) => {
+                if (!state.accessToken) return base;
+                const sep = base.includes('?') ? '&' : '?';
+                return `${base}${sep}token=${encodeURIComponent(state.accessToken)}`;
+            };
             if (window.location.pathname.startsWith('/ext/mission-control')) {
-                return `/ext/mission-control/api${path}`;
+                return withToken(`/ext/mission-control/api${path}`);
             }
-            return `http://localhost:4000/api${path}`;
+            return withToken(`http://localhost:4000/api${path}`);
         };
 
         // State
@@ -2045,6 +2331,7 @@
             lastEvent: null,
             triageState: null,
             selectedTaskId: null,
+            activeTriageTaskId: null,
             filter: 'all',
             sort: 'newest',
             lastUpdated: null,
@@ -2057,7 +2344,15 @@
             lastRenderedTelemetryHtml: '',
             lastActivityCount: 0,
             lastActivityId: null,
-            childActivities: {}
+            childActivities: {},
+            boardSummary: null,
+            boardSummarySeen: false,
+            boardCursor: null,
+            boardGeneratedAt: null,
+            boardRequestSeq: 0,
+            boardAppliedSeq: 0,
+            readOnly: false,
+            accessToken: null
         };
 
         // Constants
@@ -2144,6 +2439,55 @@
             return days + 'd ' + (hrs % 24) + 'h';
         };
 
+        const getHeartbeatMeta = (agent) => {
+            if (!agent || !agent.lastHeartbeatAt) {
+                return { hasHeartbeat: false, ageMs: null, stale: false, thresholdMs: 300000 };
+            }
+            const intervalSec = Number(agent.heartbeatIntervalSec || 0);
+            const serverThresholdMs = Number(state.boardSummary?.heartbeatThresholdMs || 0);
+            const thresholdMs = Math.max(serverThresholdMs || 300000, intervalSec > 0 ? intervalSec * 3000 : 0);
+            const ageMs = Date.now() - Number(agent.lastHeartbeatAt);
+            const stale = (agent.liveStatus || agent.status) === 'running' && ageMs > thresholdMs;
+            return { hasHeartbeat: true, ageMs, stale, thresholdMs };
+        };
+
+        const formatHeartbeatAge = (ageMs) => {
+            if (ageMs === null || ageMs === undefined || ageMs < 0) return '--';
+            const sec = Math.floor(ageMs / 1000);
+            if (sec < 60) return `${sec}s`;
+            const min = Math.floor(sec / 60);
+            if (min < 60) return `${min}m`;
+            const hr = Math.floor(min / 60);
+            return `${hr}h ${min % 60}m`;
+        };
+
+        const computeHeartbeatHealth = () => {
+            if (!state.boardSummarySeen) {
+                return { running: 0, stale: 0, missing: 0 };
+            }
+
+            if (state.boardSummary) {
+                return {
+                    running: Number(state.boardSummary.runningSwarmAgents || 0),
+                    stale: Number(state.boardSummary.staleHeartbeat || 0),
+                    missing: Number(state.boardSummary.missingHeartbeat || 0)
+                };
+            }
+
+            let running = 0;
+            let stale = 0;
+            let missing = 0;
+            Object.values(state.agentStatus || {}).forEach(agent => {
+                const effective = agent.liveStatus || agent.status;
+                if (effective !== 'running') return;
+                running += 1;
+                const hb = getHeartbeatMeta(agent);
+                if (!hb.hasHeartbeat) missing += 1;
+                else if (hb.stale) stale += 1;
+            });
+            return { running, stale, missing };
+        };
+
         const escapeHtml = (unsafe) => {
             return (unsafe || '').toString()
                 .replace(/&/g, "&amp;")
@@ -2202,6 +2546,20 @@
                         state.lastRenderedTasksHtml = errorHtml;
                     }
                 }
+            }
+        };
+
+        const fetchMeta = async () => {
+            try {
+                const res = await fetch(getApiUrl('/meta'));
+                if (!res.ok) return;
+                const meta = await res.json();
+                state.readOnly = Boolean(meta.readOnly);
+                if (state.readOnly && els.addNoteForm) {
+                    els.addNoteForm.style.display = 'none';
+                }
+            } catch (error) {
+                console.error('Failed to fetch meta:', error);
             }
         };
 
@@ -2289,24 +2647,82 @@
 
         const fetchChildActivities = async () => {
             const childIds = state.tasks.filter(t => t.parent_task_id).map(t => t.id);
-            if (childIds.length === 0) return;
+            const rootIds = state.tasks.filter(t => !t.parent_task_id).map(t => t.id);
+            const allIds = [...childIds, ...rootIds];
+            if (allIds.length === 0) return;
 
             try {
                 const results = await Promise.all(
-                    childIds.map(id => fetch(getApiUrl(`/tasks/${id}/activities`)).then(res => res.ok ? res.json() : []))
+                    allIds.map(id => fetch(getApiUrl(`/tasks/${id}/activities`)).then(res => res.ok ? res.json() : []))
                 );
                 
-                childIds.forEach((id, index) => {
+                allIds.forEach((id, index) => {
                     state.childActivities[id] = results[index];
                 });
                 
                 renderProcessGraph();
             } catch (error) {
-                console.error('Failed to fetch child activities:', error);
+                console.error('Failed to fetch task activities:', error);
             }
         };
 
-        const parseLifecycleSteps = (activities, childId) => {
+        const fetchBoard = async ({ live = false } = {}) => {
+            const reqSeq = ++state.boardRequestSeq;
+            try {
+                const params = new URLSearchParams();
+                params.set('limit', live ? '50' : '300');
+                if (live) {
+                    params.set('live', 'true');
+                    if (state.boardCursor) params.set('since', state.boardCursor);
+                }
+                const res = await fetch(getApiUrl(`/board?${params.toString()}`));
+                if (!res.ok) throw new Error('Failed to fetch board');
+                const payload = await res.json();
+
+                if (reqSeq < state.boardAppliedSeq) {
+                    return;
+                }
+                state.boardAppliedSeq = reqSeq;
+
+                if (payload.summary) {
+                    state.boardSummary = payload.summary;
+                    state.boardSummarySeen = true;
+                    state.boardGeneratedAt = payload.summary.boardGeneratedAt || new Date().toISOString();
+                }
+                if (payload.nextCursor) {
+                    if (!live) {
+                        state.boardCursor = payload.nextCursor;
+                    } else if (!state.boardCursor || String(payload.nextCursor) > String(state.boardCursor)) {
+                        state.boardCursor = payload.nextCursor;
+                    }
+                }
+                if (payload.swarm) state.agentStatus = payload.swarm;
+
+                if (Array.isArray(payload.tasks) && payload.tasks.length > 0) {
+                    const taskMap = new Map(state.tasks.map(t => [t.id, t]));
+                    payload.tasks.forEach(task => {
+                        const prev = taskMap.get(task.id) || {};
+                        taskMap.set(task.id, { ...prev, ...task });
+                    });
+                    state.tasks = Array.from(taskMap.values());
+                }
+
+                if (Array.isArray(payload.recentEvents) && payload.recentEvents.length > 0) {
+                    state.lastEvent = payload.recentEvents[0];
+                }
+
+                renderTasks();
+                updateMissionControl();
+                renderTelemetryStrip();
+                if (state.isDrawerOpen && state.selectedTaskId) {
+                    renderDrawerDetails();
+                }
+            } catch (error) {
+                console.error('Failed to fetch board:', error);
+            }
+        };
+
+        const parseLifecycleSteps = (activities, taskId) => {
             if (!activities || activities.length === 0) return [];
             
             const steps = [];
@@ -2319,12 +2735,32 @@
                 let agent = null;
                 let isMilestone = false;
                 
-                if (act.activity_type === 'prompt_sent') {
+                if (msg.includes('Bridge picked up')) {
+                    type = 'intake'; label = 'INTAKE';
+                    agent = 'bridge';
+                } else if (act.activity_type === 'planning_questions') {
+                    type = 'triage'; label = 'TRIAGE';
+                    agent = 'gemini';
+                } else if (msg.includes('Self-answered') && msg.includes('questions')) {
+                    type = 'triage'; label = 'SELF-ANSWER';
+                    agent = 'gemini';
+                } else if (msg.includes('All triage questions answered') || msg.includes('All questions answered')) {
+                    type = 'triage-done'; label = 'TRIAGE DONE';
+                    agent = 'system';
+                    isMilestone = true;
+                } else if (msg.includes('triaged as ready')) {
+                    type = 'dispatch'; label = 'DISPATCH';
+                    agent = 'bridge';
+                } else if (act.activity_type === 'prompt_sent') {
                     type = 'prompt'; label = 'PROMPT';
-                    agent = state.agentStatus[childId]?.agent || 'system';
-                } else if (msg.includes('Agent spawned for')) {
+                    agent = state.agentStatus[taskId]?.agent || 'system';
+                } else if (msg.includes('Investigation agent spawned') || msg.includes('Agent spawned for')) {
                     type = 'spawn'; label = 'SPAWN';
-                    agent = state.agentStatus[childId]?.agent || 'system';
+                    agent = state.agentStatus[taskId]?.agent || 'claude';
+                } else if (act.activity_type === 'investigation_findings') {
+                    type = 'complete'; label = 'FINDINGS';
+                    agent = 'claude';
+                    isMilestone = true;
                 } else if (msg.includes('Codex review PASSED')) {
                     type = 'review-pass'; label = 'REVIEW:PASS';
                     agent = 'codex';
@@ -2336,7 +2772,7 @@
                     agent = 'codex';
                 } else if (msg.includes('Agent respawned')) {
                     type = 'respawn'; label = 'RESPAWN';
-                    agent = state.agentStatus[childId]?.agent || 'system';
+                    agent = state.agentStatus[taskId]?.agent || 'system';
                 } else if (msg.includes('GitHub PR review detected')) {
                     type = 'feedback'; label = 'PR FEEDBACK';
                     const match = msg.match(/—\s*([^\s]+)\s*feedback/);
@@ -2349,7 +2785,7 @@
                     agent = 'system';
                 } else if (msg.includes('Agent relaunched')) {
                     type = 'relaunch'; label = 'RELAUNCH';
-                    agent = state.agentStatus[childId]?.agent || 'system';
+                    agent = state.agentStatus[taskId]?.agent || 'system';
                 } else if (msg.match(/PR #\d+ approved by/)) {
                     type = 'approved'; label = 'PR APPROVED';
                     const userMatch = msg.match(/@(\S+)/);
@@ -2377,6 +2813,21 @@
         const renderTelemetryStrip = () => {
             const el = document.getElementById('telemetry-strip');
             if (!el) return;
+
+            const staleHeartbeat = state.boardSummary?.staleHeartbeat || 0;
+            const missingHeartbeat = state.boardSummary?.missingHeartbeat || 0;
+            const hbThreshold = state.boardSummary?.heartbeatThresholdMs || 300000;
+
+            const mod0 = `
+                <div class="telemetry-module">
+                    <div class="telemetry-title">HEARTBEAT HEALTH</div>
+                    <div class="telemetry-value" style="display:flex; align-items:center; height:100%; font-size:11px; color: var(--text-secondary);">
+                        STALE <span style="color:${staleHeartbeat > 0 ? '#fca5a5' : 'var(--text-primary)'}; margin:0 8px 0 4px;">${staleHeartbeat}</span>
+                        MISSING <span style="color:${missingHeartbeat > 0 ? '#fca5a5' : 'var(--text-primary)'}; margin:0 8px 0 4px;">${missingHeartbeat}</span>
+                        <span style="opacity:0.55;">THR ${Math.round(hbThreshold/1000)}s</span>
+                    </div>
+                </div>
+            `;
 
             // Module 1: SWARM PRESSURE — uses liveStatus (tmux-aware) over registry status
             let claudeCount = 0;
@@ -2557,7 +3008,7 @@
                 </div>
             `;
 
-            const newHtml = mod1 + mod2 + mod3 + mod4 + mod5;
+            const newHtml = mod0 + mod1 + mod2 + mod3 + mod4 + mod5;
             
             if (state.lastRenderedTelemetryHtml !== newHtml) {
                 el.innerHTML = newHtml;
@@ -2603,6 +3054,7 @@
                     state.filter = e.currentTarget.dataset.filter;
                     renderFilters();
                     renderTasks();
+                    renderProcessGraph();
                 });
             });
         };
@@ -2677,12 +3129,17 @@
                     let dotClass = 'completed';
                     if (effectiveStatus === 'running') dotClass = 'running';
                     if (effectiveStatus === 'failed') dotClass = 'failed';
+                    const heartbeat = getHeartbeatMeta(agent);
+                    const heartbeatBadge = heartbeat.hasHeartbeat
+                        ? `<span class="heartbeat-pill ${heartbeat.stale ? 'stale' : ''}">HB ${formatHeartbeatAge(heartbeat.ageMs)}</span>`
+                        : '';
                     
                     const prText = agent.pr ? `<span style="opacity: 0.5; margin-left: 4px;">PR #${agent.pr}</span>` : '';
                     agentBadgeHtml = `
                         <div class="agent-badge">
                             <div class="agent-dot ${dotClass}"></div>
                             ${agent.agent.toUpperCase()}${prText}
+                            ${heartbeatBadge}
                         </div>
                     `;
                 }
@@ -2736,37 +3193,23 @@
                     </div>
                 ` : '';
 
-                let triageDetailsHtml = '';
+                let triageIndicatorHtml = '';
                 let hasTriage = false;
                 if (task.status === 'planning' && task.triage_state) {
                     try {
                         const triageState = typeof task.triage_state === 'string' ? JSON.parse(task.triage_state) : task.triage_state;
                         if (triageState && triageState.questions && triageState.questions.length > 0) {
                             hasTriage = true;
-                            triageDetailsHtml = `
-                                <div class="subtask-details">
-                                    <div class="subtask-details-inner">
-                                        <div style="font-family: var(--font-mono); font-size: 12px; width: 100%;">
-                                            <div style="color: var(--text-secondary); margin-bottom: 12px; font-weight: bold; letter-spacing: 1px;">TRIAGE QUESTIONS</div>
-                                            ${triageState.questions.map((q, idx) => {
-                                                const isAnswered = q.answered || q.answer;
-                                                return `
-                                                    <div style="margin-bottom: 12px; padding-bottom: 12px; border-bottom: 1px solid rgba(255,255,255,0.05);">
-                                                        <div style="color: var(--text-primary); margin-bottom: 6px;"><span style="color: var(--accent);">Q:</span> ${escapeHtml(q.q || q.question)}</div>
-                                                        ${isAnswered ? `
-                                                            <div style="color: var(--text-secondary);"><span style="color: rgba(0, 255, 136, 0.5);">A:</span> ${escapeHtml(q.answer)}</div>
-                                                        ` : `
-                                                            <div style="display: flex; gap: 8px; margin-top: 8px;">
-                                                                <input type="text" id="triage-ans-${task.id}-${idx}" class="kb-textarea" style="margin: 0; min-height: 30px; height: 30px; font-family: var(--font-body); padding: 4px 8px;" placeholder="Type answer..." onclick="event.stopPropagation()">
-                                                                <button class="btn-send" style="padding: 4px 12px;" onclick="submitTriageAnswer(event, '${task.id}', ${idx})">Submit</button>
-                                                            </div>
-                                                        `}
-                                                    </div>
-                                                `;
-                                            }).join('')}
-                                        </div>
-                                    </div>
-                                </div>
+                            const total = triageState.questions.length;
+                            const answered = triageState.questions.filter(q => q.answered || q.answer).length;
+                            const allDone = answered === total;
+                            triageIndicatorHtml = `
+                                <button class="triage-indicator-btn" data-triage-task="${task.id}" onclick="openTriageModal(event, '${task.id}')" ${allDone ? 'style="color: var(--accent); border-color: rgba(0,255,136,0.3);"' : ''}>
+                                    ${allDone
+                                        ? '<svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="20 6 9 17 4 12"></polyline></svg> TRIAGE ✓'
+                                        : `<svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"></circle><path d="M9.09 9a3 3 0 0 1 5.83 1c0 2-3 3-3 3"></path><line x1="12" y1="17" x2="12.01" y2="17"></line></svg> TRIAGE (${answered}/${total})`
+                                    }
+                                </button>
                             `;
                         }
                     } catch (e) {
@@ -2774,7 +3217,7 @@
                     }
                 }
                 
-                const isExpandable = hasChildren || hasTriage;
+                const isExpandable = hasChildren;
 
                 const stageMap = [
                     { status: 'inbox', label: 'SYNCED', desc: 'Uplinked from Linear' },
@@ -2811,8 +3254,14 @@
                 const existingCard = document.getElementById(`card-${task.id}`);
                 const isExpanded = existingCard && existingCard.classList.contains('expanded') ? 'expanded' : '';
 
+                const normalizedStatus = String(task.status || '').trim().toLowerCase();
+                const isDone = normalizedStatus === 'done';
+                const priorityClass = !isDone
+                    ? (task.priority === 'urgent' ? 'priority-urgent' : task.priority === 'high' ? 'priority-high' : '')
+                    : '';
+
                 return `
-                    <div class="task-card ${isExpanded} ${task.priority === 'urgent' ? 'priority-urgent' : task.priority === 'high' ? 'priority-high' : ''}" id="card-${task.id}" style="--card-status-color: ${statusColor}">
+                    <div class="task-card ${isExpanded} ${isDone ? 'task-done' : ''} ${priorityClass}" id="card-${task.id}" style="--card-status-color: ${statusColor}">
                         <div class="card-header" onclick="${isExpandable ? `toggleChildren(event, '${task.id}')` : `handleTaskClick(event, '${task.id}')`}">
                             <div class="card-top">
                                 ${isExpandable ? `<div class="card-expand-icon">▼</div>` : `<div class="card-expand-icon" style="opacity: 0"></div>`}
@@ -2824,12 +3273,12 @@
                                 <div class="badge badge-status ${task.status}">${task.status.replace('_', ' ')}</div>
                                 ${task.task_type === 'investigation' ? '<div class="badge" style="background: rgba(147, 130, 255, 0.15); color: #9382ff; font-size: 9px; padding: 1px 6px;">INVESTIGATION</div>' : ''}
                                 <div class="card-time">${timeAgo(task.created_at)}</div>
+                                ${triageIndicatorHtml}
                             </div>
                             ${subtaskChipsHtml}
                             ${milestoneHtml}
                         </div>
                         ${subtaskDetailsHtml}
-                        ${triageDetailsHtml}
                     </div>
                 `;
             }).join('');
@@ -2855,8 +3304,89 @@
             }
         };
 
+        window.openTriageModal = (event, taskId) => {
+            event.stopPropagation();
+            const task = state.tasks.find(t => t.id === taskId);
+            if (!task || !task.triage_state) return;
+
+            state.activeTriageTaskId = taskId;
+            renderTriageModalContent(task);
+            
+            const modal = document.getElementById('triage-modal');
+            const overlay = document.getElementById('triage-modal-overlay');
+            modal.classList.add('open');
+            overlay.classList.add('open');
+        };
+
+        window.closeTriageModal = () => {
+            state.activeTriageTaskId = null;
+            const modal = document.getElementById('triage-modal');
+            const overlay = document.getElementById('triage-modal-overlay');
+            modal.classList.remove('open');
+            overlay.classList.remove('open');
+        };
+
+        const renderTriageModalContent = (task) => {
+            const contentEl = document.getElementById('triage-modal-content');
+            if (!task || !task.triage_state) {
+                contentEl.innerHTML = '';
+                return;
+            }
+
+            try {
+                const triageState = typeof task.triage_state === 'string' ? JSON.parse(task.triage_state) : task.triage_state;
+                if (triageState && triageState.questions) {
+                    contentEl.innerHTML = triageState.questions.map((q, idx) => {
+                        const isAnswered = q.answered || q.answer;
+                        const hasOptions = q.options && q.options.length > 0;
+                        const isOther = (opt) => /other\s*\(/i.test(opt);
+                        const answerEditorHtml = state.readOnly
+                            ? `<div style="color: var(--text-secondary); font-size: 12px; opacity: 0.8;">Read-only mode: answer editing disabled.</div>`
+                            : `${hasOptions ? `
+                                <div class="triage-options">
+                                    ${q.options.filter(o => !isOther(o)).map(opt => `
+                                        <button class="triage-option-chip" onclick="selectTriageOption(event, '${task.id}', ${idx}, this.textContent)">${escapeHtml(opt)}</button>
+                                    `).join('')}
+                                </div>
+                            ` : ''}
+                            <div class="triage-custom-row">
+                                <input type="text" id="triage-ans-${task.id}-${idx}" class="kb-textarea" style="margin: 0; min-height: 36px; height: 36px; font-family: var(--font-body); padding: 8px 12px; font-size: 13px;" placeholder="${hasOptions ? 'Or type a custom answer...' : 'Type answer...'}" onclick="event.stopPropagation()" onkeydown="if(event.key==='Enter') submitTriageAnswer(event, '${task.id}', ${idx})">
+                                <button class="btn-send" style="padding: 8px 16px;" onclick="submitTriageAnswer(event, '${task.id}', ${idx})">Submit</button>
+                            </div>`;
+                        return `
+                            <div style="margin-bottom: 16px; padding-bottom: 16px; border-bottom: 1px solid rgba(255,255,255,0.05);">
+                                <div style="color: var(--text-primary); margin-bottom: 8px; font-size: 13px;"><span style="color: var(--accent);">Q:</span> ${escapeHtml(q.q || q.question)}</div>
+                                ${isAnswered ? `
+                                    <div style="color: var(--text-secondary); display: flex; gap: 8px; align-items: flex-start;">
+                                        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="rgba(0, 255, 136, 0.8)" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="margin-top: 2px; flex-shrink: 0;"><polyline points="20 6 9 17 4 12"></polyline></svg>
+                                        <span>${escapeHtml(q.answer)}</span>
+                                    </div>
+                                ` : `
+                                    ${answerEditorHtml}
+                                `}
+                            </div>
+                        `;
+                    }).join('');
+                }
+            } catch (e) {
+                console.error('Failed to parse triage_state', e);
+                contentEl.innerHTML = '<div style="color: var(--status-error);">Failed to load triage questions.</div>';
+            }
+        };
+
+        window.selectTriageOption = (event, taskId, questionIdx, value) => {
+            event.stopPropagation();
+            const inputEl = document.getElementById(`triage-ans-${taskId}-${questionIdx}`);
+            if (inputEl) inputEl.value = value;
+            submitTriageAnswer(event, taskId, questionIdx);
+        };
+
         window.submitTriageAnswer = async (event, taskId, questionIdx) => {
             event.stopPropagation();
+            if (state.readOnly) {
+                alert('Read-only mode: editing is disabled.');
+                return;
+            }
             const inputEl = document.getElementById(`triage-ans-${taskId}-${questionIdx}`);
             const answer = inputEl.value.trim();
             if (!answer) return;
@@ -2884,9 +3414,19 @@
 
                     if (!res.ok) throw new Error('Failed to submit answer');
                     
-                    // Update local state and re-render
+                    // Update local state — only re-render the modal, not all cards
                     task.triage_state = JSON.stringify(triageState);
-                    renderTasks();
+                    if (state.activeTriageTaskId === taskId) {
+                        renderTriageModalContent(task);
+                    }
+                    // Update card triage indicator without full re-render
+                    const indicator = document.querySelector(`[data-triage-task="${taskId}"]`);
+                    if (indicator) {
+                        const answered = triageState.questions.filter(q => q.answered || q.answer).length;
+                        const total = triageState.questions.length;
+                        indicator.textContent = allAnswered ? `TRIAGE ✓` : `TRIAGE (${answered}/${total})`;
+                        if (allAnswered) indicator.style.color = 'var(--accent)';
+                    }
                 }
             } catch (err) {
                 console.error('Error submitting triage answer:', err);
@@ -2901,6 +3441,10 @@
             state.selectedTaskId = taskId;
             state.isDrawerOpen = true;
 
+            if (els.addNoteForm) {
+                els.addNoteForm.style.display = state.readOnly ? 'none' : '';
+            }
+
             // Populate basic info immediately
             els.drawerTitle.textContent = task.title;
             els.drawerDescription.innerHTML = parseMarkdown(task.description) || '<span style="color: var(--text-secondary)">No description provided.</span>';
@@ -2908,14 +3452,25 @@
             const descToggle = document.getElementById('desc-toggle');
             if (descToggle) descToggle.textContent = '(show)';
             
-            const sourceLabel = task.linear_issue_url ? 'LINEAR' : 'MANUAL';
-            const sourceHtml = task.linear_issue_url 
-                ? `<a href="${task.linear_issue_url}" target="_blank" rel="noopener noreferrer">${sourceLabel}</a>`
+            const linearUrl = task.external_url || task.linear_issue_url;
+            const sourceLabel = linearUrl ? 'LINEAR' : 'MANUAL';
+            const sourceHtml = linearUrl 
+                ? `<a href="${linearUrl}" target="_blank" rel="noopener noreferrer">${sourceLabel}</a>`
                 : sourceLabel;
 
             let triageBtnHtml = '';
-            if (!task.parent_task_id && (task.status === 'in_progress' || task.status === 'assigned')) {
+            if (!state.readOnly && !task.parent_task_id && (task.status === 'in_progress' || task.status === 'assigned')) {
                 triageBtnHtml = `<button class="btn-triage" id="btn-triage" onclick="handleBackToTriage('${task.id}')">Back to Triage</button>`;
+            }
+
+            let promoteBtnHtml = '';
+            if (!state.readOnly && task.task_type === 'investigation') {
+                promoteBtnHtml = `<button class="btn-promote" onclick="handlePromoteToCoding('${task.id}')">Promote to Coding</button>`;
+            }
+
+            let doneBtnHtml = '';
+            if (!state.readOnly && task.status !== 'done') {
+                doneBtnHtml = `<button class="btn-done" onclick="handleMarkDone('${task.id}')">Mark Done</button>`;
             }
 
             let agentInfoHtml = '';
@@ -2943,14 +3498,16 @@
                 <div class="badge badge-status ${task.status}">${task.status.replace('_', ' ')}</div>
                 ${taskTypeBadge}
                 <div class="badge badge-source">${sourceHtml}</div>
-                <div class="priority-picker" id="priority-picker">
+                ${state.readOnly ? '' : `<div class="priority-picker" id="priority-picker">
                     ${['urgent','high','normal','low'].map(p => {
                         const active = (task.priority || 'normal') === p;
                         return `<button class="priority-opt ${p} ${active ? 'active' : ''}" onclick="handleSetPriority('${task.id}', '${p}')">${p.toUpperCase()}</button>`;
                     }).join('')}
-                </div>
+                </div>`}
                 <div class="time-ago" style="font-family: var(--font-mono); font-size: 11px; color: var(--text-secondary);">Created ${timeAgo(task.created_at)}</div>
                 ${triageBtnHtml}
+                ${promoteBtnHtml}
+                ${doneBtnHtml}
                 ${agentInfoHtml}
             `;
 
@@ -3022,21 +3579,52 @@
             state.activityExpandedToggled = false; // Reset toggle flag
 
             const visibleActivities = state.activityExpanded ? sortedActivities : sortedActivities.slice(0, 3);
+            const selectedTask = state.tasks.find(t => t.id === state.selectedTaskId);
+            const selectedSwarm = selectedTask ? state.agentStatus[selectedTask.id] : null;
+            const selectedHeartbeat = getHeartbeatMeta(selectedSwarm);
 
-            let timelineHtml = visibleActivities.map(act => {
+            const drawerHeartbeatBanner = selectedSwarm && selectedHeartbeat.hasHeartbeat
+                ? `<div class="timeline-item type-heartbeat${selectedHeartbeat.stale ? ' heartbeat-stale' : ''}" style="margin-bottom: 8px;">
+                        <div class="timeline-header">
+                            <span class="timeline-type">swarm heartbeat</span>
+                            <span class="timeline-time">${formatHeartbeatAge(selectedHeartbeat.ageMs)} ago</span>
+                            <span class="heartbeat-pill ${selectedHeartbeat.stale ? 'stale' : ''}">${selectedHeartbeat.stale ? 'stale' : 'healthy'}</span>
+                        </div>
+                    </div>`
+                : '';
+
+            let timelineHtml = drawerHeartbeatBanner + visibleActivities.map(act => {
                 const isPrompt = act.activity_type === 'prompt_sent';
                 const isFindings = act.activity_type === 'investigation_findings';
-                const isCollapsible = isPrompt || isFindings;
+                const isPlanning = act.activity_type === 'planning_questions';
+                const isLinearComment = act.activity_type === 'linear_comment';
+                const isHeartbeat = act.activity_type === 'updated' && typeof act.message === 'string' && act.message.startsWith('Agent heartbeat:');
+                const isCollapsible = isPrompt || isFindings || isPlanning;
                 const contentHtml = act.message ? (isCollapsible
-                    ? `<div class="timeline-content ${isPrompt ? 'prompt-content' : 'findings-content'} collapsed" onclick="this.classList.toggle('collapsed')">${parseMarkdown(act.message)}</div>`
+                    ? `<div class="timeline-content ${isPrompt ? 'prompt-content' : isFindings ? 'findings-content' : 'prompt-content'} collapsed" onclick="this.classList.toggle('collapsed')">${parseMarkdown(act.message)}</div>`
                     : `<div class="timeline-content">${parseMarkdown(act.message)}</div>`
                 ) : '';
-                const typeLabel = isPrompt ? 'agent prompt' : isFindings ? 'investigation findings' : act.activity_type.replace('_', ' ');
+                const typeLabels = {
+                    'prompt_sent': 'agent prompt',
+                    'investigation_findings': 'investigation findings',
+                    'planning_questions': 'triage started',
+                    'linear_comment': 'linear reply',
+                    'heartbeat': 'agent heartbeat',
+                    'spawned': 'agent spawned',
+                    'status_changed': 'status changed',
+                    'updated': 'update',
+                };
+                const activityKey = isHeartbeat ? 'heartbeat' : act.activity_type;
+                const typeLabel = typeLabels[activityKey] || act.activity_type.replace('_', ' ');
+                const heartbeatPill = isHeartbeat && selectedHeartbeat.hasHeartbeat
+                    ? `<span class="heartbeat-pill ${selectedHeartbeat.stale ? 'stale' : ''}">${selectedHeartbeat.stale ? 'STALE' : 'OK'} ${formatHeartbeatAge(selectedHeartbeat.ageMs)}</span>`
+                    : '';
                 return `
-                    <div class="timeline-item type-${act.activity_type}${isFindings ? ' findings-highlight' : ''}">
+                    <div class="timeline-item type-${isHeartbeat ? 'heartbeat' : act.activity_type}${isFindings ? ' findings-highlight' : ''}${isHeartbeat && selectedHeartbeat.stale ? ' heartbeat-stale' : ''}">
                         <div class="timeline-header">
-                            <span class="timeline-type" ${isFindings ? 'style="color: #9382ff;"' : ''}>${escapeHtml(typeLabel)}</span>
+                            <span class="timeline-type" ${isFindings ? 'style="color: #9382ff;"' : isPlanning ? 'style="color: var(--stage-triage);"' : isLinearComment ? 'style="color: #6366f1;"' : ''}>${escapeHtml(typeLabel)}</span>
                             <span class="timeline-time">${timeAgo(act.created_at)}</span>
+                            ${heartbeatPill}
                             ${isCollapsible ? '<span style="font-size:9px;color:rgba(255,255,255,0.3);margin-left:4px;cursor:pointer;" onclick="this.parentElement.nextElementSibling.classList.toggle(\'collapsed\')">(click to expand)</span>' : ''}
                         </div>
                         ${contentHtml}
@@ -3073,10 +3661,35 @@
         els.closeDrawer.addEventListener('click', closeDrawer);
         els.drawerOverlay.addEventListener('click', closeDrawer);
 
+        document.getElementById('close-triage-modal').addEventListener('click', closeTriageModal);
+        document.getElementById('triage-modal-overlay').addEventListener('click', closeTriageModal);
+        document.addEventListener('keydown', (e) => {
+            if (e.key === 'Escape') {
+                if (state.activeTriageTaskId) {
+                    closeTriageModal();
+                } else if (state.isDrawerOpen) {
+                    closeDrawer();
+                }
+            }
+        });
+
         els.addNoteForm.addEventListener('submit', async (e) => {
             e.preventDefault();
+            if (state.readOnly) {
+                alert('Read-only mode: adding notes is disabled.');
+                return;
+            }
             const text = els.noteInput.value.trim();
             if (!text || !state.selectedTaskId) return;
+
+            const selectedTask = state.tasks.find(t => t.id === state.selectedTaskId);
+            const status = selectedTask?.status || '';
+            let activityType = 'updated';
+            if (status === 'planning') {
+                activityType = 'planning_answer';
+            } else if (status === 'review' || status === 'testing') {
+                activityType = 'manual_feedback';
+            }
             
             els.btnSend.disabled = true;
             els.noteInput.disabled = true;
@@ -3086,7 +3699,7 @@
                     method: 'POST',
                     headers: { 'Content-Type': 'application/json' },
                     body: JSON.stringify({
-                        activity_type: 'updated',
+                        activity_type: activityType,
                         message: text
                     })
                 });
@@ -3104,6 +3717,10 @@
         });
 
         window.handleSetPriority = async (taskId, priority) => {
+            if (state.readOnly) {
+                alert('Read-only mode: priority edits are disabled.');
+                return;
+            }
             try {
                 await fetch(getApiUrl(`/tasks/${taskId}`), {
                     method: 'PATCH',
@@ -3120,6 +3737,10 @@
         };
 
         window.handleBackToTriage = async (taskId) => {
+            if (state.readOnly) {
+                alert('Read-only mode: status changes are disabled.');
+                return;
+            }
             if (!confirm('Send this task back to triage? Running agents will need to be manually stopped.')) {
                 return;
             }
@@ -3148,6 +3769,68 @@
             }
         };
 
+        window.handlePromoteToCoding = async (taskId) => {
+            if (state.readOnly) {
+                alert('Read-only mode: workflow transitions are disabled.');
+                return;
+            }
+
+            const reason = prompt('Why should this investigation move to coding implementation? (required)');
+            if (!reason || reason.trim().length < 5) {
+                alert('Promotion cancelled: reason must be at least 5 characters.');
+                return;
+            }
+
+            try {
+                const res = await fetch(getApiUrl(`/tasks/${taskId}/promote`), {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ reason: reason.trim() })
+                });
+                if (!res.ok) {
+                    const data = await res.json().catch(() => ({}));
+                    throw new Error(data.error || 'Failed to promote task');
+                }
+
+                await fetchTasks();
+                if (state.selectedTaskId === taskId) {
+                    openDrawer(taskId);
+                }
+            } catch (error) {
+                console.error('Failed to promote investigation task:', error);
+                alert(`Failed to promote task: ${error.message || 'Unknown error'}`);
+            }
+        };
+
+        window.handleMarkDone = async (taskId) => {
+            if (state.readOnly) {
+                alert('Read-only mode: workflow transitions are disabled.');
+                return;
+            }
+
+            const reason = prompt('Optional reason for marking this task done:') || '';
+
+            try {
+                const res = await fetch(getApiUrl(`/tasks/${taskId}/done`), {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ reason: reason.trim() })
+                });
+                if (!res.ok) {
+                    const data = await res.json().catch(() => ({}));
+                    throw new Error(data.error || 'Failed to mark task done');
+                }
+
+                await fetchTasks();
+                if (state.selectedTaskId === taskId) {
+                    openDrawer(taskId);
+                }
+            } catch (error) {
+                console.error('Failed to mark task done:', error);
+                alert(`Failed to mark task done: ${error.message || 'Unknown error'}`);
+            }
+        };
+
         // Mission Control Logic
         const initMissionControl = () => {
             // Uptime clock
@@ -3169,7 +3852,7 @@
             // Metrics Chips
             const totalTasks = tasks.length;
             const childTasks = tasks.filter(t => t.parent_task_id);
-            const activeAgents = childTasks.filter(t => t.status === 'in_progress' || t.status === 'assigned').length;
+            const activeAgents = state.boardSummary?.runningSwarmAgents ?? childTasks.filter(t => t.status === 'in_progress' || t.status === 'assigned').length;
             const triageTasks = tasks.filter(t => t.status === 'inbox' || t.status === 'planning').length;
             
             const tasksVal = document.getElementById('chip-tasks-val');
@@ -3180,6 +3863,20 @@
             
             const triageVal = document.getElementById('chip-triage-val');
             if (triageVal) triageVal.textContent = triageTasks;
+
+            const hb = computeHeartbeatHealth();
+            const hbRun = document.getElementById('chip-hb-running');
+            const hbStale = document.getElementById('chip-hb-stale');
+            const hbMissing = document.getElementById('chip-hb-missing');
+            const hbChip = document.getElementById('chip-health');
+            if (hbRun) hbRun.textContent = hb.running;
+            if (hbStale) hbStale.textContent = hb.stale;
+            if (hbMissing) hbMissing.textContent = hb.missing;
+            if (hbChip) {
+                hbChip.classList.remove('warn', 'alert');
+                if (hb.stale > 0 || hb.missing > 0) hbChip.classList.add('warn');
+                if (hb.stale > 0 && hb.missing > 0) hbChip.classList.add('alert');
+            }
 
             // Pipeline Flow
             const now = new Date();
@@ -3245,8 +3942,12 @@
         };
 
         const getProcessGraphTasks = () => {
-            // Process graph always uses ALL tasks — independent of card filter pills
-            const sorted = [...state.tasks].sort((a, b) => new Date(b.created_at) - new Date(a.created_at));
+            let tasks = state.tasks;
+            if (state.filter !== 'all') {
+                const matchingIds = new Set(tasks.filter(t => t.status === state.filter).map(t => t.id));
+                tasks = tasks.filter(t => matchingIds.has(t.id) || matchingIds.has(t.parent_task_id));
+            }
+            const sorted = [...tasks].sort((a, b) => new Date(b.created_at) - new Date(a.created_at));
             const taskMap = new Map(sorted.map(t => [t.id, { ...t, children: [] }]));
             const rootTasks = [];
             taskMap.forEach(task => {
@@ -3336,6 +4037,55 @@
                     `;
                 }
 
+                let rootLifecycleHtml = '';
+                if (!hasChildren && state.childActivities[root.id]) {
+                    const rootSteps = parseLifecycleSteps(state.childActivities[root.id], root.id);
+                    if (rootSteps.length > 0) {
+                        const isRootInProgress = ['in_progress', 'assigned', 'planning'].includes(root.status);
+
+                        let pendingStep = null;
+                        if (root.status === 'planning') {
+                            pendingStep = { type: 'pending-triage', label: 'AWAITING ANSWERS', agent: '', css: 'feedback' };
+                        } else if (root.status === 'assigned' || root.status === 'in_progress') {
+                            const lastStep = rootSteps[rootSteps.length - 1];
+                            if (lastStep && lastStep.type === 'spawn') {
+                                pendingStep = { type: 'pending-active', label: 'RESEARCHING', agent: 'claude', css: 'spawn' };
+                            }
+                        } else if (root.status === 'review') {
+                            pendingStep = { type: 'pending-review', label: 'REVIEW', agent: '', css: 'feedback' };
+                        } else if (root.status === 'done') {
+                            pendingStep = { type: 'done', label: 'DONE', agent: 'system', css: 'complete', isMilestone: true };
+                        }
+
+                        rootLifecycleHtml = `
+                            <div class="pg-timeline" style="${rootDoneStyle}">
+                                ${rootSteps.map((step, idx) => {
+                                    const isLast = idx === rootSteps.length - 1 && !pendingStep;
+                                    const dotClass = isLast && isRootInProgress ? 'pulse-dot' : '';
+                                    const milestoneClass = step.isMilestone ? 'milestone' : '';
+                                    const connHtml = (idx < rootSteps.length - 1 || pendingStep) ? `<div class="pg-tl-conn"></div>` : '';
+                                    return `
+                                        <div class="pg-tl-step ${step.type} ${milestoneClass}" title="${escapeHtml(step.msg)}">
+                                            <div class="pg-tl-dot ${dotClass}"></div>
+                                            <div class="pg-tl-label">${step.label}</div>
+                                            <div class="pg-tl-agent">${step.agent ? step.agent.toUpperCase() : ''}</div>
+                                            <div class="pg-tl-time">${formatStepTime(step.time)}</div>
+                                        </div>
+                                        ${connHtml}
+                                    `;
+                                }).join('')}
+                                ${pendingStep ? `
+                                    <div class="pg-tl-step ${pendingStep.css} pending" title="Current stage">
+                                        <div class="pg-tl-dot pulse-dot"></div>
+                                        <div class="pg-tl-label">${pendingStep.label}</div>
+                                        <div class="pg-tl-agent">${pendingStep.agent ? pendingStep.agent.toUpperCase() : ''}</div>
+                                    </div>
+                                ` : ''}
+                            </div>
+                        `;
+                    }
+                }
+
                 const rootNodeHtml = `
                     <div class="pg-root-wrapper ${hasChildren ? 'has-children' : ''}">
                         <div class="pg-node" style="--node-color: ${rootStatusColor}; ${rootDoneStyle}" onclick="handleTaskClick(event, '${root.id}')">
@@ -3350,6 +4100,7 @@
                                 ${rootAgentHtml}
                             </div>
                         </div>
+                        ${rootLifecycleHtml}
                     </div>
                 `;
 
@@ -3625,8 +4376,10 @@
             knownRepos: [],
             projects: new Set(),
             repos: new Set(),
+            reposByProject: {},
             selectedProject: '',
-            selectedRepo: ''
+            selectedRepo: '',
+            defaultProject: ''
         };
 
         window.toggleKnowledgePanel = async () => {
@@ -3637,16 +4390,29 @@
                 toggle.textContent = '(hide)';
                 if (kbState.knownRepos.length === 0) {
                     try {
-                        const reposRes = await fetch(getApiUrl('/repos'));
+                        const [reposRes, configRes] = await Promise.all([
+                            fetch(getApiUrl('/repos')),
+                            fetch(getApiUrl('/config'))
+                        ]);
                         if (reposRes.ok) {
                             const data = await reposRes.json();
                             kbState.knownRepos = data.repos || [];
+                            kbState.reposByProject = {};
                             kbState.knownRepos.forEach(r => {
                                 kbState.projects.add(r.project);
                                 kbState.repos.add(r.repo);
+                                if (!kbState.reposByProject[r.project]) kbState.reposByProject[r.project] = new Set();
+                                kbState.reposByProject[r.project].add(r.repo);
                             });
-                            updateKbSelectors();
                         }
+                        if (configRes.ok) {
+                            const cfg = await configRes.json();
+                            if (cfg.defaultProject && kbState.projects.has(cfg.defaultProject)) {
+                                kbState.defaultProject = cfg.defaultProject;
+                                kbState.selectedProject = cfg.defaultProject;
+                            }
+                        }
+                        updateKbSelectors();
                     } catch {}
                 }
                 loadKnowledge();
@@ -3711,14 +4477,45 @@
             const projSelect = document.getElementById('kb-project-select');
             const repoSelect = document.getElementById('kb-repo-select');
             
-            const currentProj = projSelect.value;
+            const activeProj = kbState.selectedProject || projSelect.value;
             const currentRepo = repoSelect.value;
 
             projSelect.innerHTML = '<option value="">All Projects</option>' + 
-                Array.from(kbState.projects).sort().map(p => `<option value="${p}" ${p === currentProj ? 'selected' : ''}>${p}</option>`).join('');
-                
+                Array.from(kbState.projects).sort().map(p => `<option value="${p}" ${p === activeProj ? 'selected' : ''}>${p}</option>`).join('');
+            
+            // Filter repos by selected project
+            const visibleRepos = activeProj && kbState.reposByProject[activeProj]
+                ? Array.from(kbState.reposByProject[activeProj]).sort()
+                : Array.from(kbState.repos).sort();
+
+            const repoStillValid = visibleRepos.includes(currentRepo);
             repoSelect.innerHTML = '<option value="">All Repos</option>' + 
-                Array.from(kbState.repos).sort().map(r => `<option value="${r}" ${r === currentRepo ? 'selected' : ''}>${r}</option>`).join('');
+                visibleRepos.map(r => `<option value="${r}" ${r === currentRepo && repoStillValid ? 'selected' : ''}>${r}</option>`).join('');
+            
+            if (!repoStillValid) {
+                kbState.selectedRepo = '';
+            }
+
+            const scopeProj = document.getElementById('kb-scope-project');
+            const scopeRepo = document.getElementById('kb-scope-repo');
+            if (scopeProj) {
+                const defaultProj = kbState.defaultProject || '';
+                scopeProj.innerHTML = '<option value="">Global (no project)</option>' +
+                    Array.from(kbState.projects).sort().map(p => `<option value="${p}" ${p === defaultProj ? 'selected' : ''}>${p}</option>`).join('');
+                updateKbScopeRepo();
+            }
+        };
+
+        window.updateKbScopeRepo = () => {
+            const scopeProj = document.getElementById('kb-scope-project');
+            const scopeRepo = document.getElementById('kb-scope-repo');
+            if (!scopeProj || !scopeRepo) return;
+            const proj = scopeProj.value;
+            const repos = proj && kbState.reposByProject[proj]
+                ? Array.from(kbState.reposByProject[proj]).sort()
+                : Array.from(kbState.repos).sort();
+            scopeRepo.innerHTML = '<option value="">All repos in project</option>' +
+                repos.map(r => `<option value="${r}">${r}</option>`).join('');
         };
 
         window.loadKnowledge = async () => {
@@ -3726,8 +4523,15 @@
                 const projSelect = document.getElementById('kb-project-select');
                 const repoSelect = document.getElementById('kb-repo-select');
                 
+                const prevProject = kbState.selectedProject;
                 kbState.selectedProject = projSelect.value;
                 kbState.selectedRepo = repoSelect.value;
+
+                // If project changed, update repo dropdown and reset repo selection
+                if (kbState.selectedProject !== prevProject) {
+                    kbState.selectedRepo = '';
+                    updateKbSelectors();
+                }
 
                 let url = getApiUrl('/knowledge');
                 const params = new URLSearchParams();
@@ -3750,7 +4554,11 @@
                         if (e.scope && e.scope.startsWith('repo:')) {
                             const parts = e.scope.slice(5).split('/');
                             if (parts[0]) kbState.projects.add(parts[0]);
-                            if (parts[1]) kbState.repos.add(parts[1]);
+                            if (parts[1]) {
+                                kbState.repos.add(parts[1]);
+                                if (!kbState.reposByProject[parts[0]]) kbState.reposByProject[parts[0]] = new Set();
+                                kbState.reposByProject[parts[0]].add(parts[1]);
+                            }
                         } else if (e.scope && e.scope.startsWith('project:')) {
                             kbState.projects.add(e.scope.slice(8));
                         }
@@ -3783,15 +4591,15 @@
             e.preventDefault();
             const textInput = document.getElementById('kb-text');
             const importanceInput = document.getElementById('kb-importance');
-            const projSelect = document.getElementById('kb-project-select');
-            const repoSelect = document.getElementById('kb-repo-select');
+            const scopeProj = document.getElementById('kb-scope-project');
+            const scopeRepo = document.getElementById('kb-scope-repo');
             const btn = document.getElementById('btn-add-kb');
 
             const text = textInput.value.trim();
             if (!text) return;
 
-            let project = projSelect.value || '';
-            let repo = repoSelect.value || '';
+            let project = scopeProj.value || '';
+            let repo = scopeRepo.value || '';
             const importance = parseInt(importanceInput.value) || 5;
 
             if (!project && !repo) {
@@ -4040,18 +4848,34 @@
 
         // Initialization & Polling
         const init = () => {
+            const url = new URL(window.location.href);
+            const token = url.searchParams.get('token');
+            if (token) {
+                state.accessToken = token;
+                url.searchParams.delete('token');
+                window.history.replaceState({}, '', `${url.pathname}${url.search}${url.hash}`);
+            }
+
             initMissionControl();
+            fetchMeta();
             fetchTasks();
             fetchAgentStatus();
             fetchSystemStats();
             fetchLastEvent();
+            fetchBoard({ live: false });
+
+            setInterval(() => {
+                fetchBoard({ live: true });
+            }, 8000);
             
             // Poll every 30 seconds
             setInterval(() => {
+                fetchMeta();
                 fetchTasks();
                 fetchAgentStatus();
                 fetchSystemStats();
                 fetchLastEvent();
+                fetchBoard({ live: false });
                 if (state.isDrawerOpen && state.selectedTaskId) {
                     fetchTaskDetails(state.selectedTaskId);
                 }

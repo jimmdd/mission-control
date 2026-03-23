@@ -2,7 +2,7 @@
 
 OpenClaw embedded plugin for managing autonomous AI agent swarms. Provides task management, a real-time command center dashboard, knowledge management, and agent tools — all backed by SQLite.
 
-Orchestrates an autonomous coding pipeline: Linear ticket → triage → agent spawn → code → review → iterate → PR → merge → done.
+Orchestrates an autonomous coding pipeline: Linear ticket → triage → plan → step-by-step execution → verify → PR → review → done.
 
 ## How It Works
 
@@ -14,13 +14,28 @@ Linear Sync ─────────────────── pulls tick
   │                              into Mission Control as tasks
   ▼
 Bridge (triage) ─────────────── asks codebase-aware questions,
+  │                              self-answers from codebase when possible,
   │                              posts to Linear, waits for answers
   ▼
-Bridge (dispatch) ───────────── splits multi-repo tasks into children,
-  │                              spawns agents per repo
+Planner (Sonnet) ────────────── generates structured execution plan:
+  │                              numbered steps with dependencies,
+  │                              scoped files, done-when criteria,
+  │                              verification commands, parallel groups
   ▼
-Agent (Claude / Codex) ──────── works in git worktree, writes code,
-  │                              runs tests, creates PR
+Dispatcher ──────────────────── walks the plan step-by-step:
+  │                              routes by category (deep/quick/test/review),
+  │                              dispatches parallel groups concurrently,
+  │                              chains dependent steps on prior branches
+  ▼
+Agent (Claude / Codex) ──────── works in git worktree, executes ONE step
+  │                              with scoped prompt (files, criteria, verify)
+  ▼
+Verifier (MiniMax local) ────── checks agent output against done-when
+  │                              criteria. Retries failed steps (up to 2x).
+  │                              On pass → dispatcher picks next step
+  ▼
+Plan Complete ───────────────── all steps done → creates PR from
+  │                              final branch, moves to review
   ▼
 Check-Agents (monitor) ──────── detects PR, runs Codex review,
   │                              iterates if blocking issues found
@@ -31,6 +46,96 @@ Watch-PR-Reviews ────────────── polls GitHub for hum
 Linear Sync (done) ──────────── detects Linear ticket closed → marks
                                  MC parent + children as done
 ```
+
+### Planner
+
+The planner sits between triage and execution, converting vague tickets into precise execution contracts. Inspired by [oh-my-openagent](https://github.com/code-yeongyu/oh-my-openagent)'s spec-driven approach but optimized for minimal token cost.
+
+**Model allocation:**
+
+| Role | Model | Cost |
+|------|-------|------|
+| Plan generation | Claude Sonnet (API) | ~$0.05-0.15/plan |
+| Step routing/classification | MiniMax M2.7 (Ollama, local) | Free |
+| Step verification | MiniMax M2.7 (Ollama, local) | Free |
+| Worker agents | Claude Code / Codex (subscription) | Free |
+
+**Plan structure** (saved as JSON + markdown in `~/.openclaw/bridge/plans/`):
+
+```json
+{
+  "summary": "Add rate limiting to API gateway",
+  "estimated_complexity": "moderate",
+  "steps": [
+    {
+      "step": 1,
+      "title": "Add rate limiter middleware",
+      "repo": "acme/backend-api",
+      "files_to_modify": ["src/middleware/rate-limit.ts"],
+      "done_when": ["Rate limiter configured at 100 req/s", "Middleware registered in app.ts"],
+      "verify_command": "npm test -- --grep rate-limit",
+      "depends_on": [],
+      "category": "deep"
+    },
+    {
+      "step": 2,
+      "title": "Add rate limit tests",
+      "depends_on": [1],
+      "category": "test"
+    }
+  ],
+  "parallel_groups": [[1], [2]]
+}
+```
+
+**Step dispatch prompts** are scoped and precise — each agent gets:
+- TASK: what to do (from plan step)
+- SCOPE: exact files to modify/create
+- DONE WHEN: verifiable criteria
+- MUST NOT: boundary constraints
+- CONTEXT: summary of completed prior steps
+- VERIFY: command to confirm work
+
+**Progress tracking** (`~/.openclaw/bridge/progress/{task-id}.json`):
+- Tracks per-step status: pending → in_progress → completed/failed
+- Enables session resumption if bridge restarts mid-plan
+- Failed steps retry up to 2x before escalating to on_hold
+- Dependent steps branch from the previous step's git branch (not origin/main)
+
+**Configuration** (all models configurable via `swarm-config.json`):
+
+```json
+{
+  "triage": {
+    "triage_model": "gemini-2.5-flash",
+    "triage_model_deep": "gemini-2.5-pro",
+    "embedding_model": "gemini-embedding-001"
+  },
+  "planner": {
+    "planning_model": "claude-sonnet-4-20250514",
+    "planning_provider": "anthropic",
+    "routing_model": "minimax-m2.7:cloud",
+    "routing_provider": "ollama",
+    "verification_model": "minimax-m2.7:cloud",
+    "verification_provider": "ollama",
+    "ollama_url": "http://localhost:11434",
+    "max_step_retries": 2,
+    "step_categories": {
+      "deep": { "agent": "claude" },
+      "quick": { "agent": "claude" },
+      "test": { "agent": "claude" },
+      "research": { "agent": "claude" },
+      "review": { "agent": "codex" }
+    }
+  }
+}
+```
+
+Supported providers: `anthropic`, `ollama`, `gemini`. Any model available through these providers can be used — swap in your preferred local models, use Gemini for planning to stay free, or route everything through Ollama.
+
+Environment variables (`ANTHROPIC_API_KEY`, `GOOGLE_GENERATIVE_AI_API_KEY`, `OLLAMA_URL`) can also override config values. Set `ENABLE_PLANNER=0` to bypass the planner entirely.
+
+Investigation tasks bypass the planner and go directly to agent dispatch (read-only, no plan needed).
 
 ### Dashboard
 
@@ -181,7 +286,8 @@ Mission Control is the central hub. The surrounding scripts live in `~/.openclaw
 | Component | Path | Interval | Purpose |
 |-----------|------|----------|---------|
 | Linear Sync | `~/.openclaw/sync/linear-sync.py` | 300s | Sync tickets from Linear, detect done state |
-| Bridge | `~/.openclaw/bridge/bridge.py` | 60s | Triage tasks, spawn agents, handle Q&A |
+| Bridge | `~/.openclaw/bridge/bridge.py` | 60s | Triage tasks, plan, dispatch steps, handle Q&A |
+| Planner | `~/.openclaw/bridge/planner.py` | On-demand | Generate structured plans (Sonnet), verify steps (MiniMax) |
 | Agent Monitor | `~/.openclaw/swarm/check-agents.sh` | 120s | Health checks, Codex reviews, retry logic |
 | PR Watcher | `~/.openclaw/swarm/watch-pr-reviews.sh` | 120s | Detect GitHub review comments and approvals |
 | Agent Launcher | `~/.openclaw/swarm/run-claude.sh` | On-demand | Launch Claude with prompt, retry, cost controls |

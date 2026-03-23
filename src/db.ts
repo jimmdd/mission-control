@@ -112,11 +112,15 @@ export interface TaskFilters {
   status?: string;
   workspace_id?: string;
   assigned_agent_id?: string;
+  limit?: number;
+  offset?: number;
 }
 
 export interface AgentFilters {
   workspace_id?: string;
   status?: AgentStatus;
+  limit?: number;
+  offset?: number;
 }
 
 export interface CreateTaskInput {
@@ -232,9 +236,6 @@ export interface CreateSessionInput {
 }
 
 const SCHEMA_SQL = `
-PRAGMA journal_mode = WAL;
-PRAGMA foreign_keys = ON;
-
 CREATE TABLE IF NOT EXISTS workspaces (
   id TEXT PRIMARY KEY,
   name TEXT NOT NULL,
@@ -269,13 +270,13 @@ CREATE TABLE IF NOT EXISTS tasks (
   description TEXT,
   status TEXT DEFAULT 'inbox' CHECK (status IN ('pending_dispatch', 'planning', 'inbox', 'assigned', 'in_progress', 'testing', 'review', 'on_hold', 'done')),
   priority TEXT DEFAULT 'normal' CHECK (priority IN ('low', 'normal', 'high', 'urgent')),
-  assigned_agent_id TEXT REFERENCES agents(id),
-  created_by_agent_id TEXT REFERENCES agents(id),
+  assigned_agent_id TEXT REFERENCES agents(id) ON DELETE SET NULL,
+  created_by_agent_id TEXT REFERENCES agents(id) ON DELETE SET NULL,
   workspace_id TEXT DEFAULT 'default' REFERENCES workspaces(id),
   due_date TEXT,
   parent_task_id TEXT REFERENCES tasks(id),
-external_id TEXT,
-            external_url TEXT,
+  external_id TEXT,
+  external_url TEXT,
   source TEXT DEFAULT 'manual',
   task_type TEXT DEFAULT 'implementation' CHECK (task_type IN ('implementation', 'investigation')),
   triage_state TEXT,
@@ -286,8 +287,8 @@ external_id TEXT,
 CREATE TABLE IF NOT EXISTS events (
   id TEXT PRIMARY KEY,
   type TEXT NOT NULL,
-  agent_id TEXT REFERENCES agents(id),
-  task_id TEXT REFERENCES tasks(id),
+  agent_id TEXT REFERENCES agents(id) ON DELETE SET NULL,
+  task_id TEXT REFERENCES tasks(id) ON DELETE CASCADE,
   message TEXT NOT NULL,
   metadata TEXT,
   created_at TEXT DEFAULT (datetime('now'))
@@ -296,7 +297,7 @@ CREATE TABLE IF NOT EXISTS events (
 CREATE TABLE IF NOT EXISTS task_activities (
   id TEXT PRIMARY KEY,
   task_id TEXT NOT NULL REFERENCES tasks(id) ON DELETE CASCADE,
-  agent_id TEXT REFERENCES agents(id),
+  agent_id TEXT REFERENCES agents(id) ON DELETE SET NULL,
   activity_type TEXT NOT NULL,
   message TEXT NOT NULL,
   metadata TEXT,
@@ -315,12 +316,12 @@ CREATE TABLE IF NOT EXISTS task_deliverables (
 
 CREATE TABLE IF NOT EXISTS openclaw_sessions (
   id TEXT PRIMARY KEY,
-  agent_id TEXT REFERENCES agents(id),
+  agent_id TEXT REFERENCES agents(id) ON DELETE SET NULL,
   openclaw_session_id TEXT NOT NULL,
   channel TEXT,
   status TEXT DEFAULT 'active',
   session_type TEXT DEFAULT 'persistent',
-  task_id TEXT REFERENCES tasks(id),
+  task_id TEXT REFERENCES tasks(id) ON DELETE CASCADE,
   ended_at TEXT,
   created_at TEXT DEFAULT (datetime('now')),
   updated_at TEXT DEFAULT (datetime('now'))
@@ -363,6 +364,23 @@ export class MissionControlDB {
     this.migrateTaskStatus();
     this.migrateLinearColumns();
     this.migrateTaskType();
+  }
+
+  private normalizePagination(limit?: number, offset?: number): { limit: number; offset: number } {
+    const normalizedLimit = Math.min(Math.max(limit ?? 100, 1), 1000);
+    const normalizedOffset = Math.max(offset ?? 0, 0);
+    return { limit: normalizedLimit, offset: normalizedOffset };
+  }
+
+  private buildDynamicUpdate(fields: Record<string, unknown>): { sql: string; values: unknown[] } {
+    const entries = Object.entries(fields).filter(([, value]) => value !== undefined);
+    const updates = entries.map(([column]) => `${column} = ?`);
+    const values = entries.map(([, value]) => value);
+
+    updates.push("updated_at = ?");
+    values.push(new Date().toISOString());
+
+    return { sql: updates.join(", "), values };
   }
 
   private migrateLinearColumns(): void {
@@ -486,7 +504,10 @@ export class MissionControlDB {
       params.push(filters.assigned_agent_id);
     }
 
-    sql += " ORDER BY created_at DESC";
+    const { limit, offset } = this.normalizePagination(filters.limit, filters.offset);
+    sql += " ORDER BY created_at DESC LIMIT ? OFFSET ?";
+    params.push(limit, offset);
+
     return this.db.prepare(sql).all(...params) as TaskRecord[];
   }
 
@@ -500,93 +521,81 @@ export class MissionControlDB {
     const id = randomUUID();
     const now = new Date().toISOString();
 
-    this.db
-      .prepare(
-        `INSERT INTO tasks (
-          id, title, description, status, priority, assigned_agent_id, created_by_agent_id,
-          workspace_id, due_date, parent_task_id, external_id, external_url,
-          source, task_type, triage_state, created_at, updated_at
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
-      )
-      .run(
-        id,
-        data.title,
-        data.description ?? null,
-        data.status ?? "inbox",
-        data.priority ?? "normal",
-        data.assigned_agent_id ?? null,
-        data.created_by_agent_id ?? null,
-        data.workspace_id ?? "default",
-        data.due_date ?? null,
-        data.parent_task_id ?? null,
-        data.external_id ?? null,
-        data.external_url ?? null,
-        data.source ?? "manual",
-        data.task_type ?? "implementation",
-        data.triage_state ?? null,
-        now,
-        now
-      );
+    try {
+      this.db
+        .prepare(
+          `INSERT INTO tasks (
+            id, title, description, status, priority, assigned_agent_id, created_by_agent_id,
+            workspace_id, due_date, parent_task_id, external_id, external_url,
+            source, task_type, triage_state, created_at, updated_at
+          ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+        )
+        .run(
+          id,
+          data.title,
+          data.description ?? null,
+          data.status ?? "inbox",
+          data.priority ?? "normal",
+          data.assigned_agent_id ?? null,
+          data.created_by_agent_id ?? null,
+          data.workspace_id ?? "default",
+          data.due_date ?? null,
+          data.parent_task_id ?? null,
+          data.external_id ?? null,
+          data.external_url ?? null,
+          data.source ?? "manual",
+          data.task_type ?? "implementation",
+          data.triage_state ?? null,
+          now,
+          now
+        );
+    } catch (error) {
+      const detail = error instanceof Error ? error.message : String(error);
+      throw new Error(`Failed to create task (title: \"${data.title}\"): ${detail}`);
+    }
 
     const task = this.getTask(id);
     if (!task) {
-      throw new Error("Failed to create task");
+      throw new Error(`Failed to create task (title: \"${data.title}\"): record not found after insert`);
     }
     return task;
   }
 
   updateTask(id: string, data: UpdateTaskInput): TaskRecord | undefined {
-    const updates: string[] = [];
-    const values: unknown[] = [];
-
-    const setValue = (column: string, value: unknown): void => {
-      updates.push(`${column} = ?`);
-      values.push(value);
+    const fields: Record<string, unknown> = {
+      title: data.title,
+      description: data.description,
+      status: data.status,
+      priority: data.priority,
+      assigned_agent_id: data.assigned_agent_id,
+      created_by_agent_id: data.created_by_agent_id,
+      workspace_id: data.workspace_id,
+      due_date: data.due_date,
+      parent_task_id: data.parent_task_id,
+      external_id: data.external_id,
+      external_url: data.external_url,
+      source: data.source,
+      task_type: data.task_type,
+      triage_state: data.triage_state,
     };
 
-    if (data.title !== undefined) setValue("title", data.title);
-    if (data.description !== undefined) setValue("description", data.description);
-    if (data.status !== undefined) setValue("status", data.status);
-    if (data.priority !== undefined) setValue("priority", data.priority);
-    if (data.assigned_agent_id !== undefined) {
-      setValue("assigned_agent_id", data.assigned_agent_id);
-    }
-    if (data.created_by_agent_id !== undefined) {
-      setValue("created_by_agent_id", data.created_by_agent_id);
-    }
-    if (data.workspace_id !== undefined) setValue("workspace_id", data.workspace_id);
-    if (data.due_date !== undefined) setValue("due_date", data.due_date);
-    if (data.parent_task_id !== undefined) {
-      setValue("parent_task_id", data.parent_task_id);
-    }
-    if (data.external_id !== undefined) {
-      setValue("external_id", data.external_id);
-    }
-    if (data.external_url !== undefined) {
-      setValue("external_url", data.external_url);
-    }
-    if (data.source !== undefined) setValue("source", data.source);
-    if (data.task_type !== undefined) setValue("task_type", data.task_type);
-    if (data.triage_state !== undefined) {
-      setValue("triage_state", data.triage_state);
-    }
-
-    if (updates.length === 0) {
+    const hasUpdates = Object.values(fields).some((value) => value !== undefined);
+    if (!hasUpdates) {
       return this.getTask(id);
     }
 
-    updates.push("updated_at = ?");
-    values.push(new Date().toISOString(), id);
-
-    this.db.prepare(`UPDATE tasks SET ${updates.join(", ")} WHERE id = ?`).run(...values);
+    const { sql, values } = this.buildDynamicUpdate(fields);
+    this.db.prepare(`UPDATE tasks SET ${sql} WHERE id = ?`).run(...values, id);
     return this.getTask(id);
   }
 
   deleteTask(id: string): boolean {
-    this.db.prepare("DELETE FROM openclaw_sessions WHERE task_id = ?").run(id);
-    this.db.prepare("DELETE FROM events WHERE task_id = ?").run(id);
-    const result = this.db.prepare("DELETE FROM tasks WHERE id = ?").run(id);
-    return result.changes > 0;
+    return this.db.transaction(() => {
+      this.db.prepare("DELETE FROM openclaw_sessions WHERE task_id = ?").run(id);
+      this.db.prepare("DELETE FROM events WHERE task_id = ?").run(id);
+      const result = this.db.prepare("DELETE FROM tasks WHERE id = ?").run(id);
+      return result.changes > 0;
+    })();
   }
 
   listAgents(filters: AgentFilters = {}): AgentRecord[] {
@@ -602,7 +611,10 @@ export class MissionControlDB {
       params.push(filters.status);
     }
 
-    sql += " ORDER BY is_master DESC, name ASC";
+    const { limit, offset } = this.normalizePagination(filters.limit, filters.offset);
+    sql += " ORDER BY is_master DESC, name ASC LIMIT ? OFFSET ?";
+    params.push(limit, offset);
+
     return this.db.prepare(sql).all(...params) as AgentRecord[];
   }
 
@@ -616,88 +628,91 @@ export class MissionControlDB {
     const id = randomUUID();
     const now = new Date().toISOString();
 
-    this.db
-      .prepare(
-        `INSERT INTO agents (
-          id, name, role, description, avatar_emoji, status, is_master,
-          workspace_id, soul_md, user_md, agents_md, model, source,
-          created_at, updated_at
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
-      )
-      .run(
-        id,
-        data.name,
-        data.role,
-        data.description ?? null,
-        data.avatar_emoji ?? "🤖",
-        data.status ?? "standby",
-        data.is_master ? 1 : 0,
-        data.workspace_id ?? "default",
-        data.soul_md ?? null,
-        data.user_md ?? null,
-        data.agents_md ?? null,
-        data.model ?? null,
-        data.source ?? "local",
-        now,
-        now
-      );
+    try {
+      this.db
+        .prepare(
+          `INSERT INTO agents (
+            id, name, role, description, avatar_emoji, status, is_master,
+            workspace_id, soul_md, user_md, agents_md, model, source,
+            created_at, updated_at
+          ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+        )
+        .run(
+          id,
+          data.name,
+          data.role,
+          data.description ?? null,
+          data.avatar_emoji ?? "🤖",
+          data.status ?? "standby",
+          data.is_master ? 1 : 0,
+          data.workspace_id ?? "default",
+          data.soul_md ?? null,
+          data.user_md ?? null,
+          data.agents_md ?? null,
+          data.model ?? null,
+          data.source ?? "local",
+          now,
+          now
+        );
+    } catch (error) {
+      const detail = error instanceof Error ? error.message : String(error);
+      throw new Error(`Failed to create agent (name: \"${data.name}\"): ${detail}`);
+    }
 
     const agent = this.getAgent(id);
     if (!agent) {
-      throw new Error("Failed to create agent");
+      throw new Error(`Failed to create agent (name: \"${data.name}\"): record not found after insert`);
     }
     return agent;
   }
 
   updateAgent(id: string, data: UpdateAgentInput): AgentRecord | undefined {
-    const updates: string[] = [];
-    const values: unknown[] = [];
-
-    const setValue = (column: string, value: unknown): void => {
-      updates.push(`${column} = ?`);
-      values.push(value);
+    const fields: Record<string, unknown> = {
+      name: data.name,
+      role: data.role,
+      description: data.description,
+      avatar_emoji: data.avatar_emoji,
+      status: data.status,
+      is_master: data.is_master === undefined ? undefined : data.is_master ? 1 : 0,
+      workspace_id: data.workspace_id,
+      soul_md: data.soul_md,
+      user_md: data.user_md,
+      agents_md: data.agents_md,
+      model: data.model,
+      source: data.source,
     };
 
-    if (data.name !== undefined) setValue("name", data.name);
-    if (data.role !== undefined) setValue("role", data.role);
-    if (data.description !== undefined) setValue("description", data.description);
-    if (data.avatar_emoji !== undefined) setValue("avatar_emoji", data.avatar_emoji);
-    if (data.status !== undefined) setValue("status", data.status);
-    if (data.is_master !== undefined) setValue("is_master", data.is_master ? 1 : 0);
-    if (data.workspace_id !== undefined) setValue("workspace_id", data.workspace_id);
-    if (data.soul_md !== undefined) setValue("soul_md", data.soul_md);
-    if (data.user_md !== undefined) setValue("user_md", data.user_md);
-    if (data.agents_md !== undefined) setValue("agents_md", data.agents_md);
-    if (data.model !== undefined) setValue("model", data.model);
-    if (data.source !== undefined) setValue("source", data.source);
-
-    if (updates.length === 0) {
+    const hasUpdates = Object.values(fields).some((value) => value !== undefined);
+    if (!hasUpdates) {
       return this.getAgent(id);
     }
 
-    updates.push("updated_at = ?");
-    values.push(new Date().toISOString(), id);
-
-    this.db.prepare(`UPDATE agents SET ${updates.join(", ")} WHERE id = ?`).run(...values);
+    const { sql, values } = this.buildDynamicUpdate(fields);
+    this.db.prepare(`UPDATE agents SET ${sql} WHERE id = ?`).run(...values, id);
     return this.getAgent(id);
   }
 
   deleteAgent(id: string): boolean {
-    this.db.prepare("DELETE FROM openclaw_sessions WHERE agent_id = ?").run(id);
-    this.db.prepare("DELETE FROM events WHERE agent_id = ?").run(id);
-    this.db
-      .prepare("UPDATE tasks SET assigned_agent_id = NULL WHERE assigned_agent_id = ?")
-      .run(id);
-    this.db
-      .prepare("UPDATE tasks SET created_by_agent_id = NULL WHERE created_by_agent_id = ?")
-      .run(id);
-    this.db.prepare("UPDATE task_activities SET agent_id = NULL WHERE agent_id = ?").run(id);
-    const result = this.db.prepare("DELETE FROM agents WHERE id = ?").run(id);
-    return result.changes > 0;
+    return this.db.transaction(() => {
+      this.db.prepare("DELETE FROM openclaw_sessions WHERE agent_id = ?").run(id);
+      this.db.prepare("DELETE FROM events WHERE agent_id = ?").run(id);
+      this.db
+        .prepare("UPDATE tasks SET assigned_agent_id = NULL WHERE assigned_agent_id = ?")
+        .run(id);
+      this.db
+        .prepare("UPDATE tasks SET created_by_agent_id = NULL WHERE created_by_agent_id = ?")
+        .run(id);
+      this.db.prepare("UPDATE task_activities SET agent_id = NULL WHERE agent_id = ?").run(id);
+      const result = this.db.prepare("DELETE FROM agents WHERE id = ?").run(id);
+      return result.changes > 0;
+    })();
   }
 
-  listWorkspaces(): WorkspaceRecord[] {
-    return this.db.prepare("SELECT * FROM workspaces ORDER BY name ASC").all() as WorkspaceRecord[];
+  listWorkspaces(limit?: number, offset?: number): WorkspaceRecord[] {
+    const pagination = this.normalizePagination(limit, offset);
+    return this.db
+      .prepare("SELECT * FROM workspaces ORDER BY name ASC LIMIT ? OFFSET ?")
+      .all(pagination.limit, pagination.offset) as WorkspaceRecord[];
   }
 
   getWorkspace(id: string): WorkspaceRecord | undefined {
@@ -709,46 +724,66 @@ export class MissionControlDB {
   createWorkspace(data: CreateWorkspaceInput): WorkspaceRecord {
     const id = randomUUID();
     const now = new Date().toISOString();
-    const slug = data.slug ? generateSlug(data.slug) : generateSlug(data.name);
+    const baseSlug = data.slug ? generateSlug(data.slug) : generateSlug(data.name);
 
-    this.db
-      .prepare(
-        `INSERT INTO workspaces (id, name, slug, description, icon, created_at, updated_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?)`
-      )
-      .run(id, data.name, slug, data.description ?? null, data.icon ?? "📁", now, now);
+    let candidateSlug = baseSlug;
+    let inserted = false;
+    let lastError: unknown;
+
+    for (let attempt = 0; attempt < 3; attempt += 1) {
+      try {
+        this.db
+          .prepare(
+            `INSERT INTO workspaces (id, name, slug, description, icon, created_at, updated_at)
+             VALUES (?, ?, ?, ?, ?, ?, ?)`
+          )
+          .run(id, data.name, candidateSlug, data.description ?? null, data.icon ?? "📁", now, now);
+
+        inserted = true;
+        break;
+      } catch (error) {
+        lastError = error;
+        const message = error instanceof Error ? error.message : String(error);
+        const isSlugCollision =
+          message.includes("UNIQUE") &&
+          (message.includes("workspaces.slug") || message.includes("workspaces.slug".replace(".", "_")) || message.includes("slug"));
+
+        if (isSlugCollision && attempt < 2) {
+          candidateSlug = `${baseSlug}-${randomUUID().slice(0, 4)}`;
+          continue;
+        }
+
+        throw new Error(`Failed to create workspace (name: \"${data.name}\", slug: \"${candidateSlug}\"): ${message}`);
+      }
+    }
+
+    if (!inserted) {
+      const detail = lastError instanceof Error ? lastError.message : String(lastError);
+      throw new Error(`Failed to create workspace (name: \"${data.name}\", slug: \"${candidateSlug}\"): ${detail}`);
+    }
 
     const workspace = this.getWorkspace(id);
     if (!workspace) {
-      throw new Error("Failed to create workspace");
+      throw new Error(`Failed to create workspace (name: \"${data.name}\", slug: \"${candidateSlug}\"): record not found after insert`);
     }
     return workspace;
   }
 
   updateWorkspace(id: string, data: UpdateWorkspaceInput): WorkspaceRecord | undefined {
-    const updates: string[] = [];
-    const values: unknown[] = [];
-
-    const setValue = (column: string, value: unknown): void => {
-      updates.push(`${column} = ?`);
-      values.push(value);
+    const fields: Record<string, unknown> = {
+      name: data.name,
+      slug: data.slug === undefined ? undefined : generateSlug(data.slug),
+      description: data.description,
+      icon: data.icon,
     };
 
-    if (data.name !== undefined) setValue("name", data.name);
-    if (data.slug !== undefined) setValue("slug", generateSlug(data.slug));
-    if (data.description !== undefined) setValue("description", data.description);
-    if (data.icon !== undefined) setValue("icon", data.icon);
-
-    if (updates.length === 0) {
+    const hasUpdates = Object.values(fields).some((value) => value !== undefined);
+    if (!hasUpdates) {
       return this.getWorkspace(id);
     }
 
-    updates.push("updated_at = ?");
-    values.push(new Date().toISOString(), id);
-
-    this.db
-      .prepare(`UPDATE workspaces SET ${updates.join(", ")} WHERE id = ?`)
-      .run(...values);
+    const { sql, values } = this.buildDynamicUpdate(fields);
+    this.db.prepare(`UPDATE workspaces SET ${sql} WHERE id = ?`).run(...values, id);
     return this.getWorkspace(id);
   }
 
@@ -757,10 +792,13 @@ export class MissionControlDB {
     return result.changes > 0;
   }
 
-  listActivities(taskId: string): TaskActivityRecord[] {
+  listActivities(taskId: string, limit?: number, offset?: number): TaskActivityRecord[] {
+    const pagination = this.normalizePagination(limit, offset);
     return this.db
-      .prepare("SELECT * FROM task_activities WHERE task_id = ? ORDER BY created_at DESC")
-      .all(taskId) as TaskActivityRecord[];
+      .prepare(
+        "SELECT * FROM task_activities WHERE task_id = ? ORDER BY created_at DESC LIMIT ? OFFSET ?"
+      )
+      .all(taskId, pagination.limit, pagination.offset) as TaskActivityRecord[];
   }
 
   createActivity(data: CreateActivityInput): TaskActivityRecord {
@@ -784,10 +822,13 @@ export class MissionControlDB {
       .get(id) as TaskActivityRecord;
   }
 
-  listDeliverables(taskId: string): TaskDeliverableRecord[] {
+  listDeliverables(taskId: string, limit?: number, offset?: number): TaskDeliverableRecord[] {
+    const pagination = this.normalizePagination(limit, offset);
     return this.db
-      .prepare("SELECT * FROM task_deliverables WHERE task_id = ? ORDER BY created_at DESC")
-      .all(taskId) as TaskDeliverableRecord[];
+      .prepare(
+        "SELECT * FROM task_deliverables WHERE task_id = ? ORDER BY created_at DESC LIMIT ? OFFSET ?"
+      )
+      .all(taskId, pagination.limit, pagination.offset) as TaskDeliverableRecord[];
   }
 
   createDeliverable(data: CreateDeliverableInput): TaskDeliverableRecord {
@@ -811,17 +852,18 @@ export class MissionControlDB {
       .get(id) as TaskDeliverableRecord;
   }
 
-  listEvents(limit = 50, since?: string): EventRecord[] {
+  listEvents(limit = 100, since?: string, offset = 0): EventRecord[] {
+    const pagination = this.normalizePagination(limit, offset);
     if (since) {
       return this.db
         .prepare(
-          "SELECT * FROM events WHERE created_at > ? ORDER BY created_at DESC LIMIT ?"
+          "SELECT * FROM events WHERE created_at > ? ORDER BY created_at DESC LIMIT ? OFFSET ?"
         )
-        .all(since, limit) as EventRecord[];
+        .all(since, pagination.limit, pagination.offset) as EventRecord[];
     }
     return this.db
-      .prepare("SELECT * FROM events ORDER BY created_at DESC LIMIT ?")
-      .all(limit) as EventRecord[];
+      .prepare("SELECT * FROM events ORDER BY created_at DESC LIMIT ? OFFSET ?")
+      .all(pagination.limit, pagination.offset) as EventRecord[];
   }
 
   createEvent(data: CreateEventInput): EventRecord {
@@ -850,36 +892,84 @@ export class MissionControlDB {
     if (!row || !row.triage_state) {
       return null;
     }
-    return JSON.parse(row.triage_state) as Record<string, unknown>;
+
+    try {
+      return JSON.parse(row.triage_state) as Record<string, unknown>;
+    } catch {
+      return null;
+    }
   }
 
   updateTriageState(taskId: string, data: Record<string, unknown>): Record<string, unknown> {
-    const current = this.getTriageState(taskId) ?? {};
+    let current: Record<string, unknown> = {};
+    try {
+      current = this.getTriageState(taskId) ?? {};
+    } catch {
+      current = {};
+    }
+
+    if (typeof data.questionId === "string" && typeof data.answer === "string") {
+      const questions = Array.isArray(current.questions) ? current.questions as Record<string, unknown>[] : [];
+      const q = questions.find((q) => q.id === data.questionId);
+      if (q) {
+        q.answer = data.answer;
+        q.answered = true;
+        q.answered_at = new Date().toISOString();
+      }
+      const allAnswered = questions.every((q) => q.answer || q.answered);
+      const next = { ...current, questions, updated_at: new Date().toISOString(), ...(allAnswered ? { status: "answered" } : {}) };
+      const triageStateJson = JSON.stringify(next);
+      this.db
+        .prepare("UPDATE tasks SET triage_state = ?, updated_at = ? WHERE id = ?")
+        .run(triageStateJson, new Date().toISOString(), taskId);
+      return next;
+    }
+
     const next = { ...current, ...data, updated_at: new Date().toISOString() };
+
+    let triageStateJson: string;
+    try {
+      triageStateJson = JSON.stringify(next);
+    } catch (error) {
+      const detail = error instanceof Error ? error.message : String(error);
+      throw new Error(`Failed to update triage state for task ${taskId}: ${detail}`);
+    }
 
     this.db
       .prepare("UPDATE tasks SET triage_state = ?, updated_at = ? WHERE id = ?")
-      .run(JSON.stringify(next), new Date().toISOString(), taskId);
+      .run(triageStateJson, new Date().toISOString(), taskId);
 
     return next;
   }
 
   replaceTriageState(taskId: string, data: Record<string, unknown>): Record<string, unknown> {
+    let triageStateJson: string;
+    try {
+      triageStateJson = JSON.stringify(data);
+    } catch (error) {
+      const detail = error instanceof Error ? error.message : String(error);
+      throw new Error(`Failed to replace triage state for task ${taskId}: ${detail}`);
+    }
+
     this.db
       .prepare("UPDATE tasks SET triage_state = ?, updated_at = ? WHERE id = ?")
-      .run(JSON.stringify(data), new Date().toISOString(), taskId);
+      .run(triageStateJson, new Date().toISOString(), taskId);
     return data;
   }
 
-  listSessions(taskId?: string): SessionRecord[] {
+  listSessions(taskId?: string, limit?: number, offset?: number): SessionRecord[] {
+    const pagination = this.normalizePagination(limit, offset);
+
     if (taskId) {
       return this.db
-        .prepare("SELECT * FROM openclaw_sessions WHERE task_id = ? ORDER BY created_at DESC")
-        .all(taskId) as SessionRecord[];
+        .prepare(
+          "SELECT * FROM openclaw_sessions WHERE task_id = ? ORDER BY created_at DESC LIMIT ? OFFSET ?"
+        )
+        .all(taskId, pagination.limit, pagination.offset) as SessionRecord[];
     }
     return this.db
-      .prepare("SELECT * FROM openclaw_sessions ORDER BY created_at DESC")
-      .all() as SessionRecord[];
+      .prepare("SELECT * FROM openclaw_sessions ORDER BY created_at DESC LIMIT ? OFFSET ?")
+      .all(pagination.limit, pagination.offset) as SessionRecord[];
   }
 
   createSession(data: CreateSessionInput): SessionRecord {
@@ -909,6 +999,14 @@ export class MissionControlDB {
     return this.db
       .prepare("SELECT * FROM openclaw_sessions WHERE id = ?")
       .get(id) as SessionRecord;
+  }
+
+  clearBlockingActivities(taskId: string): void {
+    this.db.prepare(
+      `DELETE FROM task_activities WHERE task_id = ? AND (
+        message LIKE '%Manual intervention%' OR message LIKE '%spawning agents%'
+      )`
+    ).run(taskId);
   }
 
   close(): void {
