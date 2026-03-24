@@ -27,18 +27,23 @@ Dispatcher ──────────────────── walks th
   │                              dispatches parallel groups concurrently,
   │                              chains dependent steps on prior branches
   ▼
-Agent (Claude / Codex) ──────── works in git worktree, executes ONE step
-  │                              with scoped prompt (files, criteria, verify)
+Agent (Claude Code) ────────── works in git worktree with GSD:
+  │                              /gsd:plan-phase → /gsd:execute-phase
+  │                              → /gsd:verify-work (GUARDRAIL)
   ▼
-Verifier (MiniMax local) ────── checks agent output against done-when
-  │                              criteria. Retries failed steps (up to 2x).
-  │                              On pass → dispatcher picks next step
+Self-Review (code-review-graph MCP)─ blast radius analysis,
+  │                              test coverage gap detection,
+  │                              fix issues, re-verify against plan
   ▼
-Plan Complete ───────────────── all steps done → creates PR from
-  │                              final branch, moves to review
+Codex Review (pre-PR) ─────── external review on branch diff,
+  │                              fix issues, re-verify against plan,
+  │                              max 3 iterations then escalate
   ▼
-Check-Agents (monitor) ──────── detects PR, runs Codex review,
-  │                              iterates if blocking issues found
+  ├─ if blocked ──────────────── posts to Linear, pauses agent,
+  │                              waits for human, resumes on reply
+  ▼
+PR Created ─────────────────── only after GSD verify + review pass
+  │
   ▼
 Watch-PR-Reviews ────────────── polls GitHub for human review comments
   │                              and approvals, relaunches agent on feedback
@@ -162,6 +167,30 @@ The planner (Sonnet) evaluates every task and returns `needs_orchestration: true
 Supported providers: `anthropic`, `ollama`, `gemini`. Swap in your preferred models — use Gemini for planning to stay free, or route everything through Ollama.
 
 Environment variables (`ANTHROPIC_API_KEY`, `GOOGLE_GENERATIVE_AI_API_KEY`, `OLLAMA_URL`) override config values. Set `ENABLE_PLANNER=0` to bypass the orchestrator entirely.
+
+### Review Loop (Ralph Loop)
+
+Each agent runs a review loop before creating a PR. GSD verification is the **source of truth** — review feedback must not break the original acceptance criteria.
+
+```
+GSD plan → execute → verify (GUARDRAIL) ──── must pass to proceed
+  ↓
+Self-review (code-review-graph MCP) ──────── blast radius, test gaps
+  ↓ fix issues
+Re-verify (GUARDRAIL) ───────────────────── fixes must not break plan
+  ↓
+Codex review (pre-PR, on branch diff) ───── bugs, security, patterns
+  ↓ fix issues
+Re-verify (GUARDRAIL) ───────────────────── fixes must not break plan
+  ↓
+  ├── PASS → Create PR
+  ├── FAIL (iteration < 3) → loop back to fix
+  └── FAIL (iteration >= 3) → escalate to human
+```
+
+**Code-review-graph** ([tirth8205/code-review-graph](https://github.com/tirth8205/code-review-graph)) provides MCP tools for blast radius analysis and test coverage detection. Automatically configured in agent worktrees via `.mcp.json`. Uses Tree-sitter to build a dependency graph (CALLS, IMPORTS, INHERITS, TESTED_BY edges) and computes which callers, dependents, and tests are affected by changes.
+
+**Human escalation**: When an agent is blocked (conflicting review feedback, missing access, design decisions), it posts `activity_type: needs_human` to Mission Control. The bridge detects this, moves the task to `planning`, posts to Linear, and waits. When the human replies, the bridge resumes the agent with the answer.
 
 ### Dashboard
 
@@ -378,6 +407,7 @@ Mission Control is the central hub. The surrounding scripts live in `~/.openclaw
 | Knowledge Manager | `~/.openclaw/swarm/knowledge-manage.py` | On-demand | Inject/list/delete knowledge entries in LanceDB |
 | Knowledge Distiller | `~/.openclaw/swarm/knowledge-distill.py` | On-demand | Extract skills + facts from completed tasks into LanceDB |
 | Knowledge Feedback | `~/.openclaw/swarm/knowledge-feedback.py` | On-demand | Track recall/helped counts for knowledge quality scoring |
+| Pre-Review | `~/.openclaw/swarm/pre-review.sh` | On-demand | Run Codex review on branch diff before PR creation |
 
 ### Concurrency
 
