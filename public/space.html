@@ -4,49 +4,36 @@
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <title>Mission Control Space</title>
+  <link rel="icon" type="image/svg+xml" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='6' fill='%230a0a0f'/%3E%3Ccircle cx='16' cy='16' r='10' fill='none' stroke='%2300ff88' stroke-width='1.5' opacity='0.3'/%3E%3Ccircle cx='16' cy='16' r='6' fill='none' stroke='%2300ff88' stroke-width='1.5' opacity='0.5'/%3E%3Ccircle cx='16' cy='16' r='2.5' fill='%2300ff88'/%3E%3C/svg%3E">
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500;700&display=swap" rel="stylesheet">
   <style>
     :root {
-      --bg: #050712;
-      --panel: #0b1327;
-      --panel-2: #080f1f;
-      --line: rgba(88, 235, 255, 0.22);
-      --line-soft: rgba(151, 94, 255, 0.2);
-      --text: #d9efff;
-      --muted: #8ea7c7;
-      --accent: #58ebff;
-      --accent-2: #9c6cff;
-      --ok: #23f4a3;
-      --warn: #ffc046;
-      --danger: #ff5c9d;
-      --glow-cyan: 0 0 0 1px rgba(88, 235, 255, 0.22), 0 0 20px rgba(88, 235, 255, 0.18);
-      --glow-purple: 0 0 0 1px rgba(156, 108, 255, 0.2), 0 0 20px rgba(156, 108, 255, 0.18);
+      --bg: #0a0a0f;
+      --panel: #12121a;
+      --panel-2: #161622;
+      --line: #1a1a2e;
+      --line-focus: rgba(0, 212, 255, 0.5);
+      --text: #e0e0e0;
+      --muted: #888888;
+      --accent: #00d4ff;
+      --ok: #00ff88;
+      --warn: #f59e0b;
+      --danger: #ef4444;
+      --font-body: 'Inter', sans-serif;
+      --font-mono: 'JetBrains Mono', monospace;
     }
 
-    * { box-sizing: border-box; }
+    * { box-sizing: border-box; margin: 0; padding: 0; }
 
     body {
-      margin: 0;
-      background:
-        radial-gradient(1000px 500px at 110% -5%, rgba(88, 235, 255, 0.18), transparent 70%),
-        radial-gradient(900px 520px at -10% 20%, rgba(156, 108, 255, 0.2), transparent 72%),
-        linear-gradient(180deg, rgba(88, 235, 255, 0.04), transparent 16%),
-        var(--bg);
+      background-color: var(--bg);
       color: var(--text);
-      font-family: "IBM Plex Sans", "Avenir Next", "Segoe UI", sans-serif;
+      font-family: var(--font-body);
+      font-size: 14px;
+      line-height: 1.5;
       min-height: 100vh;
-      position: relative;
-    }
-
-    body::before {
-      content: "";
-      position: fixed;
-      inset: 0;
-      pointer-events: none;
-      background-image:
-        linear-gradient(rgba(88, 235, 255, 0.035) 1px, transparent 1px),
-        linear-gradient(90deg, rgba(156, 108, 255, 0.03) 1px, transparent 1px);
-      background-size: 34px 34px;
-      opacity: 0.25;
     }
 
     .wrap {
@@ -61,11 +48,8 @@
       justify-content: space-between;
       gap: 12px;
       margin-bottom: 14px;
-      padding: 12px;
-      border: 1px solid var(--line-soft);
-      border-radius: 12px;
-      background: linear-gradient(180deg, rgba(11, 19, 39, 0.95), rgba(8, 15, 31, 0.95));
-      box-shadow: var(--glow-purple);
+      padding: 12px 16px;
+      border-bottom: 1px solid var(--line);
     }
 
     .title {
@@ -76,16 +60,16 @@
 
     .title h1 {
       margin: 0;
-      font-size: 28px;
-      letter-spacing: -0.01em;
-      font-family: "IBM Plex Mono", Menlo, monospace;
-      text-shadow: 0 0 16px rgba(88, 235, 255, 0.25);
+      font-size: 18px;
+      font-weight: 700;
+      letter-spacing: 1px;
+      font-family: var(--font-mono);
     }
 
     .title p {
       margin: 0;
       color: var(--muted);
-      font-size: 13px;
+      font-size: 12px;
     }
 
     .top-actions {
@@ -96,11 +80,12 @@
 
     .btn, .link-btn {
       border: 1px solid var(--line);
-      background: linear-gradient(180deg, rgba(88, 235, 255, 0.1), rgba(88, 235, 255, 0.04));
+      background: rgba(255, 255, 255, 0.03);
       color: var(--text);
-      padding: 7px 10px;
-      border-radius: 8px;
+      padding: 6px 12px;
+      border-radius: 4px;
       font-size: 12px;
+      font-family: var(--font-mono);
       cursor: pointer;
       text-decoration: none;
       display: inline-flex;
@@ -109,18 +94,18 @@
     }
 
     .btn:hover, .link-btn:hover {
-      border-color: rgba(88, 235, 255, 0.65);
-      box-shadow: var(--glow-cyan);
+      border-color: var(--line-focus);
+      background: rgba(0, 212, 255, 0.06);
     }
 
     .status-pill {
       border: 1px solid var(--line);
-      background: linear-gradient(180deg, rgba(156, 108, 255, 0.14), rgba(156, 108, 255, 0.06));
-      border-radius: 999px;
-      padding: 6px 10px;
+      background: rgba(255, 255, 255, 0.03);
+      border-radius: 4px;
+      padding: 4px 10px;
       font-size: 12px;
       color: var(--muted);
-      font-family: "IBM Plex Mono", Menlo, monospace;
+      font-family: var(--font-mono);
     }
 
     .kpis {
@@ -131,25 +116,25 @@
     }
 
     .kpi {
-      background: linear-gradient(180deg, var(--panel), var(--panel-2));
+      background: var(--panel);
       border: 1px solid var(--line);
-      border-radius: 10px;
+      border-radius: 6px;
       padding: 10px;
-      box-shadow: inset 0 0 0 1px rgba(255,255,255,0.02), var(--glow-cyan);
     }
 
     .kpi .l {
-      font-size: 11px;
+      font-size: 10px;
       color: var(--muted);
       text-transform: uppercase;
-      letter-spacing: 0.6px;
-      margin-bottom: 6px;
+      letter-spacing: 0.5px;
+      margin-bottom: 4px;
+      font-family: var(--font-mono);
     }
 
     .kpi .v {
       font-size: 20px;
-      font-family: "IBM Plex Mono", Menlo, monospace;
-      text-shadow: 0 0 12px rgba(88, 235, 255, 0.25);
+      font-family: var(--font-mono);
+      font-weight: 700;
     }
 
     .filters {
@@ -168,17 +153,16 @@
       gap: 8px;
       align-items: center;
       flex-wrap: wrap;
-      letter-spacing: 0.2px;
     }
 
     .shortcut-hint .key {
       border: 1px solid var(--line);
-      border-radius: 6px;
-      padding: 1px 6px;
-      background: rgba(88, 235, 255, 0.08);
-      color: #dff8ff;
-      font-family: "IBM Plex Mono", Menlo, monospace;
-      box-shadow: inset 0 0 0 1px rgba(255,255,255,0.03);
+      border-radius: 3px;
+      padding: 1px 5px;
+      background: rgba(255, 255, 255, 0.04);
+      color: var(--text);
+      font-family: var(--font-mono);
+      font-size: 10px;
     }
 
     .field {
@@ -188,26 +172,27 @@
     }
 
     .field label {
-      font-size: 11px;
+      font-size: 10px;
       color: var(--muted);
       text-transform: uppercase;
-      letter-spacing: 0.6px;
+      letter-spacing: 0.5px;
+      font-family: var(--font-mono);
     }
 
     .field input, .field select {
       width: 100%;
       border: 1px solid var(--line);
-      background: rgba(88, 235, 255, 0.05);
+      background: rgba(255, 255, 255, 0.03);
       color: var(--text);
-      border-radius: 8px;
+      border-radius: 4px;
       padding: 8px 9px;
       font-size: 13px;
+      font-family: var(--font-body);
     }
 
     .field input:focus, .field select:focus {
       outline: none;
-      border-color: rgba(88, 235, 255, 0.7);
-      box-shadow: var(--glow-cyan);
+      border-color: var(--line-focus);
     }
 
     .grid {
@@ -217,11 +202,10 @@
     }
 
     .panel {
-      background: linear-gradient(180deg, var(--panel), var(--panel-2));
+      background: var(--panel);
       border: 1px solid var(--line);
-      border-radius: 12px;
+      border-radius: 6px;
       overflow: hidden;
-      box-shadow: var(--glow-cyan);
     }
 
     .panel-h {
@@ -230,10 +214,11 @@
       display: flex;
       align-items: center;
       justify-content: space-between;
-      font-size: 12px;
-      color: #b3c8e7;
+      font-size: 11px;
+      color: var(--muted);
       text-transform: uppercase;
-      letter-spacing: 0.6px;
+      letter-spacing: 0.5px;
+      font-family: var(--font-mono);
     }
 
     .queue {
@@ -246,10 +231,9 @@
 
     .item {
       border: 1px solid var(--line);
-      border-radius: 10px;
+      border-radius: 6px;
       padding: 10px;
-      background: linear-gradient(180deg, rgba(88, 235, 255, 0.08), rgba(156, 108, 255, 0.06));
-      box-shadow: inset 0 0 0 1px rgba(255,255,255,0.02);
+      background: var(--panel-2);
     }
 
     .item .t {
@@ -268,15 +252,16 @@
 
     .tag {
       border: 1px solid var(--line);
-      border-radius: 999px;
+      border-radius: 3px;
       padding: 2px 7px;
-      font-family: "IBM Plex Mono", Menlo, monospace;
-      background: rgba(88, 235, 255, 0.07);
+      font-family: var(--font-mono);
+      font-size: 11px;
+      background: rgba(255, 255, 255, 0.03);
     }
 
-    .tag.warn { border-color: rgba(255, 192, 70, 0.7); color: #ffd782; box-shadow: 0 0 12px rgba(255, 192, 70, 0.22); }
-    .tag.bad { border-color: rgba(255, 92, 157, 0.72); color: #ffc4db; box-shadow: 0 0 12px rgba(255, 92, 157, 0.22); }
-    .tag.ok { border-color: rgba(35, 244, 163, 0.68); color: #a8ffd8; box-shadow: 0 0 12px rgba(35, 244, 163, 0.22); }
+    .tag.warn { border-color: rgba(245, 158, 11, 0.5); color: #f59e0b; }
+    .tag.bad { border-color: rgba(239, 68, 68, 0.5); color: #ef4444; }
+    .tag.ok { border-color: rgba(0, 255, 136, 0.4); color: #00ff88; }
 
     table {
       width: 100%;
@@ -289,23 +274,24 @@
       padding: 10px;
       color: var(--muted);
       border-bottom: 1px solid var(--line);
-      font-size: 11px;
+      font-size: 10px;
       letter-spacing: 0.5px;
       text-transform: uppercase;
+      font-family: var(--font-mono);
       position: sticky;
       top: 0;
-      background: #0d1730;
+      background: var(--panel);
       z-index: 1;
     }
 
     tbody td {
       padding: 10px;
-      border-bottom: 1px solid rgba(255, 255, 255, 0.06);
+      border-bottom: 1px solid rgba(255, 255, 255, 0.04);
       vertical-align: top;
     }
 
     tbody tr:hover {
-      background: linear-gradient(90deg, rgba(88, 235, 255, 0.12), rgba(156, 108, 255, 0.1));
+      background: rgba(255, 255, 255, 0.02);
     }
 
     .table-wrap {
@@ -313,7 +299,7 @@
       overflow: auto;
     }
 
-    .mono { font-family: "IBM Plex Mono", Menlo, monospace; }
+    .mono { font-family: var(--font-mono); }
     .muted { color: var(--muted); }
 
     .actions {
@@ -324,18 +310,19 @@
 
     .actions button, .actions a {
       border: 1px solid var(--line);
-      background: linear-gradient(180deg, rgba(88, 235, 255, 0.11), rgba(88, 235, 255, 0.05));
+      background: rgba(255, 255, 255, 0.03);
       color: var(--text);
-      border-radius: 8px;
-      padding: 5px 8px;
+      border-radius: 4px;
+      padding: 4px 8px;
       font-size: 11px;
+      font-family: var(--font-mono);
       cursor: pointer;
       text-decoration: none;
     }
 
     .actions button:hover, .actions a:hover {
-      border-color: rgba(88, 235, 255, 0.7);
-      box-shadow: var(--glow-cyan);
+      border-color: var(--line-focus);
+      background: rgba(0, 212, 255, 0.06);
     }
 
     @media (max-width: 1140px) {
