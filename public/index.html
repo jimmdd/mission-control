@@ -2527,7 +2527,7 @@
         // API Calls
         const fetchTasks = async () => {
             try {
-                const res = await fetch(getApiUrl('/tasks'));
+                const res = await fetch(getApiUrl('/tasks?limit=500'));
                 if (!res.ok) throw new Error('Network response was not ok');
                 const data = await res.json();
                 state.tasks = data;

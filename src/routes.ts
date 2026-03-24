@@ -542,10 +542,14 @@ async function handleApiRequest(
 
     if (segments[0] === "tasks") {
       if (segments.length === 1 && method === "GET") {
+        const limitParam = url.searchParams.get("limit");
+        const offsetParam = url.searchParams.get("offset");
         const tasks = db.listTasks({
           status: url.searchParams.get("status") ?? undefined,
           workspace_id: url.searchParams.get("workspace_id") ?? undefined,
           assigned_agent_id: url.searchParams.get("assigned_agent_id") ?? undefined,
+          limit: limitParam ? parseInt(limitParam, 10) : undefined,
+          offset: offsetParam ? parseInt(offsetParam, 10) : undefined,
         });
         sendJson(res, 200, tasks);
         return;
