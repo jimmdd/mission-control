@@ -1364,7 +1364,25 @@ async function handleApiRequest(
 
         if (segments[0] === "system-stats" && segments.length === 1 && method === "GET") {
           const totalMem = totalmem();
-          const freeMem = freemem();
+          // os.freemem() on macOS only reports truly free pages, not inactive/purgeable.
+          // This makes memory look nearly full when macOS is just caching files.
+          // Use vm_stat to get a more accurate picture on macOS.
+          let freeMem = freemem();
+          if (process.platform === "darwin") {
+            try {
+              const { execSync } = await import("node:child_process");
+              const vmstat = execSync("vm_stat", { timeout: 3000 }).toString();
+              const pageSize = 16384;
+              const extract = (label: string): number => {
+                const m = vmstat.match(new RegExp(`${label}:\\s+(\\d+)`));
+                return m ? parseInt(m[1], 10) * pageSize : 0;
+              };
+              // Available = free + inactive + purgeable (what macOS will reclaim)
+              freeMem = extract("Pages free") + extract("Pages inactive") + extract("Pages purgeable");
+            } catch {
+              // Fall back to os.freemem() if vm_stat fails
+            }
+          }
           const usedMem = totalMem - freeMem;
           const load = loadavg();
           const numCpus = cpus().length;
