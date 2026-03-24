@@ -2340,6 +2340,7 @@
             activityExpanded: false,
             activityExpandedToggled: false,
             showDoneInGraph: false,
+            showDoneCards: false,
             lastRenderedTasksHtml: '',
             lastRenderedTelemetryHtml: '',
             lastActivityCount: 0,
@@ -3042,11 +3043,18 @@
                 { id: 'done', label: 'DONE' }
             ];
 
+            const doneCount = counts['done'] || 0;
+            const showDoneBtn = state.filter === 'all' && doneCount > 0
+                ? `<button class="filter-pill pg-done-pill" id="cards-done-toggle" style="opacity: ${state.showDoneCards ? 1 : 0.5}">
+                    ${state.showDoneCards ? 'Hide' : 'Show'} Done <span class="filter-count">${doneCount}</span>
+                  </button>`
+                : '';
+
             els.filters.innerHTML = filters.map(f => `
                 <button class="filter-pill ${state.filter === f.id ? 'active' : ''}" data-filter="${f.id}">
                     ${f.label} <span class="filter-count">${counts[f.id] || 0}</span>
                 </button>
-            `).join('');
+            `).join('') + showDoneBtn;
 
             // Add event listeners — scope to pills with data-filter only
             els.filters.querySelectorAll('.filter-pill[data-filter]').forEach(btn => {
@@ -3057,6 +3065,15 @@
                     renderProcessGraph();
                 });
             });
+
+            const doneToggle = document.getElementById('cards-done-toggle');
+            if (doneToggle) {
+                doneToggle.addEventListener('click', () => {
+                    state.showDoneCards = !state.showDoneCards;
+                    renderFilters();
+                    renderTasks();
+                });
+            }
         };
 
         const getProcessedTasks = () => {
@@ -3064,6 +3081,8 @@
             let filtered = state.tasks;
             if (state.filter !== 'all') {
                 filtered = state.tasks.filter(t => t.status === state.filter);
+            } else if (!state.showDoneCards) {
+                filtered = state.tasks.filter(t => t.status !== 'done');
             }
 
             // Sort
