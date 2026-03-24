@@ -2,3 +2,17 @@ node_modules/
 *.db
 *.db-shm
 *.db-wal
+
+# Swarm runtime data (not source)
+swarm/swarm-config.json
+swarm/active-tasks.json
+swarm/spawn-history.jsonl
+swarm/events.jsonl
+swarm/logs/
+swarm/prompts/
+swarm/plans/
+swarm/progress/
+swarm/state-snapshots/
+swarm/pr-review-state/
+swarm/agents-default.json
+.env

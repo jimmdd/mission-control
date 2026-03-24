@@ -1,0 +1,54 @@
+{
+  "claude": {
+    "model": "claude-opus-4-6",
+    "fallbackModel": "",
+    "maxAgents": 10
+  },
+  "codex": {
+    "model": "gpt-5.4",
+    "effort": "medium",
+    "reviewEffort": "high",
+    "maxAgents": 3
+  },
+  "triage": {
+    "triage_model": "gemini-2.5-flash",
+    "triage_model_deep": "gemini-2.5-pro",
+    "embedding_model": "gemini-embedding-001"
+  },
+  "planner": {
+    "planning_model": "claude-sonnet-4-20250514",
+    "planning_provider": "anthropic",
+    "routing_model": "minimax-m2.7:cloud",
+    "routing_provider": "ollama",
+    "verification_model": "minimax-m2.7:cloud",
+    "verification_provider": "ollama",
+    "ollama_url": "http://localhost:11434",
+    "max_step_retries": 2,
+    "step_categories": {
+      "deep": { "agent": "claude", "description": "Complex implementation" },
+      "quick": { "agent": "claude", "description": "Simple, scoped change" },
+      "test": { "agent": "claude", "description": "Writing or fixing tests" },
+      "research": { "agent": "claude", "description": "Investigation, no code changes" },
+      "review": { "agent": "codex", "description": "Code review or validation" }
+    }
+  },
+  "defaultProject": "your-project",
+  "ciAutoFix": {
+    "enabled": true,
+    "maxCycles": 2
+  },
+  "reviewer": {
+    "enabled": true,
+    "reviewOnPush": true,
+    "org": "YourOrg",
+    "botUser": "your-bot-user",
+    "repos": ["repo-1", "repo-2"]
+  },
+  "linear": {
+    "enabled": true,
+    "label": "your-label",
+    "triageLabel": "your-triage-label",
+    "mentionTag": "[mc-bot]",
+    "botName": "Mission Control"
+  }
+}

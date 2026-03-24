@@ -270,7 +270,7 @@ All endpoints are served under `/ext/mission-control/api/`:
 ```bash
 # Clone into your OpenClaw plugins directory
 cd ~/GitProjects/openclaw-plugins
-git clone https://github.com/jimmdd/mission-control.git
+git clone https://github.com/your-org/mission-control.git
 cd mission-control
 npm install
 
@@ -395,19 +395,21 @@ Knowledge can be added through:
 
 Mission Control is the central hub. The surrounding scripts live in `~/.openclaw/swarm/`:
 
-| Component | Path | Interval | Purpose |
-|-----------|------|----------|---------|
-| Linear Sync | `~/.openclaw/sync/linear-sync.py` | 300s | Sync tickets from Linear, detect done state |
-| Bridge | `~/.openclaw/bridge/bridge.py` | 60s | Triage tasks, plan, dispatch steps, handle Q&A |
-| Planner | `~/.openclaw/bridge/planner.py` | On-demand | Generate structured plans (Sonnet), verify steps (MiniMax) |
-| Agent Monitor | `~/.openclaw/swarm/check-agents.sh` | 120s | Health checks, Codex reviews, retry logic |
-| PR Watcher | `~/.openclaw/swarm/watch-pr-reviews.sh` | 120s | Detect GitHub review comments and approvals |
-| Agent Launcher | `~/.openclaw/swarm/run-claude.sh` | On-demand | Launch Claude with prompt, retry, cost controls |
-| Spawn Script | `~/.openclaw/swarm/spawn-agent.sh` | On-demand | Create worktree, register agent, start tmux |
-| Knowledge Manager | `~/.openclaw/swarm/knowledge-manage.py` | On-demand | Inject/list/delete knowledge entries in LanceDB |
-| Knowledge Distiller | `~/.openclaw/swarm/knowledge-distill.py` | On-demand | Extract skills + facts from completed tasks into LanceDB |
-| Knowledge Feedback | `~/.openclaw/swarm/knowledge-feedback.py` | On-demand | Track recall/helped counts for knowledge quality scoring |
-| Pre-Review | `~/.openclaw/swarm/pre-review.sh` | On-demand | Run Codex review on branch diff before PR creation |
+| Component | Script | Interval | Purpose |
+|-----------|--------|----------|---------|
+| Linear Sync | `linear-sync.py` | 300s | Sync tickets from Linear, detect done state |
+| Bridge | `bridge.py` | 60s | Triage tasks, plan, dispatch steps, handle Q&A |
+| Planner | `planner.py` | On-demand | Generate structured plans (Sonnet), verify steps (MiniMax) |
+| Agent Monitor | `check-agents.sh` | 120s | Health checks, Codex reviews, retry logic |
+| PR Watcher | `watch-pr-reviews.sh` | 120s | Detect GitHub review comments and approvals |
+| Agent Launcher | `run-claude.sh` | On-demand | Launch Claude with prompt, retry, cost controls |
+| Spawn Script | `spawn-agent.sh` | On-demand | Create worktree, register agent, start tmux |
+| Knowledge Manager | `knowledge-manage.py` | On-demand | Inject/list/delete knowledge entries in LanceDB |
+| Knowledge Distiller | `knowledge-distill.py` | On-demand | Extract skills + facts from completed tasks into LanceDB |
+| Knowledge Feedback | `knowledge-feedback.py` | On-demand | Track recall/helped counts for knowledge quality scoring |
+| Pre-Review | `pre-review.sh` | On-demand | Run Codex review on branch diff before PR creation |
+
+All scripts live in `swarm/` and are deployed to `~/.openclaw/swarm/` (or `bridge/`, `sync/`). Copy `swarm-config.example.json` to `~/.openclaw/swarm/swarm-config.json` and fill in your org/repo details.
 
 ### Concurrency
 
@@ -424,17 +426,37 @@ Agents run in tmux sessions for isolation. Each agent gets its own git worktree.
 
 ```
 mission-control/
-├── index.ts                 # Plugin entry point
-├── openclaw.plugin.json     # Plugin manifest
+├── index.ts                         # Plugin entry point
+├── openclaw.plugin.json             # Plugin manifest
 ├── package.json
 ├── tsconfig.json
 ├── public/
-│   └── index.html           # Dashboard (single-file vanilla HTML/CSS/JS)
-└── src/
-    ├── db.ts                # SQLite schema, CRUD operations
-    ├── routes.ts            # HTTP API + dashboard serving
-    ├── tools.ts             # Agent-callable tools
-    └── shims.d.ts           # Type shims
+│   ├── index.html                   # Dashboard (command center)
+│   └── space.html                   # Space page (operational/read-only view)
+├── src/
+│   ├── db.ts                        # SQLite schema, CRUD operations
+│   ├── routes.ts                    # HTTP API + dashboard serving
+│   ├── tools.ts                     # Agent-callable tools
+│   └── shims.d.ts                   # Type shims
+└── swarm/                           # Orchestration scripts
+    ├── swarm-config.example.json    # Example config (copy to ~/.openclaw/swarm/)
+    ├── bridge.py                    # Triage, plan, dispatch, Q&A loop
+    ├── planner.py                   # Orchestrator (Sonnet planning, MiniMax verification)
+    ├── linear-sync.py               # Linear ticket ingestion + completion sync
+    ├── spawn-agent.sh               # Create worktree, register agent, start tmux
+    ├── run-claude.sh                # Launch Claude Code agent with retry/budget
+    ├── run-codex.sh                 # Launch Codex agent (fallback)
+    ├── check-agents.sh              # Health monitor, review orchestration
+    ├── watch-pr-reviews.sh          # Poll GitHub for review comments
+    ├── review-prs.sh                # PR review orchestration
+    ├── pre-review.sh                # Pre-PR Codex review on branch diff
+    ├── knowledge-distill.py         # Extract skills + facts from completed tasks
+    ├── knowledge-feedback.py        # Track recall/helped counts
+    ├── knowledge-manage.py          # CLI for knowledge CRUD
+    ├── swarm-state.py               # State tracking and snapshots
+    ├── status.sh                    # Swarm health report
+    ├── cleanup-worktrees.sh         # Clean stale git worktrees
+    └── research-agent.sh            # Research task launcher
 ```
 
 ## License
