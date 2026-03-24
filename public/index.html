@@ -3130,7 +3130,8 @@
                     if (effectiveStatus === 'running') dotClass = 'running';
                     if (effectiveStatus === 'failed') dotClass = 'failed';
                     const heartbeat = getHeartbeatMeta(agent);
-                    const heartbeatBadge = heartbeat.hasHeartbeat
+                    const isDone = ['done', 'review'].includes(task.status);
+                    const heartbeatBadge = heartbeat.hasHeartbeat && !isDone
                         ? `<span class="heartbeat-pill ${heartbeat.stale ? 'stale' : ''}">HB ${formatHeartbeatAge(heartbeat.ageMs)}</span>`
                         : '';
                     
