@@ -257,6 +257,7 @@
       font-family: var(--font-mono);
       font-size: 11px;
       background: rgba(255, 255, 255, 0.03);
+      white-space: nowrap;
     }
 
     .tag.warn { border-color: rgba(245, 158, 11, 0.5); color: #f59e0b; }
@@ -304,7 +305,7 @@
 
     .actions {
       display: flex;
-      flex-wrap: wrap;
+      flex-wrap: nowrap;
       gap: 6px;
     }
 
@@ -427,9 +428,7 @@
               <tr>
                 <th>Task</th>
                 <th>Status</th>
-                <th>Type</th>
-                <th>Swarm</th>
-                <th>Heartbeat</th>
+                <th>Agent</th>
                 <th>Updated</th>
                 <th>Actions</th>
               </tr>
@@ -628,24 +627,30 @@
 
       E.rows.innerHTML = tasks.map((t) => {
         const hb = hbMeta(t);
-        const hbLabel = hb.missing ? 'missing' : hb.stale ? `${ago(new Date(Date.now() - hb.age).toISOString())} stale` : hb.age === null ? '--' : `${ago(new Date(Date.now() - hb.age).toISOString())} ago`;
         const swarm = t.swarm || {};
+        const isDone = ['done', 'review'].includes(String(t.status || '').toLowerCase());
+        const agentLabel = swarm.agent ? swarm.agent.toUpperCase() : '--';
+        const agentStatus = swarm.liveStatus || swarm.status || '';
+
+        let agentCell = `<span class="mono">${text(agentLabel)}</span>`;
+        if (agentStatus && agentStatus !== agentLabel) {
+          agentCell += ` <span class="muted">${text(agentStatus)}</span>`;
+        }
+        if (!isDone && hb.running) {
+          const hbLabel = hb.missing ? 'no HB' : hb.stale ? 'stale' : `${ago(new Date(Date.now() - hb.age).toISOString())}`;
+          const hbClass = hb.missing || hb.stale ? 'bad' : 'ok';
+          agentCell += ` <span class="tag ${hbClass}" style="font-size:10px">${text(hbLabel)}</span>`;
+        }
+
         return `
           <tr>
             <td>
-              <div class="mono">${text(String(t.id || '').slice(0, 8))}</div>
-              <div>${text(t.title || '')}</div>
+              <div class="mono" style="font-size:11px;opacity:0.5">${text(String(t.id || '').slice(0, 8))}</div>
+              <div style="max-width:320px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${text(t.title || '')}</div>
             </td>
             <td>${statusTag(t.status)}</td>
-            <td><span class="tag">${text(t.task_type || 'task')}</span></td>
-            <td>
-              <div class="mono">${text(swarm.agent || '--')}</div>
-              <div class="muted">${text(swarm.liveStatus || swarm.status || '--')}</div>
-            </td>
-            <td>
-              <span class="tag ${hb.missing ? 'bad' : hb.stale ? 'warn' : 'ok'}">${text(hbLabel)}</span>
-            </td>
-            <td class="muted">${text(ago(t.updated_at || t.created_at))}</td>
+            <td>${agentCell}</td>
+            <td class="muted" style="white-space:nowrap">${text(ago(t.updated_at || t.created_at))}</td>
             <td><div class="actions">${actionButtons(t)}</div></td>
           </tr>`;
       }).join('');
