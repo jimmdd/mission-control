@@ -102,22 +102,22 @@ Knowledge entries include entity relations (DEPENDS_ON, OWNS, CALLS, IMPLEMENTS,
 
 ```bash
 # Scan a repo, extract architectural knowledge
-mc-explore hivemapper/network
+mc-explore myorg/backend-api
 
 # Focus on specific area
-mc-explore hivemapper/network --focus "API endpoints"
+mc-explore myorg/backend-api --focus "API endpoints"
 
 # Monorepo — auto-detects packages
-mc-explore hivemapper/honey
+mc-explore myorg/platform
 
 # Specific monorepo package
-mc-explore hivemapper/honey --package payment
+mc-explore myorg/platform --package api
 
 # Preview without storing
-mc-explore hivemapper/odc-api --dry-run
+mc-explore myorg/backend-api --dry-run
 
 # Trust mode — store as canonical (skip staged review)
-mc-explore hivemapper/odc-api --trust
+mc-explore myorg/backend-api --trust
 ```
 
 ### Repo Watcher
@@ -271,9 +271,9 @@ The plugin proxies to the standalone MC service. Set `dbPath` to the PostgreSQL 
 ### Initial Knowledge Extraction
 
 ```bash
-# Scan all repos
-for repo in $(ls ~/GitProjects/hivemapper/); do
-  mc-explore hivemapper/$repo
+# Scan all repos in a project
+for repo in $(ls ~/GitProjects/myorg/); do
+  mc-explore myorg/$repo
 done
 
 # Review staged entries in the dashboard

@@ -197,7 +197,7 @@ def main():
         prog="mc-explore",
         description="Scan a repo and extract architectural knowledge into context-fabrica.",
     )
-    parser.add_argument("repo", help="Repo path as project/repo (e.g., hivemapper/network)")
+    parser.add_argument("repo", help="Repo path as project/repo (e.g., myorg/backend-api)")
     parser.add_argument("--focus", help="Focus extraction on a specific area (e.g., 'API endpoints')")
     parser.add_argument("--package", help="For monorepos: scope to a single package name")
     parser.add_argument("--dry-run", action="store_true", help="Show what would be stored without writing to DB")
@@ -213,7 +213,7 @@ def main():
     # Parse repo arg
     parts = args.repo.strip("/").split("/")
     if len(parts) != 2:
-        print(f"Error: repo must be in project/repo format (e.g., hivemapper/network), got: {args.repo}")
+        print(f"Error: repo must be in project/repo format (e.g., myorg/backend-api), got: {args.repo}")
         sys.exit(1)
     project, repo = parts
 
