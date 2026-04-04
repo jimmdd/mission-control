@@ -1,6 +1,6 @@
-#!/usr/bin/env python3
+#!/Users/mm/.openclaw/venv-3.12/bin/python3
 """
-Distills task completion artifacts into knowledge entries stored in LanceDB.
+Distills task completion artifacts into knowledge entries stored in Context Fabrica.
 Called by check-agents.sh after an agent completes a task.
 
 Produces TWO types of knowledge:
@@ -13,7 +13,7 @@ Also supports:
   - Lineage tracking: records task_id so feedback can trace which knowledge helped
   - Outcome tagging: marks entries with task success/failure for quality scoring
 
-Shares the same LanceDB database as the OpenClaw memory-lancedb-pro plugin.
+Uses Context Fabrica (PostgreSQL + pgvector) as the single source of truth.
 """
 
 import argparse
@@ -23,22 +23,23 @@ import os
 import re
 import subprocess
 import sys
-import time
 import urllib.request
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Dict, List, Optional
 from uuid import uuid4
 
-import lancedb
-import pyarrow as pa
+from context_fabrica.models import KnowledgeRecord
+from context_fabrica.storage import PostgresPgvectorAdapter
 
 # === Config ===
 
-LANCEDB_PATH = os.path.expanduser("~/.openclaw/memory/lancedb-pro")
+CONTEXT_FABRICA_DSN = os.environ.get("CONTEXT_FABRICA_DSN", "postgresql://mm@localhost/context_fabrica")
 SWARM_CONFIG_PATH = Path.home() / ".openclaw" / "swarm" / "swarm-config.json"
 EMBEDDING_MODEL = "gemini-embedding-001"
 EMBEDDING_DIM = 3072
-EMBEDDING_BASE_URL = "https://generativelanguage.googleapis.com/v1beta/openai/embeddings"
+EMBEDDING_URL = "https://generativelanguage.googleapis.com/v1beta/models/gemini-embedding-001:embedContent"
+EMBEDDING_URL_OPENAI = "https://generativelanguage.googleapis.com/v1beta/openai/embeddings"
 GEMINI_API_BASE = "https://generativelanguage.googleapis.com/v1beta"
 GITPROJECTS_DIR = Path.home() / "GitProjects"
 
@@ -78,16 +79,20 @@ def get_gemini_key() -> str:
     return key
 
 
+def _make_adapter() -> PostgresPgvectorAdapter:
+    return PostgresPgvectorAdapter.from_dsn(CONTEXT_FABRICA_DSN, embedding_dimensions=EMBEDDING_DIM)
+
+
 # === Embedding ===
 
 def embed_text(text: str, api_key: str) -> List[float]:
     payload = json.dumps({
-        "model": EMBEDDING_MODEL,
-        "input": text,
+        "model": f"models/{EMBEDDING_MODEL}",
+        "content": {"parts": [{"text": text}]},
     }).encode()
 
     req = urllib.request.Request(
-        f"{EMBEDDING_BASE_URL}?key={api_key}",
+        f"{EMBEDDING_URL}?key={api_key}",
         data=payload,
         headers={"Content-Type": "application/json"},
         method="POST",
@@ -95,7 +100,7 @@ def embed_text(text: str, api_key: str) -> List[float]:
 
     with urllib.request.urlopen(req, timeout=30) as resp:
         data = json.loads(resp.read())
-    return data["data"][0]["embedding"]
+    return data["embedding"]["values"]
 
 
 # === Gemini Distillation ===
@@ -295,7 +300,7 @@ def format_skill_text(skill: dict) -> str:
     return "\n".join(lines)
 
 
-# === Flat Fact Distillation (existing, unchanged logic) ===
+# === Flat Fact Distillation ===
 
 def distill_learnings(artifacts: dict, project: str, repo: str) -> List[dict]:
     """Call Gemini Flash to extract atomic knowledge entries from task artifacts."""
@@ -377,33 +382,29 @@ Rules:
 # === Skill Patching ===
 
 def find_existing_skill(project: str, repo: str, domain: str) -> Optional[dict]:
-    """Search LanceDB for an existing skill in the same repo+domain."""
-    api_key = get_gemini_key()
-    if not api_key:
-        return None
-
+    """Search Context Fabrica for an existing skill in the same repo+domain."""
     try:
-        db = lancedb.connect(LANCEDB_PATH)
-        table = db.open_table("memories")
+        adapter = _make_adapter()
+        scope = f"repo:{project}/{repo}"
+        schema = adapter.settings.schema
+
+        with adapter.connect() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    f"""SELECT record_id, text_content, metadata
+                        FROM {schema}.memory_records
+                        WHERE domain = %s
+                          AND metadata->>'source' = 'knowledge-distill'
+                          AND (tags->>'category') = 'skill'
+                          AND text_content LIKE %s
+                        LIMIT 1""",
+                    (project, f"%Domain: {domain}%"),
+                )
+                row = cur.fetchone()
+                if row:
+                    return {"id": row[0], "text": row[1], "metadata": row[2]}
     except Exception:
         return None
-
-    scope = f"repo:{project}/{repo}"
-    try:
-        results = (
-            table.search()
-            .where(f"scope = '{scope}' AND category = 'skill'")
-            .limit(50)
-            .to_list()
-        )
-    except Exception:
-        return None
-
-    # Find skill with matching domain
-    for row in results:
-        text = row.get("text", "")
-        if f"Domain: {domain}" in text:
-            return row
 
     return None
 
@@ -460,7 +461,6 @@ def harvest_artifacts(worktree: str, repo_path: str, branch: str,
     except Exception:
         pass
 
-    # Also harvest git log for skill creation
     try:
         log = subprocess.run(
             ["git", "log", "--oneline", "main..HEAD"],
@@ -480,19 +480,7 @@ def harvest_artifacts(worktree: str, repo_path: str, branch: str,
     return artifacts
 
 
-# === LanceDB Storage ===
-
-MEMORIES_SCHEMA = pa.schema([
-    pa.field("id", pa.utf8()),
-    pa.field("text", pa.utf8()),
-    pa.field("vector", pa.list_(pa.float32(), EMBEDDING_DIM)),
-    pa.field("category", pa.utf8()),
-    pa.field("scope", pa.utf8()),
-    pa.field("importance", pa.int32()),
-    pa.field("timestamp", pa.int64()),
-    pa.field("metadata", pa.utf8()),
-])
-
+# === Context Fabrica Storage ===
 
 def store_entries(entries: List[dict], project: str, repo: str, task_id: str,
                   task_outcome: str = "success"):
@@ -501,15 +489,10 @@ def store_entries(entries: List[dict], project: str, repo: str, task_id: str,
         logging.error("No Gemini API key — cannot embed")
         return
 
-    db = lancedb.connect(LANCEDB_PATH)
-
-    try:
-        table = db.open_table("memories")
-    except Exception:
-        table = db.create_table("memories", schema=MEMORIES_SCHEMA)
-
-    now_ms = int(time.time() * 1000)
-    rows = []
+    adapter = _make_adapter()
+    now = datetime.now(timezone.utc)
+    scope = f"repo:{project}/{repo}"
+    stored = 0
 
     for entry in entries:
         try:
@@ -518,30 +501,40 @@ def store_entries(entries: List[dict], project: str, repo: str, task_id: str,
             logging.warning(f"Embedding failed for entry, skipping: {e}")
             continue
 
-        metadata = json.dumps({
-            "source": entry.get("source", "knowledge-distill"),
-            "task_id": task_id,
-            "project": project,
-            "repo": repo,
-            "task_outcome": task_outcome,
-            "recall_count": 0,
-            "helped_count": 0,
-        })
+        record_id = str(uuid4())
+        importance = entry.get("importance", 3)
+        category = entry.get("category", "fact")
+        confidence = importance / 5.0
 
-        rows.append({
-            "id": str(uuid4()),
-            "text": entry["text"],
-            "vector": vector,
-            "category": entry["category"],
-            "scope": f"repo:{project}/{repo}",
-            "importance": entry["importance"],
-            "timestamp": now_ms,
-            "metadata": metadata,
-        })
+        record = KnowledgeRecord(
+            record_id=record_id,
+            text=entry["text"],
+            source="knowledge-distill",
+            domain=project,
+            confidence=confidence,
+            stage="ephemeral",
+            kind="fact",
+            tags={"category": category, "scope": scope},
+            metadata={
+                "source": "knowledge-distill",
+                "task_id": task_id,
+                "project": project,
+                "repo": repo,
+                "task_outcome": task_outcome,
+                "original_scope": scope,
+                "recall_count": 0,
+                "helped_count": 0,
+            },
+            created_at=now,
+            valid_from=now,
+        )
 
-    if rows:
-        table.add(rows)
-        logging.info(f"Stored {len(rows)} entries in LanceDB (scope: repo:{project}/{repo})")
+        adapter.upsert_record(record)
+        adapter.replace_chunks(record_id, [(entry["text"], vector, 0)])
+        stored += 1
+
+    if stored:
+        logging.info(f"Stored {stored} entries in Context Fabrica (scope: {scope})")
     else:
         logging.warning("No entries to store")
 
@@ -554,17 +547,16 @@ def store_skill(skill: dict, project: str, repo: str, task_id: str,
         logging.error("No Gemini API key — cannot embed")
         return
 
-    domain = skill.get("skill_domain", "general")
-    existing = find_existing_skill(project, repo, domain)
+    domain_tag = skill.get("skill_domain", "general")
+    existing = find_existing_skill(project, repo, domain_tag)
 
     if existing:
-        logging.info(f"  Found existing skill for {domain} — patching")
+        logging.info(f"  Found existing skill for {domain_tag} — patching")
         updated_text = patch_skill(existing, skill, api_key)
-        # Delete old entry and store updated
+        # Delete old entry
         try:
-            db = lancedb.connect(LANCEDB_PATH)
-            table = db.open_table("memories")
-            table.delete(f"id = '{existing['id']}'")
+            adapter = _make_adapter()
+            adapter.delete_record(existing["id"])
             logging.info(f"  Deleted old skill {existing['id'][:8]}")
         except Exception as e:
             logging.warning(f"  Failed to delete old skill: {e}")
@@ -577,40 +569,44 @@ def store_skill(skill: dict, project: str, repo: str, task_id: str,
         logging.error(f"Embedding failed for skill: {e}")
         return
 
-    metadata = json.dumps({
-        "source": "knowledge-distill",
-        "entry_type": "skill",
-        "skill_domain": domain,
-        "skill_title": skill["skill_title"],
-        "task_id": task_id,
-        "project": project,
-        "repo": repo,
-        "task_outcome": task_outcome,
-        "patched": existing is not None,
-        "recall_count": 0,
-        "helped_count": 0,
-    })
+    record_id = str(uuid4())
+    now = datetime.now(timezone.utc)
+    scope = f"repo:{project}/{repo}"
+    importance = max(1, min(5, skill.get("importance", 4)))
 
-    row = {
-        "id": str(uuid4()),
-        "text": updated_text,
-        "vector": vector,
-        "category": "skill",
-        "scope": f"repo:{project}/{repo}",
-        "importance": max(1, min(5, skill.get("importance", 4))),
-        "timestamp": int(time.time() * 1000),
-        "metadata": metadata,
-    }
+    record = KnowledgeRecord(
+        record_id=record_id,
+        text=updated_text,
+        source="knowledge-distill",
+        domain=project,
+        confidence=importance / 5.0,
+        stage="ephemeral",
+        kind="workflow",
+        tags={"category": "skill", "scope": scope},
+        metadata={
+            "source": "knowledge-distill",
+            "entry_type": "skill",
+            "skill_domain": domain_tag,
+            "skill_title": skill["skill_title"],
+            "task_id": task_id,
+            "project": project,
+            "repo": repo,
+            "task_outcome": task_outcome,
+            "original_scope": scope,
+            "patched": existing is not None,
+            "recall_count": 0,
+            "helped_count": 0,
+        },
+        created_at=now,
+        valid_from=now,
+    )
 
-    db = lancedb.connect(LANCEDB_PATH)
-    try:
-        table = db.open_table("memories")
-    except Exception:
-        table = db.create_table("memories", schema=MEMORIES_SCHEMA)
+    adapter = _make_adapter()
+    adapter.upsert_record(record)
+    adapter.replace_chunks(record_id, [(updated_text, vector, 0)])
 
-    table.add([row])
     action = "patched" if existing else "created"
-    logging.info(f"  Skill {action}: '{skill['skill_title']}' (domain: {domain})")
+    logging.info(f"  Skill {action}: '{skill['skill_title']}' (domain: {domain_tag})")
 
 
 # === Repo Path Parsing ===

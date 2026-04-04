@@ -393,7 +393,7 @@ BOT_COMMENT_MARKERS = [
     BOT_REPLY_PREFIX,
 ]
 LIBRARIAN_DIR = Path.home() / ".openclaw" / "librarian"
-LANCEDB_PATH = os.path.expanduser("~/.openclaw/memory/lancedb-pro")
+CONTEXT_FABRICA_DSN = os.environ.get("CONTEXT_FABRICA_DSN", "postgresql://mm@localhost/context_fabrica")
 GEMINI_FLASH = "gemini-2.5-flash"
 GEMINI_API_BASE = "https://generativelanguage.googleapis.com/v1beta"
 EMBEDDING_URL = "https://generativelanguage.googleapis.com/v1beta/models/gemini-embedding-001:embedContent"
@@ -596,12 +596,13 @@ def _spawn_research(question_id: str, question: str, issue_title: str,
 
 
 def _distill_research(question: str, findings: str, repo_path: str) -> None:
-    """Store research Q&A in LanceDB for future instant recall."""
+    """Store research Q&A in context-fabrica for future instant recall."""
     api_key = os.environ.get("GOOGLE_GENERATIVE_AI_API_KEY", "")
-    if not api_key or not Path(LANCEDB_PATH).exists():
+    if not api_key:
         return
     try:
-        import lancedb as _lancedb
+        from context_fabrica.storage import PostgresPgvectorAdapter
+        from context_fabrica.models import KnowledgeRecord
 
         summary = findings.strip().split("\n\n")[0] if findings else ""
         text = f"Q: {question[:500]}\nA: {summary[:1500]}"
@@ -620,6 +621,7 @@ def _distill_research(question: str, findings: str, repo_path: str) -> None:
             vector = json.loads(resp.read())["embedding"]["values"]
 
         scope = "global"
+        domain = "general"
         if repo_path:
             parts = Path(repo_path).parts
             gp_idx = next(
@@ -627,25 +629,26 @@ def _distill_research(question: str, findings: str, repo_path: str) -> None:
             )
             if gp_idx >= 0 and len(parts) > gp_idx + 2:
                 scope = f"repo:{parts[gp_idx + 1]}/{parts[gp_idx + 2]}"
+                domain = parts[gp_idx + 1]
 
-        db = _lancedb.connect(LANCEDB_PATH)
-        table = db.open_table("memories")
-        entry = {
-            "id": f"research-{datetime.now(timezone.utc).strftime('%Y%m%d%H%M%S')}",
-            "text": text[:2000],
-            "vector": vector,
-            "category": "fact",
-            "scope": scope,
-            "importance": 4,
-            "timestamp": int(datetime.now(timezone.utc).timestamp() * 1000),
-            "metadata": json.dumps({
-                "source": "mc-research",
-                "question": question[:500],
-                "repo_path": repo_path,
-            }),
-        }
-        table.add([entry])
-        logging.info(f"  Distilled research to LanceDB ({scope})")
+        adapter = PostgresPgvectorAdapter.from_dsn(CONTEXT_FABRICA_DSN, embedding_dimensions=3072)
+
+        record = KnowledgeRecord(
+            record_id=f"research-{datetime.now(timezone.utc).strftime('%Y%m%d%H%M%S')}",
+            text=text[:2000],
+            source="mc-research",
+            domain=domain,
+            confidence=0.8,
+            stage="canonical",
+            kind="fact",
+            tags={"category": "fact", "scope": scope},
+            metadata={"source": "mc-research", "question": question[:500], "repo_path": repo_path},
+            created_at=datetime.now(timezone.utc),
+            valid_from=datetime.now(timezone.utc),
+        )
+        adapter.upsert_record(record)
+        adapter.replace_chunks(record.record_id, [(text[:2000], vector, 0)])
+        logging.info(f"  Distilled research to context-fabrica ({scope})")
     except Exception as e:
         logging.warning(f"  Failed to distill research: {e}")
 
@@ -761,9 +764,10 @@ def _gather_librarian_context(question: str) -> str:
             matched_repos.append((idx_file.parent.name, repo_name))
 
     api_key = os.environ.get("GOOGLE_GENERATIVE_AI_API_KEY", "")
-    if api_key and Path(LANCEDB_PATH).exists():
+    if api_key:
         try:
-            import lancedb as _lancedb
+            from context_fabrica.storage import PostgresPgvectorAdapter
+
             embed_payload = json.dumps({
                 "model": "models/gemini-embedding-001",
                 "content": {"parts": [{"text": question}]},
@@ -775,38 +779,18 @@ def _gather_librarian_context(question: str) -> str:
             with urllib.request.urlopen(embed_req, timeout=15) as resp:
                 vector = json.loads(resp.read())["embedding"]["values"]
 
-            db = _lancedb.connect(LANCEDB_PATH)
-            table = db.open_table("memories")
-
-            if matched_repos:
-                scope_filters = ["scope = 'global'"]
-                for project, repo in matched_repos:
-                    scope_filters.append(f"scope = 'repo:{project}/{repo}'")
-                    scope_filters.append(f"scope = 'project:{project}'")
-                where_clause = " OR ".join(scope_filters)
-                try:
-                    results = table.search(vector).where(where_clause).limit(10).to_list()
-                except Exception:
-                    results = table.search(vector).limit(5).to_list()
-            else:
-                results = table.search(vector).limit(5).to_list()
+            adapter = PostgresPgvectorAdapter.from_dsn(CONTEXT_FABRICA_DSN, embedding_dimensions=3072)
+            results = adapter.search_chunks(vector, top_k=10)
 
             if results:
-                scored = []
-                for r in results:
-                    imp = r.get("importance", 3)
-                    dist = r.get("_distance", 1.0)
-                    score = (1.0 / (1.0 + dist)) * (imp / 5.0)
-                    scored.append((score, r))
-                scored.sort(key=lambda x: -x[0])
                 knowledge_lines = [
-                    f"- {r.get('text', '')}"
-                    for _, r in scored[:8] if r.get("text")
+                    f"- {r.text}"
+                    for r in results[:8] if r.text
                 ]
                 if knowledge_lines:
                     context_parts.append("## Past Knowledge\n" + "\n".join(knowledge_lines))
         except Exception as e:
-            logging.warning(f"  LanceDB recall failed: {e}")
+            logging.warning(f"  context-fabrica recall failed: {e}")
 
     return "\n\n---\n\n".join(context_parts)
 

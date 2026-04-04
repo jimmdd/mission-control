@@ -23,7 +23,8 @@
     "agent-tools"
   ],
   "scripts": {
-    "build": "tsc --noEmit"
+    "build": "tsc --noEmit",
+    "start": "npx tsx server.ts"
   },
   "dependencies": {
     "better-sqlite3": "^12.6.2",

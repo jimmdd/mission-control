@@ -980,6 +980,68 @@
             background-color: var(--border-color);
         }
 
+        /* Service Health */
+        .services-panel {
+            padding: 24px 24px 0 24px;
+            position: relative;
+            z-index: 1;
+        }
+        .services-overall {
+            display: inline-flex;
+            align-items: center;
+            gap: 8px;
+            margin-left: 12px;
+            font-size: 11px;
+            font-family: var(--font-mono);
+        }
+        .services-overall .dot {
+            width: 8px;
+            height: 8px;
+            border-radius: 50%;
+            display: inline-block;
+        }
+        .services-overall .dot.healthy { background: #22c55e; box-shadow: 0 0 6px #22c55e80; }
+        .services-overall .dot.degraded { background: #f59e0b; box-shadow: 0 0 6px #f59e0b80; }
+        .services-overall .dot.critical { background: #ef4444; box-shadow: 0 0 6px #ef444480; }
+        .services-grid {
+            display: flex;
+            flex-wrap: wrap;
+            gap: 8px;
+        }
+        .service-card {
+            background: var(--bg-card);
+            border: 1px solid var(--border-color);
+            border-radius: 6px;
+            padding: 10px 14px;
+            min-width: 160px;
+            flex: 1;
+        }
+        .service-card .svc-name {
+            font-family: var(--font-mono);
+            font-size: 11px;
+            font-weight: 600;
+            color: var(--text-primary);
+            margin-bottom: 4px;
+        }
+        .service-card .svc-meta {
+            font-family: var(--font-mono);
+            font-size: 10px;
+            color: var(--text-secondary);
+        }
+        .svc-badge {
+            display: inline-block;
+            font-family: var(--font-mono);
+            font-size: 9px;
+            font-weight: 700;
+            text-transform: uppercase;
+            padding: 1px 6px;
+            border-radius: 3px;
+            margin-left: 6px;
+        }
+        .svc-badge.up { background: #22c55e20; color: #22c55e; }
+        .svc-badge.down { background: #ef444420; color: #ef4444; }
+        .svc-badge.degraded { background: #f59e0b20; color: #f59e0b; }
+
         .description {
             color: var(--text-primary);
             line-height: 1.6;
@@ -1080,6 +1142,7 @@
         .timeline-item.type-spawned::before { border-color: var(--status-in_progress); }
         .timeline-item.type-failed::before { border-color: var(--status-failed); }
         .timeline-item.type-investigation_findings::before { border-color: #9382ff; }
+        .timeline-item.type-research_findings::before { border-color: #00e0c7; }
         .timeline-item.findings-highlight { border-left: 2px solid rgba(147, 130, 255, 0.3); padding-left: 8px; margin-left: -10px; }
         .timeline-item.type-planning_questions::before { border-color: var(--stage-triage); }
         .timeline-item.type-linear_comment::before { border-color: #6366f1; }
@@ -1477,6 +1540,119 @@
             white-space: pre-wrap;
         }
 
+        /* Knowledge Review */
+        .kr-tabs {
+            display: flex;
+            gap: 0;
+            margin-bottom: 12px;
+            border-bottom: 1px solid var(--border-color);
+        }
+        .kr-tab {
+            font-family: var(--font-mono);
+            font-size: 11px;
+            padding: 8px 16px;
+            cursor: pointer;
+            color: var(--text-secondary);
+            border-bottom: 2px solid transparent;
+            transition: all 0.2s;
+            background: none;
+            border-top: none;
+            border-left: none;
+            border-right: none;
+        }
+        .kr-tab:hover { color: var(--text-primary); }
+        .kr-tab.active {
+            color: var(--accent);
+            border-bottom-color: var(--accent);
+        }
+        .kr-tab .kr-count {
+            font-size: 9px;
+            background: rgba(239,68,68,0.2);
+            color: #ef4444;
+            padding: 1px 5px;
+            border-radius: 8px;
+            margin-left: 6px;
+        }
+        .kr-tab.active .kr-count {
+            background: rgba(0,212,255,0.15);
+            color: var(--accent);
+        }
+        .kr-entry {
+            background: var(--bg-card);
+            border: 1px solid var(--border-color);
+            border-radius: 4px;
+            padding: 12px;
+            display: flex;
+            flex-direction: column;
+            gap: 8px;
+        }
+        .kr-entry.staged {
+            border-left: 3px solid #f59e0b;
+        }
+        .kr-actions {
+            display: flex;
+            gap: 6px;
+            align-items: center;
+        }
+        .kr-btn {
+            font-family: var(--font-mono);
+            font-size: 10px;
+            padding: 4px 10px;
+            border-radius: 3px;
+            cursor: pointer;
+            border: 1px solid;
+            transition: all 0.2s;
+        }
+        .kr-btn.approve {
+            background: rgba(34,197,94,0.1);
+            color: #22c55e;
+            border-color: rgba(34,197,94,0.3);
+        }
+        .kr-btn.approve:hover { background: rgba(34,197,94,0.25); }
+        .kr-btn.reject {
+            background: rgba(239,68,68,0.1);
+            color: #ef4444;
+            border-color: rgba(239,68,68,0.3);
+        }
+        .kr-btn.reject:hover { background: rgba(239,68,68,0.25); }
+        .kr-btn.edit {
+            background: rgba(0,212,255,0.1);
+            color: var(--accent);
+            border-color: rgba(0,212,255,0.2);
+        }
+        .kr-btn.edit:hover { background: rgba(0,212,255,0.2); }
+        .kr-edit-form {
+            display: none;
+            margin-top: 8px;
+            padding: 8px;
+            background: rgba(0,0,0,0.2);
+            border-radius: 3px;
+        }
+        .kr-edit-form.visible { display: block; }
+        .kr-edit-input {
+            width: 100%;
+            background: var(--bg-main);
+            border: 1px solid var(--border-color);
+            color: var(--text-primary);
+            font-family: var(--font-body);
+            font-size: 12px;
+            padding: 6px 8px;
+            border-radius: 3px;
+            resize: vertical;
+            margin-bottom: 6px;
+        }
+        .kr-edit-row {
+            display: flex;
+            gap: 8px;
+            align-items: center;
+        }
+        .kr-edit-row label {
+            font-family: var(--font-mono);
+            font-size: 10px;
+            color: var(--text-secondary);
+            min-width: 50px;
+        }
+
         .knowledge-add-form {
             background: var(--bg-card);
             border: 1px solid var(--border-color);
@@ -1813,6 +1989,90 @@
             box-shadow: 0 0 4px currentColor;
         }
 
+        /* Deliverables */
+        .deliverables-list {
+            display: flex;
+            flex-direction: column;
+            gap: 8px;
+        }
+
+        .deliverable-card {
+            background: rgba(255, 255, 255, 0.02);
+            border: 1px solid var(--border-color);
+            border-radius: 6px;
+            overflow: hidden;
+        }
+
+        .deliverable-header {
+            display: flex;
+            align-items: center;
+            gap: 8px;
+            padding: 10px 12px;
+            cursor: pointer;
+            font-family: var(--font-mono);
+            font-size: 12px;
+            transition: background 150ms ease;
+        }
+
+        .deliverable-header:hover {
+            background: rgba(255, 255, 255, 0.03);
+        }
+
+        .deliverable-type-icon {
+            font-size: 14px;
+            flex-shrink: 0;
+        }
+
+        .deliverable-title {
+            flex: 1;
+            color: var(--text-primary);
+            font-size: 12px;
+        }
+
+        .deliverable-time {
+            color: var(--text-secondary);
+            font-size: 10px;
+            flex-shrink: 0;
+        }
+
+        .deliverable-chevron {
+            color: var(--text-secondary);
+            font-size: 10px;
+            transition: transform 150ms ease;
+            flex-shrink: 0;
+        }
+
+        .deliverable-card.expanded .deliverable-chevron {
+            transform: rotate(90deg);
+        }
+
+        .deliverable-body {
+            display: none;
+            padding: 0 12px 12px;
+            border-top: 1px solid var(--border-color);
+        }
+
+        .deliverable-card.expanded .deliverable-body {
+            display: block;
+        }
+
+        .deliverable-body-content {
+            color: var(--text-primary);
+            font-size: 13px;
+            line-height: 1.6;
+            white-space: pre-wrap;
+            padding-top: 10px;
+        }
+
+        .deliverable-body-content a {
+            color: var(--accent);
+            text-decoration: none;
+        }
+
+        .deliverable-body-content a:hover {
+            text-decoration: underline;
+        }
+
         .prompt-content, .findings-content, .description {
             transition: max-height 0.3s ease;
         }
@@ -2033,7 +2293,15 @@
 
     <div class="main-area">
         <div class="mc-bg-effects"></div>
-        
+
+        <div class="services-panel">
+            <div class="section-title" style="margin: 0 0 12px 0; cursor: pointer;" onclick="toggleServicesPanel()">
+                SERVICES <span id="services-overall-indicator"></span>
+                <span id="services-toggle" style="font-size: 10px; opacity: 0.5; margin-left: 4px;">(hide)</span>
+            </div>
+            <div id="services-grid" class="services-grid"></div>
+        </div>
+
         <div class="task-cards-panel" style="padding: 24px 24px 0 24px; position: relative; z-index: 1;">
             <div class="task-cards-header" style="margin-bottom: 16px; display: flex; align-items: center; gap: 12px;">
                 <div class="section-title" style="margin: 0; cursor: pointer; flex: 1;" onclick="toggleTaskCards()">
@@ -2061,6 +2329,7 @@
                             <div id="new-task-type-pills" style="display: flex; gap: 4px;">
                                 <span class="filter-pill active" data-val="implementation" onclick="setNewTaskType('implementation')">IMPL</span>
                                 <span class="filter-pill" data-val="investigation" onclick="setNewTaskType('investigation')">INVESTIGATE</span>
+                                <span class="filter-pill" data-val="research" onclick="setNewTaskType('research')">RESEARCH</span>
                             </div>
                             <input type="hidden" id="new-task-type" value="implementation">
                         </div>
@@ -2111,6 +2380,12 @@
                 </div>
             </div>
             <div class="knowledge-content collapsed" id="knowledge-content">
+                <div class="kr-tabs">
+                    <button class="kr-tab active" onclick="switchKrTab('browse')" id="kr-tab-browse">BROWSE</button>
+                    <button class="kr-tab" onclick="switchKrTab('review')" id="kr-tab-review">REVIEW <span class="kr-count" id="kr-staged-count" style="display:none">0</span></button>
+                    <button class="kr-tab" onclick="switchKrTab('canonical')" id="kr-tab-canonical">CANONICAL</button>
+                </div>
+                <div id="kr-view-browse">
                 <div class="knowledge-controls">
                     <select id="kb-project-select" class="kb-select" onchange="loadKnowledge()">
                         <option value="">All Projects</option>
@@ -2161,6 +2436,19 @@
                             <button type="submit" class="btn-send" id="btn-add-kb">Add Knowledge</button>
                         </div>
                     </form>
+                </div>
+                </div><!-- end kr-view-browse -->
+
+                <div id="kr-view-review" style="display:none">
+                    <div class="knowledge-list" id="kr-review-list">
+                        <div style="color: var(--text-secondary); font-size: 12px; padding: 12px; text-align: center;">Loading staged entries...</div>
+                    </div>
+                </div>
+
+                <div id="kr-view-canonical" style="display:none">
+                    <div class="knowledge-list" id="kr-canonical-list" style="max-height: 400px;">
+                        <div style="color: var(--text-secondary); font-size: 12px; padding: 12px; text-align: center;">Loading canonical entries...</div>
+                    </div>
                 </div>
             </div>
         </div>
@@ -2294,6 +2582,10 @@
                     <!-- Triage QA rendered here -->
                 </div>
             </div>
+            <div id="drawer-deliverables-section" style="display: none;">
+                <div class="section-title">Deliverables</div>
+                <div class="deliverables-list" id="drawer-deliverables"></div>
+            </div>
             <div>
                 <div class="section-title">Activity Log</div>
                 <div class="timeline" id="drawer-timeline">
@@ -2343,6 +2635,7 @@
             showDoneCards: false,
             lastRenderedTasksHtml: '',
             lastRenderedTelemetryHtml: '',
+            deliverables: [],
             lastActivityCount: 0,
             lastActivityId: null,
             childActivities: {},
@@ -2375,6 +2668,8 @@
             drawerTriageSection: document.getElementById('drawer-triage-section'),
             drawerTriage: document.getElementById('drawer-triage'),
             drawerTimeline: document.getElementById('drawer-timeline'),
+            drawerDeliverablesSection: document.getElementById('drawer-deliverables-section'),
+            drawerDeliverables: document.getElementById('drawer-deliverables'),
             addNoteForm: document.getElementById('add-note-form'),
             noteInput: document.getElementById('note-input'),
             btnSend: document.getElementById('btn-send')
@@ -2604,6 +2899,51 @@
             }
         };
 
+        const fetchServiceHealth = async () => {
+            try {
+                const res = await fetch(getApiUrl('/services/health'));
+                if (res.ok) {
+                    const data = await res.json();
+                    renderServiceHealth(data);
+                }
+            } catch (error) {
+                console.error('Failed to fetch service health:', error);
+            }
+        };
+
+        function renderServiceHealth(data) {
+            const indicator = document.getElementById('services-overall-indicator');
+            const grid = document.getElementById('services-grid');
+            if (!indicator || !grid) return;
+
+            const overall = data.overall || 'critical';
+            const label = overall === 'healthy' ? 'ALL SYSTEMS OPERATIONAL' : overall === 'degraded' ? 'DEGRADED' : 'CRITICAL';
+            indicator.innerHTML = `<span class="services-overall"><span class="dot ${overall}"></span>${label}</span>`;
+
+            grid.innerHTML = (data.services || []).map(svc => {
+                const pidText = svc.pid ? `PID ${svc.pid}` : '';
+                const uptimeText = svc.uptime ? svc.uptime : '';
+                const meta = [pidText, uptimeText].filter(Boolean).join(' / ');
+                return `<div class="service-card">
+                    <div class="svc-name">${escapeHtml(svc.name)}<span class="svc-badge ${svc.status}">${svc.status}</span></div>
+                    <div class="svc-meta">${meta || svc.details || '-'}</div>
+                </div>`;
+            }).join('');
+        }
+
+        function toggleServicesPanel() {
+            const grid = document.getElementById('services-grid');
+            const toggle = document.getElementById('services-toggle');
+            if (!grid) return;
+            if (grid.style.display === 'none') {
+                grid.style.display = 'flex';
+                if (toggle) toggle.textContent = '(hide)';
+            } else {
+                grid.style.display = 'none';
+                if (toggle) toggle.textContent = '(show)';
+            }
+        }
+
         const fetchTaskDetails = async (taskId) => {
             if (state.drawerInitialLoad) {
                 const loadingHtml = `<div class="loading"><div class="spinner"></div></div>`;
@@ -2611,12 +2951,14 @@
                 state.lastActivityCount = 0;
                 state.lastActivityId = null;
                 els.drawerTriageSection.style.display = 'none';
+                els.drawerDeliverablesSection.style.display = 'none';
             }
-            
+
             try {
-                const [activitiesRes, triageRes] = await Promise.all([
+                const [activitiesRes, triageRes, deliverablesRes] = await Promise.all([
                     fetch(getApiUrl(`/tasks/${taskId}/activities`)),
-                    fetch(getApiUrl(`/tasks/${taskId}/triage-state`))
+                    fetch(getApiUrl(`/tasks/${taskId}/triage-state`)),
+                    fetch(getApiUrl(`/tasks/${taskId}/deliverables`))
                 ]);
 
                 if (activitiesRes.ok) {
@@ -2631,6 +2973,12 @@
                     state.triageState = typeof triageData === 'string' ? JSON.parse(triageData) : triageData;
                 } else {
                     state.triageState = null;
+                }
+
+                if (deliverablesRes.ok) {
+                    state.deliverables = await deliverablesRes.json();
+                } else {
+                    state.deliverables = [];
                 }
 
                 renderDrawerDetails();
@@ -3291,7 +3639,11 @@
                             </div>
                             <div class="card-subtitle">
                                 <div class="badge badge-status ${task.status}">${task.status.replace('_', ' ')}</div>
-                                ${task.task_type === 'investigation' ? '<div class="badge" style="background: rgba(147, 130, 255, 0.15); color: #9382ff; font-size: 9px; padding: 1px 6px;">INVESTIGATION</div>' : ''}
+                                ${task.task_type === 'investigation'
+                                    ? '<div class="badge" style="background: rgba(147, 130, 255, 0.15); color: #9382ff; font-size: 9px; padding: 1px 6px;">INVESTIGATION</div>'
+                                    : task.task_type === 'research'
+                                        ? '<div class="badge" style="background: rgba(0, 224, 199, 0.16); color: #00e0c7; font-size: 9px; padding: 1px 6px;">RESEARCH</div>'
+                                        : ''}
                                 <div class="card-time">${timeAgo(task.created_at)}</div>
                                 ${triageIndicatorHtml}
                             </div>
@@ -3484,7 +3836,7 @@
             }
 
             let promoteBtnHtml = '';
-            if (!state.readOnly && task.task_type === 'investigation') {
+            if (!state.readOnly && (task.task_type === 'investigation' || task.task_type === 'research')) {
                 promoteBtnHtml = `<button class="btn-promote" onclick="handlePromoteToCoding('${task.id}')">Promote to Coding</button>`;
             }
 
@@ -3512,7 +3864,9 @@
 
             const taskTypeBadge = task.task_type === 'investigation'
                 ? '<div class="badge" style="background: rgba(147, 130, 255, 0.15); color: #9382ff;">INVESTIGATION</div>'
-                : '';
+                : task.task_type === 'research'
+                    ? '<div class="badge" style="background: rgba(0, 224, 199, 0.16); color: #00e0c7;">RESEARCH</div>'
+                    : '';
 
             els.drawerMeta.innerHTML = `
                 <div class="badge badge-status ${task.status}">${task.status.replace('_', ' ')}</div>
@@ -3574,6 +3928,27 @@
                 els.drawerTriageSection.style.display = 'none';
             }
 
+            // Render Deliverables
+            if (state.deliverables && state.deliverables.length > 0) {
+                els.drawerDeliverablesSection.style.display = '';
+                const typeIcons = { 'gsd-plan': '\u{1F4CB}', 'gsd-verification': '\u2705', 'gsd-prd': '\u{1F4C4}' };
+                els.drawerDeliverables.innerHTML = state.deliverables.map(d => `
+                    <div class="deliverable-card" onclick="this.classList.toggle('expanded')">
+                        <div class="deliverable-header">
+                            <span class="deliverable-type-icon">${typeIcons[d.deliverable_type] || '\u{1F4CE}'}</span>
+                            <span class="deliverable-title">${escapeHtml(d.title)}</span>
+                            <span class="deliverable-time">${timeAgo(d.created_at)}</span>
+                            <span class="deliverable-chevron">\u25B6</span>
+                        </div>
+                        <div class="deliverable-body">
+                            <div class="deliverable-body-content">${d.description ? parseMarkdown(d.description) : '<span style="color: var(--text-secondary);">No description.</span>'}</div>
+                        </div>
+                    </div>
+                `).join('');
+            } else {
+                els.drawerDeliverablesSection.style.display = 'none';
+            }
+
             // Render Activities
             if (state.activities.length === 0) {
                 const emptyHtml = `<div class="empty-state">NO ACTIVITY RECORDED</div>`;
@@ -3615,7 +3990,7 @@
 
             let timelineHtml = drawerHeartbeatBanner + visibleActivities.map(act => {
                 const isPrompt = act.activity_type === 'prompt_sent';
-                const isFindings = act.activity_type === 'investigation_findings';
+                const isFindings = act.activity_type === 'investigation_findings' || act.activity_type === 'research_findings';
                 const isPlanning = act.activity_type === 'planning_questions';
                 const isLinearComment = act.activity_type === 'linear_comment';
                 const isHeartbeat = act.activity_type === 'updated' && typeof act.message === 'string' && act.message.startsWith('Agent heartbeat:');
@@ -3627,6 +4002,7 @@
                 const typeLabels = {
                     'prompt_sent': 'agent prompt',
                     'investigation_findings': 'investigation findings',
+                    'research_findings': 'research findings',
                     'planning_questions': 'triage started',
                     'linear_comment': 'linear reply',
                     'heartbeat': 'agent heartbeat',
@@ -3795,7 +4171,7 @@
                 return;
             }
 
-            const reason = prompt('Why should this investigation move to coding implementation? (required)');
+            const reason = prompt('Why should this research/investigation move to coding implementation? (required)');
             if (!reason || reason.trim().length < 5) {
                 alert('Promotion cancelled: reason must be at least 5 characters.');
                 return;
@@ -3817,7 +4193,7 @@
                     openDrawer(taskId);
                 }
             } catch (error) {
-                console.error('Failed to promote investigation task:', error);
+                console.error('Failed to promote research/investigation task:', error);
                 alert(`Failed to promote task: ${error.message || 'Unknown error'}`);
             }
         };
@@ -4779,6 +5155,159 @@
             }
         };
 
+        // Knowledge Review Logic
+        let krActiveTab = 'browse';
+        let krStagedEntries = [];
+        let krCanonicalEntries = [];
+
+        window.switchKrTab = (tab) => {
+            krActiveTab = tab;
+            document.querySelectorAll('.kr-tab').forEach(t => t.classList.remove('active'));
+            document.getElementById(`kr-tab-${tab}`).classList.add('active');
+            document.getElementById('kr-view-browse').style.display = tab === 'browse' ? '' : 'none';
+            document.getElementById('kr-view-review').style.display = tab === 'review' ? '' : 'none';
+            document.getElementById('kr-view-canonical').style.display = tab === 'canonical' ? '' : 'none';
+            if (tab === 'review') loadKrStaged();
+            if (tab === 'canonical') loadKrCanonical();
+        };
+
+        const loadKrStaged = async () => {
+            try {
+                const res = await fetch(getApiUrl('/knowledge?stage=staged&limit=100'));
+                if (!res.ok) throw new Error('Failed');
+                const data = await res.json();
+                krStagedEntries = data.entries || [];
+                const badge = document.getElementById('kr-staged-count');
+                if (krStagedEntries.length > 0) {
+                    badge.textContent = krStagedEntries.length;
+                    badge.style.display = '';
+                } else {
+                    badge.style.display = 'none';
+                }
+                renderKrList('kr-review-list', krStagedEntries, true);
+            } catch (err) {
+                document.getElementById('kr-review-list').innerHTML = '<div style="color: var(--status-failed); font-size: 12px; padding: 12px;">Failed to load staged entries.</div>';
+            }
+        };
+
+        const loadKrCanonical = async () => {
+            try {
+                const res = await fetch(getApiUrl('/knowledge?stage=canonical&limit=100'));
+                if (!res.ok) throw new Error('Failed');
+                const data = await res.json();
+                krCanonicalEntries = data.entries || [];
+                renderKrList('kr-canonical-list', krCanonicalEntries, false);
+            } catch (err) {
+                document.getElementById('kr-canonical-list').innerHTML = '<div style="color: var(--status-failed); font-size: 12px; padding: 12px;">Failed to load canonical entries.</div>';
+            }
+        };
+
+        const renderKrList = (containerId, entries, showActions) => {
+            const list = document.getElementById(containerId);
+            if (!entries.length) {
+                list.innerHTML = `<div style="color: var(--text-secondary); font-size: 12px; padding: 12px; text-align: center;">No ${showActions ? 'staged' : 'canonical'} entries found.</div>`;
+                return;
+            }
+            list.innerHTML = entries.map(entry => {
+                const importance = Math.max(1, Math.min(5, Math.round(entry.importance || 3)));
+                const pLevel = 6 - importance;
+                const timeStr = entry.timestamp ? new Date(entry.timestamp).toLocaleDateString() : '';
+                const stageClass = showActions ? ' staged' : '';
+                const actionsHtml = showActions ? `
+                    <div class="kr-actions">
+                        <button class="kr-btn approve" onclick="krPromote('${entry.id}')">APPROVE</button>
+                        <button class="kr-btn reject" onclick="krReject('${entry.id}')">REJECT</button>
+                        <button class="kr-btn edit" onclick="krToggleEdit('${entry.id}')">EDIT</button>
+                    </div>
+                    <div class="kr-edit-form" id="kr-edit-${entry.id}">
+                        <textarea class="kr-edit-input" id="kr-text-${entry.id}" rows="3">${escapeHtml(entry.text)}</textarea>
+                        <div class="kr-edit-row" style="margin-bottom: 6px;">
+                            <label>DOMAIN</label>
+                            <input class="kr-edit-input" style="margin-bottom:0" id="kr-domain-${entry.id}" value="${escapeHtml(entry.domain || '')}">
+                        </div>
+                        <div style="display:flex; gap:6px; justify-content:flex-end;">
+                            <button class="kr-btn edit" onclick="krSaveEdit('${entry.id}')">SAVE</button>
+                            <button class="kr-btn approve" onclick="krSaveAndPromote('${entry.id}')">SAVE & APPROVE</button>
+                        </div>
+                    </div>` : '';
+
+                return `
+                    <div class="kr-entry${stageClass}">
+                        <div class="kb-entry-header">
+                            <div class="kb-badges">
+                                <span class="kb-badge" style="background: rgba(245,158,11,0.1); color: #f59e0b; border: 1px solid rgba(245,158,11,0.2);">${escapeHtml(entry.stage || 'unknown')}</span>
+                                ${entry.category ? `<span class="kb-badge category">${escapeHtml(entry.category)}</span>` : ''}
+                                <span class="kb-badge" style="background: rgba(255,255,255,0.05); border: 1px solid rgba(255,255,255,0.1);">${escapeHtml(entry.domain || 'global')}</span>
+                                <span style="font-size: 10px; color: var(--text-secondary);">${timeStr}</span>
+                            </div>
+                            <div style="display: flex; align-items: center; gap: 8px;">
+                                <span class="kb-priority p${pLevel}">P${pLevel}</span>
+                                ${!showActions ? `<button class="kb-delete" onclick="deleteKnowledge('${entry.id}')" title="Delete">x</button>` : ''}
+                            </div>
+                        </div>
+                        <div class="kb-text">${escapeHtml(entry.text)}</div>
+                        ${actionsHtml}
+                    </div>`;
+            }).join('');
+        };
+
+        window.krPromote = async (id) => {
+            try {
+                const res = await fetch(getApiUrl(`/knowledge/${id}/promote`), { method: 'POST' });
+                if (!res.ok) throw new Error('Failed');
+                await loadKrStaged();
+            } catch (err) {
+                alert('Failed to promote entry');
+            }
+        };
+
+        window.krReject = async (id) => {
+            if (!confirm('Reject and delete this staged entry?')) return;
+            try {
+                const res = await fetch(getApiUrl(`/knowledge/${id}/reject`), { method: 'POST' });
+                if (!res.ok) throw new Error('Failed');
+                await loadKrStaged();
+            } catch (err) {
+                alert('Failed to reject entry');
+            }
+        };
+
+        window.krToggleEdit = (id) => {
+            const form = document.getElementById(`kr-edit-${id}`);
+            form.classList.toggle('visible');
+        };
+
+        window.krSaveEdit = async (id) => {
+            const text = document.getElementById(`kr-text-${id}`).value.trim();
+            const domain = document.getElementById(`kr-domain-${id}`).value.trim();
+            try {
+                const res = await fetch(getApiUrl(`/knowledge/${id}`), {
+                    method: 'PATCH',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ text: text || undefined, domain: domain || undefined })
+                });
+                if (!res.ok) throw new Error('Failed');
+                await loadKrStaged();
+            } catch (err) {
+                alert('Failed to update entry');
+            }
+        };
+
+        window.krSaveAndPromote = async (id) => {
+            await krSaveEdit(id);
+            await krPromote(id);
+        };
+
+        // Auto-load staged count when knowledge panel opens
+        const origToggleKnowledge = window.toggleKnowledgePanel;
+        window.toggleKnowledgePanel = async () => {
+            await origToggleKnowledge();
+            const content = document.getElementById('knowledge-content');
+            if (!content.classList.contains('collapsed')) {
+                loadKrStaged(); // load count badge
+            }
+        };
+
         // Config Panel Logic
         window.toggleConfigPanel = () => {
             const content = document.getElementById('config-content');
@@ -4882,12 +5411,13 @@
             fetchAgentStatus();
             fetchSystemStats();
             fetchLastEvent();
+            fetchServiceHealth();
             fetchBoard({ live: false });
 
             setInterval(() => {
                 fetchBoard({ live: true });
             }, 8000);
-            
+
             // Poll every 30 seconds
             setInterval(() => {
                 fetchMeta();
@@ -4895,6 +5425,7 @@
                 fetchAgentStatus();
                 fetchSystemStats();
                 fetchLastEvent();
+                fetchServiceHealth();
                 fetchBoard({ live: false });
                 if (state.isDrawerOpen && state.selectedTaskId) {
                     fetchTaskDetails(state.selectedTaskId);

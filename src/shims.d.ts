@@ -4,7 +4,7 @@ declare module "openclaw/plugin-sdk" {
     resolvePath(path: string): string;
     registerHttpRoute(route: {
       path: string;
-      auth: "gateway" | "plugin" | "public";
+      auth: "gateway" | "plugin";
       match?: "prefix" | "exact";
       handler: (
         req: import("node:http").IncomingMessage,

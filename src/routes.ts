@@ -19,6 +19,13 @@ import type {
   UpdateWorkspaceInput,
 } from "./db.js";
 
+export interface McLogger {
+  info: (message: string, ...args: unknown[]) => void;
+  error: (message: string, ...args: unknown[]) => void;
+}
+
+const consoleLogger: McLogger = { info: console.log, error: console.error };
+
 export async function parseBody(req: IncomingMessage): Promise<unknown> {
   return new Promise((resolve, reject) => {
     let body = "";
@@ -187,7 +194,7 @@ function getSwarmConfig(): Record<string, unknown> {
 }
 
 async function getSwarmAgentStatusMap(
-  logger: OpenClawPluginApi["logger"]
+  logger: McLogger
 ): Promise<Record<string, Record<string, unknown>>> {
   const registryPath = join(homedir(), ".openclaw", "swarm", "active-tasks.json");
   const raw = readFileSync(registryPath, "utf-8");
@@ -465,25 +472,17 @@ function serveSpace(res: ServerResponse): void {
   res.end(html);
 }
 
-export function registerRoutes(api: OpenClawPluginApi, db: MissionControlDB): void {
-  api.logger.info(`mission-control: registering HTTP handler at ${API_PREFIX}`);
-
-  // Use registerHttpHandler (not registerHttpRoute) because this gateway
-  // version only supports exact-path matching for registerHttpRoute.
-  // registerHttpHandler passes the raw request and expects a boolean return.
-  api.registerHttpHandler(async (req: IncomingMessage, res: ServerResponse): Promise<boolean | void> => {
+export function createHandler(db: MissionControlDB, logger?: McLogger): (req: IncomingMessage, res: ServerResponse) => Promise<void> {
+  const log = logger ?? consoleLogger;
+  return async (req: IncomingMessage, res: ServerResponse): Promise<void> => {
     const url = new URL(req.url ?? "/", "http://localhost");
     const pathname = url.pathname;
 
-    if (pathname.startsWith(PLUGIN_PREFIX) && !isReadAuthorized(req, url)) {
-      if (pathname.startsWith(API_PREFIX)) {
-        sendJson(res, 401, { error: "Unauthorized" });
-      } else {
-        res.statusCode = 401;
-        res.setHeader("Content-Type", "text/plain; charset=utf-8");
-        res.end("Unauthorized");
-      }
-      return true;
+    if (!isReadAuthorized(req, url)) {
+      res.statusCode = 401;
+      res.setHeader("Content-Type", "text/plain; charset=utf-8");
+      res.end("Unauthorized");
+      return;
     }
 
     // Serve dashboard UI at /ext/mission-control/ or /ext/mission-control
@@ -494,21 +493,30 @@ export function registerRoutes(api: OpenClawPluginApi, db: MissionControlDB): vo
       pathname === `${PLUGIN_PREFIX}/dashboard/`
     ) {
       serveDashboard(res);
-      return true;
+      return;
     }
 
     if (pathname === `${PLUGIN_PREFIX}/space` || pathname === `${PLUGIN_PREFIX}/space/`) {
       serveSpace(res);
-      return true;
+      return;
     }
 
     // API routes
-    if (!pathname.startsWith(`${API_PREFIX}/`)) {
-      return false;
+    if (pathname.startsWith(`${API_PREFIX}/`)) {
+      await handleApiRequest(req, res, url, db, log);
+      return;
     }
+  };
+}
 
-    await handleApiRequest(req, res, url, db, api);
-    return true;
+export function registerRoutes(api: OpenClawPluginApi, db: MissionControlDB): void {
+  api.logger.info(`mission-control: registering HTTP routes at ${API_PREFIX}`);
+  const handler = createHandler(db, api.logger);
+  api.registerHttpRoute({
+    path: PLUGIN_PREFIX,
+    auth: "plugin",
+    match: "prefix",
+    handler,
   });
 }
 
@@ -517,7 +525,7 @@ async function handleApiRequest(
   res: ServerResponse,
   url: URL,
   db: MissionControlDB,
-  api: OpenClawPluginApi,
+  logger: McLogger,
 ): Promise<void> {
   try {
     const pathname = url.pathname;
@@ -581,7 +589,7 @@ async function handleApiRequest(
         if (syncToLinear && linearTeamId) {
           try {                const linearCfg = getLinearConfig();
                 const taskType = typeof body.task_type === "string" ? body.task_type : "implementation";
-                const linearLabel = taskType === "investigation" && linearCfg.triageLabel
+                const linearLabel = taskType !== "implementation" && linearCfg.triageLabel
                   ? linearCfg.triageLabel
                   : linearCfg.label;
                 const issue = await createLinearIssue(
@@ -773,8 +781,8 @@ async function handleApiRequest(
                 return;
               }
 
-              if (task.task_type !== "investigation") {
-                sendJson(res, 400, { error: "Only investigation tasks can be promoted" });
+              if (!["investigation", "research"].includes(task.task_type)) {
+                sendJson(res, 400, { error: "Only investigation/research tasks can be promoted" });
                 return;
               }
 
@@ -807,16 +815,17 @@ async function handleApiRequest(
                 return;
               }
 
+              const modeLabel = task.task_type === "research" ? "Research" : "Investigation";
               db.clearBlockingActivities(taskId);
               db.createActivity({
                 task_id: taskId,
                 activity_type: "status_changed",
-                message: `Investigation promoted to implementation — moved ${task.status} -> planning. Reason: ${reason}`,
+                message: `${modeLabel} promoted to implementation — moved ${task.status} -> planning. Reason: ${reason}`,
               });
 
               if (task.external_id) {
                 const cfg = getLinearConfig();
-                const line = `${cfg.mentionTag} **${cfg.botName}**: Investigation promoted to implementation in Mission Control.\n\nReason: ${reason}`;
+                const line = `${cfg.mentionTag} **${cfg.botName}**: ${modeLabel} promoted to implementation in Mission Control.\n\nReason: ${reason}`;
                 linearGraphQL(
                   `mutation($id: String!, $body: String!) { commentCreate(input: { issueId: $id, body: $body }) { success } }`,
                   { id: task.external_id, body: line },
@@ -855,13 +864,19 @@ async function handleApiRequest(
                 };
                 const activity = db.createActivity(input);
 
-                if (input.activity_type === "investigation_findings") {
+                if (
+                  input.activity_type === "investigation_findings"
+                  || input.activity_type === "research_findings"
+                ) {
                   const task = db.getTask(taskId);
                   const externalId = task?.external_id;
                   if (externalId) {
                     const cfg = getLinearConfig();
                     const prefix = `${cfg.mentionTag} **${cfg.botName}**`;
-                    const header = `${prefix}: 🔍 Investigation findings:\n\n`;
+                    const isResearchFindings = input.activity_type === "research_findings";
+                    const header = isResearchFindings
+                      ? `${prefix}: 🧠 Research findings:\n\n`
+                      : `${prefix}: 🔍 Investigation findings:\n\n`;
                     const maxChunk = 10000;
                     const fullText = input.message;
 
@@ -887,7 +902,11 @@ async function handleApiRequest(
                       const postChunks = async () => {
                         for (let i = 0; i < chunks.length; i++) {
                           const label = chunks.length > 1 ? ` (${i + 1}/${chunks.length})` : "";
-                          const body = (i === 0 ? header : `${prefix}: 🔍 Findings continued${label}:\n\n`) + chunks[i];
+                          const body = (
+                            i === 0
+                              ? header
+                              : `${prefix}: ${isResearchFindings ? "🧠" : "🔍"} Findings continued${label}:\n\n`
+                          ) + chunks[i];
                           await linearGraphQL(
                             `mutation($id: String!, $body: String!) { commentCreate(input: { issueId: $id, body: $body }) { success } }`,
                             { id: externalId, body },
@@ -1236,11 +1255,11 @@ async function handleApiRequest(
 
         if (segments[0] === "agent-status" && segments.length === 1 && method === "GET") {
           try {
-            const byTask = await getSwarmAgentStatusMap(api.logger);
+            const byTask = await getSwarmAgentStatusMap(logger);
             sendJson(res, 200, byTask);
           } catch (error) {
             const message = error instanceof Error ? error.message : "Failed to read agent status";
-            api.logger.error(`mission-control agent-status error: ${message}`);
+            logger.error(`mission-control agent-status error: ${message}`);
             sendJson(res, 500, { error: message });
           }
           return;
@@ -1256,7 +1275,7 @@ async function handleApiRequest(
             const sortedTasks = [...allTasks].sort((a, b) =>
               String(b.updated_at ?? "").localeCompare(String(a.updated_at ?? ""))
             );
-            const swarmStatus = await getSwarmAgentStatusMap(api.logger);
+            const swarmStatus = await getSwarmAgentStatusMap(logger);
 
             const sinceMs = parseIsoMs(since);
             const pagedTasks = liveMode
@@ -1356,7 +1375,7 @@ async function handleApiRequest(
             });
           } catch (error) {
             const message = error instanceof Error ? error.message : "Failed to build board";
-            api.logger.error(`mission-control board error: ${message}`);
+            logger.error(`mission-control board error: ${message}`);
             sendJson(res, 500, { error: message });
           }
           return;
@@ -1521,10 +1540,20 @@ async function handleApiRequest(
           }
 
           if (segments.length === 1 && method === "GET") {
+            const stage = url.searchParams.get("stage") ?? "";
+            const limit = url.searchParams.get("limit") ?? "50";
+
+            // If stage filter requested, use review script for stage-aware listing
+            if (stage) {
+              const reviewScript = join(homedir(), ".openclaw", "swarm", "knowledge-review.py");
+              const result = await runPython([reviewScript, "list", "--stage", stage, "--limit", limit]);
+              sendJson(res, 200, result);
+              return;
+            }
+
             const project = url.searchParams.get("project") ?? "";
             const repo = url.searchParams.get("repo") ?? "";
             const scope = url.searchParams.get("scope") ?? "";
-            const limit = url.searchParams.get("limit") ?? "50";
 
             const args = [knowledgeScript, "list", "--limit", limit];
             if (scope) args.push("--scope", scope);
@@ -1601,6 +1630,42 @@ async function handleApiRequest(
             sendJson(res, 200, result);
             return;
           }
+
+          // Knowledge review endpoints (shell out to knowledge-review.py)
+          const reviewScript = join(homedir(), ".openclaw", "swarm", "knowledge-review.py");
+
+          if (segments.length === 3 && segments[0] === "knowledge" && segments[2] === "promote" && method === "POST") {
+            const result = await runPython([reviewScript, "promote", "--id", segments[1]]);
+            sendJson(res, 200, result);
+            return;
+          }
+
+          if (segments.length === 3 && segments[0] === "knowledge" && segments[2] === "reject" && method === "POST") {
+            const result = await runPython([reviewScript, "reject", "--id", segments[1]]);
+            sendJson(res, 200, result);
+            return;
+          }
+
+          if (segments.length === 2 && segments[0] === "knowledge" && method === "PATCH") {
+            const body = await parseBody(req);
+            if (!isRecord(body)) {
+              sendJson(res, 400, { error: "Body required" });
+              return;
+            }
+            const args = [reviewScript, "update", "--id", segments[1]];
+            if (typeof body.text === "string" && body.text.trim()) args.push("--text", body.text);
+            if (typeof body.domain === "string" && body.domain.trim()) args.push("--domain", body.domain);
+            const result = await runPython(args);
+            sendJson(res, 200, result);
+            return;
+          }
+        }
+
+        if (segments[0] === "services" && segments[1] === "health" && segments.length === 2 && method === "GET") {
+          const healthScript = join(homedir(), ".openclaw", "mission-control", "service-health.py");
+          const result = await runPython([healthScript]);
+          sendJson(res, 200, result);
+          return;
         }
 
         sendJson(res, 404, { error: "Not found" });
@@ -1610,7 +1675,7 @@ async function handleApiRequest(
           sendJson(res, 400, { error: message });
           return;
         }
-        api.logger.error(`mission-control routes error: ${message}`);
+        logger.error(`mission-control routes error: ${message}`);
         sendJson(res, 500, { error: message });
       }
 }
@@ -1680,7 +1745,8 @@ function runClaude(prompt: string, timeout = 120000): Promise<string> {
 
 function runPython(args: string[]): Promise<Record<string, unknown>> {
   return new Promise((resolve, reject) => {
-    execFile("python3", args, { timeout: 30000 }, (err, stdout, stderr) => {
+    const pythonBin = join(homedir(), ".openclaw", "venv-3.12", "bin", "python3");
+    execFile(pythonBin, args, { timeout: 30000 }, (err, stdout, stderr) => {
       if (err) {
         reject(new Error(stderr || err.message));
         return;

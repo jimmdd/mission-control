@@ -1,21 +1,34 @@
 import { Type } from "@sinclair/typebox";
 import { execFile } from "node:child_process";
+import { request as httpRequest } from "node:http";
 import { join } from "node:path";
 import { homedir } from "node:os";
 import type { OpenClawPluginApi } from "openclaw/plugin-sdk";
-import type {
-  CreateActivityInput,
-  CreateTaskInput,
-  CreateWorkspaceInput,
-  MissionControlDB,
-  UpdateTaskInput,
-} from "./db.js";
+
+const MC_URL = process.env.MISSION_CONTROL_URL ?? "http://127.0.0.1:18790";
+
+function mcFetch(method: string, path: string, body?: unknown): Promise<Record<string, unknown>> {
+  return new Promise((resolve, reject) => {
+    const url = new URL(path, MC_URL);
+    const req = httpRequest(url, { method, headers: { "Content-Type": "application/json" } }, (res) => {
+      let data = "";
+      res.on("data", (chunk: Buffer) => { data += chunk; });
+      res.on("end", () => {
+        try { resolve(JSON.parse(data)); } catch { resolve({ raw: data }); }
+      });
+    });
+    req.on("error", reject);
+    if (body) req.write(JSON.stringify(body));
+    req.end();
+  });
+}
 
 const KNOWLEDGE_SCRIPT = join(homedir(), ".openclaw", "swarm", "knowledge-manage.py");
+const PYTHON_BIN = join(homedir(), ".openclaw", "venv-3.12", "bin", "python3");
 
 function runKnowledgeScript(args: string[]): Promise<Record<string, unknown>> {
   return new Promise((resolve, reject) => {
-    execFile("python3", [KNOWLEDGE_SCRIPT, ...args], { timeout: 30000 }, (err, stdout, stderr) => {
+    execFile(PYTHON_BIN, [KNOWLEDGE_SCRIPT, ...args], { timeout: 30000 }, (err, stdout, stderr) => {
       if (err) {
         reject(new Error(stderr || err.message));
         return;
@@ -33,7 +46,7 @@ function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
-export function registerTools(api: OpenClawPluginApi, db: MissionControlDB): void {
+export function registerTools(api: OpenClawPluginApi): void {
   api.registerTool(
     () => ({
       name: "mc_create_task",
@@ -75,19 +88,19 @@ export function registerTools(api: OpenClawPluginApi, db: MissionControlDB): voi
           };
         }
 
-        const input: CreateTaskInput = {
+        const input: Record<string, unknown> = {
           title: params.title as string,
           description: typeof params.description === "string" ? params.description : undefined,
-          priority: typeof params.priority === "string" ? params.priority as CreateTaskInput["priority"] : undefined,
-          status: typeof params.status === "string" ? params.status as CreateTaskInput["status"] : "inbox",
+          priority: typeof params.priority === "string" ? params.priority : undefined,
+          status: typeof params.status === "string" ? params.status : "inbox",
           parent_task_id: typeof params.parent_task_id === "string" ? params.parent_task_id : undefined,
           workspace_id: typeof params.workspace_id === "string" ? params.workspace_id : undefined,
           assigned_agent_id: typeof params.assigned_agent_id === "string" ? params.assigned_agent_id : undefined,
           source: typeof params.source === "string" ? params.source : "chat",
         };
-        const task = db.createTask(input);
+        const task = await mcFetch("POST", "/ext/mission-control/api/tasks", input);
 
-        db.createActivity({
+        await mcFetch("POST", `/ext/mission-control/api/tasks/${task.id}/activities`, {
           task_id: task.id,
           activity_type: "created",
           message: `Task created via ${input.source ?? "chat"}`,
@@ -127,7 +140,13 @@ export function registerTools(api: OpenClawPluginApi, db: MissionControlDB): voi
             }
           : {};
 
-        const tasks = db.listTasks(filters);
+        const queryParts: string[] = [];
+        if (filters.status) queryParts.push(`status=${encodeURIComponent(filters.status)}`);
+        if (filters.workspace_id) queryParts.push(`workspace_id=${encodeURIComponent(filters.workspace_id)}`);
+        if (filters.assigned_agent_id) queryParts.push(`assigned_agent_id=${encodeURIComponent(filters.assigned_agent_id)}`);
+        const qs = queryParts.length ? `?${queryParts.join("&")}` : "";
+        const result = await mcFetch("GET", `/ext/mission-control/api/tasks${qs}`);
+        const tasks = Array.isArray(result) ? result : (Array.isArray((result as Record<string, unknown>).tasks) ? (result as Record<string, unknown>).tasks as unknown[] : [result]);
         return {
           content: [{ type: "text", text: `Found ${tasks.length} tasks` }],
           details: { count: tasks.length, tasks },
@@ -165,21 +184,16 @@ export function registerTools(api: OpenClawPluginApi, db: MissionControlDB): voi
           };
         }
 
-        const update: UpdateTaskInput = {
-          status: typeof params.status === "string" ? (params.status as UpdateTaskInput["status"]) : undefined,
-          priority:
-            typeof params.priority === "string" ? (params.priority as UpdateTaskInput["priority"]) : undefined,
+        const update: Record<string, unknown> = {
+          status: typeof params.status === "string" ? params.status : undefined,
+          priority: typeof params.priority === "string" ? params.priority : undefined,
           title: typeof params.title === "string" ? params.title : undefined,
-          description:
-            typeof params.description === "string" ? params.description : undefined,
-          assigned_agent_id:
-            typeof params.assigned_agent_id === "string"
-              ? params.assigned_agent_id
-              : undefined,
+          description: typeof params.description === "string" ? params.description : undefined,
+          assigned_agent_id: typeof params.assigned_agent_id === "string" ? params.assigned_agent_id : undefined,
         };
 
-        const task = db.updateTask(params.id, update);
-        if (!task) {
+        const task = await mcFetch("PATCH", `/ext/mission-control/api/tasks/${params.id}`, update);
+        if (task.error) {
           return {
             content: [{ type: "text", text: "Task not found" }],
             details: { error: "not_found", id: params.id },
@@ -211,8 +225,8 @@ export function registerTools(api: OpenClawPluginApi, db: MissionControlDB): voi
           };
         }
 
-        const task = db.getTask(params.id);
-        if (!task) {
+        const task = await mcFetch("GET", `/ext/mission-control/api/tasks/${params.id}`);
+        if (task.error) {
           return {
             content: [{ type: "text", text: "Task not found" }],
             details: { error: "not_found", id: params.id },
@@ -251,12 +265,12 @@ export function registerTools(api: OpenClawPluginApi, db: MissionControlDB): voi
           };
         }
 
-        const input: CreateActivityInput = {
+        const input = {
           task_id: params.task_id,
           activity_type: params.activity_type,
           message: params.message,
         };
-        const activity = db.createActivity(input);
+        const activity = await mcFetch("POST", `/ext/mission-control/api/tasks/${params.task_id}/activities`, input);
         return {
           content: [{ type: "text", text: `Logged activity ${activity.id}` }],
           details: activity,
@@ -273,7 +287,8 @@ export function registerTools(api: OpenClawPluginApi, db: MissionControlDB): voi
       description: "List all workspaces",
       parameters: Type.Object({}),
       async execute() {
-        const workspaces = db.listWorkspaces();
+        const result = await mcFetch("GET", "/ext/mission-control/api/workspaces");
+        const workspaces = Array.isArray(result) ? result : (Array.isArray((result as Record<string, unknown>).workspaces) ? (result as Record<string, unknown>).workspaces as unknown[] : [result]);
         return {
           content: [{ type: "text", text: `Found ${workspaces.length} workspaces` }],
           details: { count: workspaces.length, workspaces },
@@ -299,12 +314,12 @@ export function registerTools(api: OpenClawPluginApi, db: MissionControlDB): voi
             details: { error: "validation_failed" },
           };
         }
-        const input: CreateWorkspaceInput = {
+        const input = {
           name: params.name,
           description:
             typeof params.description === "string" ? params.description : undefined,
         };
-        const workspace = db.createWorkspace(input);
+        const workspace = await mcFetch("POST", "/ext/mission-control/api/workspaces", input);
         return {
           content: [{ type: "text", text: `Created workspace ${workspace.id}` }],
           details: workspace,

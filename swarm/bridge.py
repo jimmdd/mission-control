@@ -191,6 +191,40 @@ def mc_add_deliverable(task_id: str, dtype: str, title: str, path: str = "", des
     mc_request("POST", f"/api/tasks/{task_id}/deliverables", body)
 
 
+_GSD_ARTIFACTS = [
+    ("PLAN.md", "gsd-plan", "GSD Plan"),
+    ("VERIFICATION.md", "gsd-verification", "GSD Verification"),
+    ("PRD.md", "gsd-prd", "PRD"),
+]
+
+
+def _post_gsd_artifacts(task_id: str, worktree_paths: List[str]):
+    """Post GSD artifact files from worktrees as task deliverables."""
+    seen = set()  # avoid duplicates if multiple steps share a worktree
+    for wt in worktree_paths:
+        wt_path = Path(wt)
+        if not wt_path.exists() or wt in seen:
+            continue
+        seen.add(wt)
+        for filename, dtype, default_title in _GSD_ARTIFACTS:
+            artifact = wt_path / filename
+            if not artifact.exists():
+                continue
+            try:
+                content = artifact.read_text()
+                # Extract title from first heading line
+                title = default_title
+                for line in content.splitlines():
+                    line = line.strip()
+                    if line.startswith("# "):
+                        title = line.lstrip("# ").strip()
+                        break
+                mc_add_deliverable(task_id, dtype, title, path=str(artifact), description=content)
+                logging.info(f"  Posted {filename} as deliverable for {task_id[:8]}")
+            except Exception as e:
+                logging.warning(f"  Failed to post {filename} for {task_id[:8]}: {e}")
+
+
 SWARM_CONFIG_PATH = Path.home() / ".openclaw" / "swarm" / "swarm-config.json"
 
 
@@ -219,7 +253,12 @@ def _triage_model_deep() -> str:
     return _load_triage_config()["triage_model_deep"]
 
 
-LANCEDB_PATH = os.path.expanduser("~/.openclaw/memory/lancedb-pro")
+CONTEXT_FABRICA_DSN = os.environ.get("CONTEXT_FABRICA_DSN", "postgresql://mm@localhost/context_fabrica")
+
+from context_fabrica.storage import PostgresPgvectorAdapter
+from context_fabrica.config import PostgresSettings
+
+_pg_settings = PostgresSettings(dsn=CONTEXT_FABRICA_DSN, embedding_dimensions=3072)
 _triage_cfg = _load_triage_config()
 EMBEDDING_MODEL = _triage_cfg["embedding_model"]
 EMBEDDING_URL = f"https://generativelanguage.googleapis.com/v1beta/models/{EMBEDDING_MODEL}:embedContent"
@@ -260,7 +299,7 @@ def _parse_source(row: dict) -> str:
 
 
 def recall_knowledge(repos: List[dict], query: str, top_k: int = KNOWLEDGE_MAX_RESULTS) -> dict:
-    """Query LanceDB for past learnings relevant to the given repos and query.
+    """Query context-fabrica (PostgreSQL) for past learnings relevant to the given repos and query.
 
     Returns a dict with keys:
       - developer_notes: str — human-injected knowledge (always surfaces, priority boost)
@@ -273,54 +312,50 @@ def recall_knowledge(repos: List[dict], query: str, top_k: int = KNOWLEDGE_MAX_R
     """
     empty = {"developer_notes": "", "skills": "", "past_learnings": "", "recalled_ids": []}
 
-    try:
-        import lancedb as _lancedb
-    except ImportError:
-        logging.warning("lancedb not installed — skipping knowledge recall")
-        return empty
-
-    if not Path(LANCEDB_PATH).exists():
-        return empty
-
     vector = _embed_query(query)
     if not vector:
         return empty
 
+    # Query context-fabrica via PostgresPgvectorAdapter
     try:
-        db = _lancedb.connect(LANCEDB_PATH)
-        table = db.open_table("memories")
-    except Exception:
-        return empty
+        adapter = PostgresPgvectorAdapter(_pg_settings)
+        domains = set()
+        for r in repos:
+            domains.add(f"{r['project']}/{r['repo']}")
+            domains.add(r['project'])
+        domains.add("global")
 
-    scope_filters = []
-    for r in repos:
-        scope_filters.append(f"scope = 'repo:{r['project']}/{r['repo']}'")
-    scope_filters.append("scope = 'global'")
-    for r in repos:
-        scope_filters.append(f"scope = 'project:{r['project']}'")
-
-    where_clause = " OR ".join(scope_filters)
-
-    try:
-        results = (
-            table.search(vector)
-            .where(where_clause)
-            .limit(top_k * 6)
-            .to_list()
-        )
+        all_results = []
+        for domain in domains:
+            results = adapter.semantic_search(vector, domain=domain, top_k=top_k * 2)
+            all_results.extend(results)
     except Exception as e:
         logging.warning(f"Knowledge recall query failed: {e}")
         return empty
 
-    if not results:
+    if not all_results:
         return empty
+
+    # Transform QueryResult objects into dict format for scoring
+    rows = []
+    for qr in all_results:
+        rec = qr.record
+        rows.append({
+            "id": rec.record_id,
+            "text": rec.text,
+            "scope": rec.metadata.get("original_scope", f"repo:{rec.domain}"),
+            "category": rec.kind,
+            "importance": round(rec.confidence * 5),
+            "_distance": 1.0 - qr.semantic_score,  # convert similarity to distance
+            "metadata": json.dumps(rec.metadata) if isinstance(rec.metadata, dict) else str(rec.metadata),
+        })
 
     # Categorize and score results
     human_entries = []
     skill_entries = []
     fact_entries = []
 
-    for row in results:
+    for row in rows:
         importance = row.get("importance", 3)
         dist = row.get("_distance", 1.0)
         source = _parse_source(row)
@@ -1579,9 +1614,24 @@ def process_in_progress_plans():
             # Create final PR from the last step's branch
             _create_final_pr(task_id, plan, progress)
 
+            # Post GSD artifacts as deliverables
+            worktree_paths = []
+            for entry in registry:
+                if entry.get("task_id") == task_id and entry.get("worktree"):
+                    worktree_paths.append(entry["worktree"])
+            _post_gsd_artifacts(task_id, worktree_paths)
+
             mc_log_activity(task_id, "updated", "All plan steps completed — PR created, task in review")
             mc_update_task(task_id, {"status": "review"})
             logging.info(f"  Plan complete for {task_id[:8]} — PR created, moved to review")
+
+            # Post completion comment to Linear so process_review_tasks can detect human replies
+            task = _fetch_task(task_id)
+            if task:
+                linear_issue_id = task.get("external_id") or task.get("linear_issue_id")
+                if linear_issue_id:
+                    _post_linear_comment(linear_issue_id,
+                        "**Completed by bridge**\n\nWork complete — PR opened. Task is now in review.")
             continue
 
         # Check if any steps permanently failed — escalate

@@ -1,8 +1,35 @@
 # Mission Control
 
-OpenClaw embedded plugin for managing autonomous AI agent swarms. Provides task management, a real-time command center dashboard, knowledge management, and agent tools — all backed by SQLite.
+Standalone service + OpenClaw plugin for managing autonomous AI agent swarms. Provides task management, a real-time command center dashboard, knowledge management with graph-aware retrieval, service health monitoring, and agent tools.
 
 Orchestrates an autonomous coding pipeline: Linear ticket → triage → plan → step-by-step execution → verify → PR → review → done.
+
+## Architecture
+
+Mission Control runs as a **standalone HTTP service** (port 18790) independent of the OpenClaw gateway. OpenClaw connects via a thin proxy plugin — MC stays up even when the gateway restarts.
+
+```
+┌─────────────────────────────────────────────────────────────┐
+│ Mission Control (standalone, port 18790)                     │
+│  ├── SQLite (tasks, activities, deliverables, workspaces)    │
+│  ├── HTTP API (/ext/mission-control/api/*)                   │
+│  ├── Dashboard UI (/ext/mission-control/)                    │
+│  ├── Service Health Monitor                                  │
+│  └── Knowledge Review UI                                     │
+├─────────────────────────────────────────────────────────────┤
+│ Context Fabrica (PostgreSQL + pgvector)                      │
+│  ├── Knowledge records (218+ entries)                        │
+│  ├── Embeddings (3072-dim Gemini)                            │
+│  ├── Entity relations (645+ edges)                           │
+│  └── Graph-aware retrieval                                   │
+├─────────────────────────────────────────────────────────────┤
+│ OpenClaw Gateway (port 18789)                                │
+│  ├── Proxy plugin → MC API                                   │
+│  ├── mc_* agent tools                                        │
+│  ├── memory plugin → Context Fabrica                         │
+│  └── Slack / Telegram channels                               │
+└─────────────────────────────────────────────────────────────┘
+```
 
 ## How It Works
 
@@ -15,213 +42,128 @@ Linear Sync ─────────────────── pulls tick
   ▼
 Bridge (triage) ─────────────── asks codebase-aware questions,
   │                              self-answers from codebase when possible,
+  │                              extracts knowledge from ticket + Notion,
   │                              posts to Linear, waits for answers
   ▼
-Planner (Sonnet) ────────────── generates structured execution plan:
-  │                              numbered steps with dependencies,
-  │                              scoped files, done-when criteria,
-  │                              verification commands, parallel groups
-  ▼
-Dispatcher ──────────────────── walks the plan step-by-step:
-  │                              routes by category (deep/quick/test/review),
-  │                              dispatches parallel groups concurrently,
-  │                              chains dependent steps on prior branches
+Planner (Sonnet) ────────────── generates structured execution plan
   ▼
 Agent (Claude Code) ────────── works in git worktree with GSD:
   │                              /gsd:plan-phase → /gsd:execute-phase
   │                              → /gsd:verify-work (GUARDRAIL)
   ▼
-Self-Review (code-review-graph MCP)─ blast radius analysis,
-  │                              test coverage gap detection,
-  │                              fix issues, re-verify against plan
+Review Loop ─────────────────── self-review + codex review + re-verify
   ▼
-Codex Review (pre-PR) ─────── external review on branch diff,
-  │                              fix issues, re-verify against plan,
-  │                              max 3 iterations then escalate
+PR Created ─────────────────── GSD artifacts saved as deliverables,
+  │                              completion comment posted to Linear,
+  │                              knowledge distilled from artifacts
   ▼
-  ├─ if blocked ──────────────── posts to Linear, pauses agent,
-  │                              waits for human, resumes on reply
+Watch-PR-Reviews ────────────── polls GitHub for human review comments,
+  │                              relaunches agent on feedback
   ▼
-PR Created ─────────────────── only after GSD verify + review pass
-  │
-  ▼
-Watch-PR-Reviews ────────────── polls GitHub for human review comments
-  │                              and approvals, relaunches agent on feedback
-  ▼
-Linear Sync (done) ──────────── detects Linear ticket closed → marks
-                                 MC parent + children as done
+Done ────────────────────────── Linear sync detects completion
 ```
 
-### Orchestrator (Planner)
+## Knowledge System
 
-The orchestrator sits between triage and execution. For simple single-repo tasks, agents go direct to GSD. For complex multi-repo or multi-step work, the orchestrator decomposes the task into coordinated agent sessions. Inspired by [oh-my-openagent](https://github.com/code-yeongyu/oh-my-openagent)'s spec-driven approach.
+Knowledge is stored in **Context Fabrica** (PostgreSQL + pgvector), replacing the previous LanceDB backend. All knowledge consumers — OpenClaw chat, bridge triage, agent tools — read and write from the same database.
 
-**Key principle: the orchestrator defines WHAT, GSD defines HOW.** The orchestrator breaks work into steps with acceptance criteria. Each step agent runs the full GSD cycle internally (`/gsd:plan-phase` → `/gsd:execute-phase` → `/gsd:verify-work`). This creates a verifiable proof-of-work chain:
+### Knowledge Sources (Auto-Extraction)
 
-```
-Orchestrator Plan (plan.json)          ← what to achieve, in what order
-  └─ Step 1 Agent Session
-       ├─ GSD PLAN.md                  ← how the agent will implement it
-       ├─ GSD SUMMARY.md              ← what was actually done
-       ├─ GSD VERIFICATION.md         ← did it meet acceptance criteria
-       └─ git commits                  ← the actual code
-  └─ Step 2 Agent Session (branches from step 1)
-       ├─ GSD PLAN.md
-       ├─ GSD VERIFICATION.md
-       └─ git commits
-  └─ Orchestrator Verification         ← MiniMax checks agent output vs criteria
-  └─ PR Created                        ← final deliverable
-Progress Tracker (progress.json)       ← real-time status of every step
-```
+| Source | When | Stage | Trigger |
+|--------|------|-------|---------|
+| Codebase scanning | On-demand / every 10 min | staged | `mc-explore` CLI / repo-watcher |
+| Linear ticket descriptions | During triage | staged | Bridge auto-extract |
+| Notion page content | During triage | staged | Bridge auto-extract |
+| Task completion (GSD artifacts) | Task → review | canonical | Bridge + knowledge-distill |
+| Research Q&A | Research task done | canonical | linear-sync |
+| OpenClaw chat (Slack/Telegram) | User interaction | canonical | memory plugin |
+| Manual injection | Anytime | canonical | `mc_add_knowledge` tool / CLI |
+| Cross-repo architecture | On-demand | canonical | `mc-explore --cross-repo` |
 
-**When does orchestration activate?**
+### Knowledge Tiers
 
-| Scenario | Route |
-|----------|-------|
-| Single repo, clear requirements | Direct → GSD agent (no orchestrator overhead) |
-| Multi-repo task | Orchestrator → step per repo, ordered by data flow |
-| Complex task with sequential dependencies | Orchestrator → dependency-chained steps |
-| Investigation task | Direct → read-only agent (no plan needed) |
+- **Developer Notes** (human-injected, 1.5x scoring boost, always surface)
+- **Procedural Skills** (auto-created from complex tasks, full content injected)
+- **Atomic Facts** (auto-distilled one-liners, compact)
 
-The planner (Sonnet) evaluates every task and returns `needs_orchestration: true/false`. If false or single-step, it skips itself and dispatches directly.
+### Staged Review
 
-**Model allocation (all configurable via `swarm-config.json`):**
+Auto-extracted knowledge enters as `staged` and must be reviewed before it surfaces in agent recall. The MC dashboard includes a Knowledge Review panel for approving/rejecting staged entries.
 
-| Role | Default Model | Cost |
-|------|--------------|------|
-| Orchestration planning | Claude Sonnet (API) | ~$0.05-0.15/plan |
-| Step routing/classification | MiniMax M2.7 (Ollama) | Free |
-| Step verification | MiniMax M2.7 (Ollama) | Free |
-| Worker agents | Claude Code / Codex (subscription) | Free |
-| GSD planning (inside agent) | Agent's own model | Free (part of agent session) |
+### Entity Relations & Graph Scoring
 
-**Plan structure** (saved as JSON + markdown in `~/.openclaw/bridge/plans/`):
+Knowledge entries include entity relations (DEPENDS_ON, OWNS, CALLS, IMPLEMENTS, USES, etc.) stored in `memory_relations`. Query-time scoring blends:
+- **50% semantic** (BM25 + embedding similarity)
+- **30% graph** (entity relation proximity, multi-hop traversal)
+- **12% recency** (temporal freshness)
+- **8% confidence** (source credibility)
 
-```json
-{
-  "summary": "Add rate limiting across API gateway and client SDK",
-  "needs_orchestration": true,
-  "reasoning": "Cross-repo: API changes must land before client SDK update",
-  "steps": [
-    {
-      "step": 1,
-      "title": "Add rate limiting middleware to API gateway",
-      "repo": "acme/backend-api",
-      "description": "Add configurable rate limiter that returns 429 with Retry-After header",
-      "acceptance_criteria": [
-        "Rate limiter returns 429 after 100 req/s per client",
-        "Retry-After header set correctly",
-        "All existing tests pass"
-      ],
-      "verify_command": "npm test",
-      "depends_on": [],
-      "category": "deep"
-    },
-    {
-      "step": 2,
-      "title": "Update client SDK to handle 429 with backoff",
-      "repo": "acme/client-sdk",
-      "depends_on": [1],
-      "category": "deep",
-      "context_from_prior_steps": "API now returns 429 with Retry-After header"
-    }
-  ]
-}
+### Codebase Explorer
+
+```bash
+# Scan a repo, extract architectural knowledge
+mc-explore hivemapper/network
+
+# Focus on specific area
+mc-explore hivemapper/network --focus "API endpoints"
+
+# Monorepo — auto-detects packages
+mc-explore hivemapper/honey
+
+# Specific monorepo package
+mc-explore hivemapper/honey --package payment
+
+# Preview without storing
+mc-explore hivemapper/odc-api --dry-run
+
+# Trust mode — store as canonical (skip staged review)
+mc-explore hivemapper/odc-api --trust
 ```
 
-**Progress tracking** (`~/.openclaw/bridge/progress/{task-id}.json`):
-- Per-step status: pending → in_progress → completed/failed
-- Session resumption: bridge restarts pick up where they left off
-- Retry logic: failed verification retries up to 2x before escalating
-- Branch chaining: dependent steps branch from the prior step's branch (inheriting commits)
+### Repo Watcher
 
-**Configuration** (all models configurable via `swarm-config.json`):
+Background service (every 10 min) that detects code changes and incrementally updates knowledge:
+- Compares git SHAs, pulls latest, analyzes diffs
+- Extracts new architectural facts from changed files
+- Supersedes outdated knowledge (old records get `valid_to`, new records link via `supersedes`)
+- Skips non-architectural changes (lock files, tests, CI configs)
 
-```json
-{
-  "triage": {
-    "triage_model": "gemini-2.5-flash",
-    "triage_model_deep": "gemini-2.5-pro",
-    "embedding_model": "gemini-embedding-001"
-  },
-  "planner": {
-    "planning_model": "claude-sonnet-4-20250514",
-    "planning_provider": "anthropic",
-    "routing_model": "minimax-m2.7:cloud",
-    "routing_provider": "ollama",
-    "verification_model": "minimax-m2.7:cloud",
-    "verification_provider": "ollama",
-    "ollama_url": "http://localhost:11434",
-    "max_step_retries": 2,
-    "step_categories": {
-      "deep": { "agent": "claude" },
-      "quick": { "agent": "claude" },
-      "test": { "agent": "claude" },
-      "research": { "agent": "claude" },
-      "review": { "agent": "codex" }
-    }
-  }
-}
-```
+## Service Health Monitoring
 
-Supported providers: `anthropic`, `ollama`, `gemini`. Swap in your preferred models — use Gemini for planning to stay free, or route everything through Ollama.
+MC monitors 9 services with auto-refresh every 30s:
 
-Environment variables (`ANTHROPIC_API_KEY`, `GOOGLE_GENERATIVE_AI_API_KEY`, `OLLAMA_URL`) override config values. Set `ENABLE_PLANNER=0` to bypass the orchestrator entirely.
+| Service | Type | Purpose |
+|---------|------|---------|
+| Mission Control | HTTP (18790) | Task management, API, dashboard |
+| OpenClaw Gateway | HTTP (18789) | Agent communication, Slack/Telegram |
+| Bridge | launchd (60s) | Triage, planning, dispatch |
+| Linear Sync | launchd (300s) | Ticket sync from Linear |
+| Watch PR Reviews | launchd (120s) | GitHub review comment detection |
+| Review PRs | launchd | PR review orchestration |
+| Check Agents | launchd (120s) | Agent health, tmux validation |
+| Repo Watcher | launchd (600s) | Codebase knowledge updates |
+| PostgreSQL | pg_isready | Context Fabrica database |
 
-### Review Loop (Ralph Loop)
+Health API: `GET /ext/mission-control/api/services/health`
 
-Each agent runs a review loop before creating a PR. GSD verification is the **source of truth** — review feedback must not break the original acceptance criteria.
+Auto-restart: MC uses `KeepAlive: true` in launchd. Bridge uses `KeepAlive.SuccessfulExit: false` (restart on crash, not on normal exit). Health monitor script alerts via Telegram/Slack after 2+ consecutive failures.
 
-```
-GSD plan → execute → verify (GUARDRAIL) ──── must pass to proceed
-  ↓
-Self-review (code-review-graph MCP) ──────── blast radius, test gaps
-  ↓ fix issues
-Re-verify (GUARDRAIL) ───────────────────── fixes must not break plan
-  ↓
-Codex review (pre-PR, on branch diff) ───── bugs, security, patterns
-  ↓ fix issues
-Re-verify (GUARDRAIL) ───────────────────── fixes must not break plan
-  ↓
-  ├── PASS → Create PR
-  ├── FAIL (iteration < 3) → loop back to fix
-  └── FAIL (iteration >= 3) → escalate to human
-```
+## Dashboard
 
-**Code-review-graph** ([tirth8205/code-review-graph](https://github.com/tirth8205/code-review-graph)) provides MCP tools for blast radius analysis and test coverage detection. Automatically configured in agent worktrees via `.mcp.json`. Uses Tree-sitter to build a dependency graph (CALLS, IMPORTS, INHERITS, TESTED_BY edges) and computes which callers, dependents, and tests are affected by changes.
+The command center dashboard (`http://localhost:18790/ext/mission-control/`) provides:
 
-**Human escalation**: When an agent is blocked (conflicting review feedback, missing access, design decisions), it posts `activity_type: needs_human` to Mission Control. The bridge detects this, moves the task to `planning`, posts to Linear, and waits. When the human replies, the bridge resumes the agent with the answer.
-
-### Dashboard
-
-The command center dashboard (`/ext/mission-control/`) provides real-time visibility:
-
+- **Services panel** — real-time health of all 9 services with status badges
 - **Pipeline bar** — INTAKE → TRIAGE → DISPATCH → SWARM OPS → REVIEW → COMPLETE
-- **Telemetry strip** — Swarm pressure (agent slots), active agents, 24h throughput, CPU/memory, last event
-- **Task card grid** — 3-4 cards per row with status badges, agent indicators, milestone progress, priority highlights
-- **Process graph** — Collapsible node graph showing parent → child task hierarchy with horizontal lifecycle timelines per child (PROMPT → SPAWN → REVIEW → PR FEEDBACK → LINEAR DONE)
-- **Task drawer** — Click any card for full details: description, triage Q&A, agent info, activity log with expandable prompts
+- **Task card grid** — status badges, agent indicators, priority highlights
+- **Task drawer** — description, triage Q&A, deliverables (PLAN.md, VERIFICATION.md), activity log
+- **Knowledge panel** — Browse/Review/Canonical tabs, approve/reject staged entries
+- **System stats** — CPU, memory, agent concurrency
 
-### Agent Tools
+## API Endpoints
 
-Agents interact with Mission Control through registered tools:
+All endpoints served under `/ext/mission-control/api/`:
 
-| Tool | Description |
-|------|-------------|
-| `mc_create_task` | Create a new task with title, description, priority |
-| `mc_list_tasks` | List tasks with optional status/workspace filters |
-| `mc_update_task` | Update task status, priority, description, assignment |
-| `mc_delete_task` | Remove a task |
-| `mc_log_activity` | Log an activity entry on a task |
-| `mc_list_workspaces` | List available workspaces |
-| `mc_create_workspace` | Create a new workspace |
-| `mc_add_knowledge` | Store developer knowledge (branch rules, conventions, gotchas) |
-| `mc_list_knowledge` | List stored knowledge entries by repo/project scope |
-
-### API Endpoints
-
-All endpoints are served under `/ext/mission-control/api/`:
-
+### Tasks
 | Method | Endpoint | Description |
 |--------|----------|-------------|
 | GET | `/tasks` | List tasks (query: `status`, `workspace_id`, `assigned_agent_id`) |
@@ -231,233 +173,156 @@ All endpoints are served under `/ext/mission-control/api/`:
 | DELETE | `/tasks/:id` | Delete task |
 | GET | `/tasks/:id/activities` | List task activities |
 | POST | `/tasks/:id/activities` | Log activity |
-| GET | `/tasks/:id/deliverables` | List task deliverables |
+| GET | `/tasks/:id/deliverables` | List task deliverables (GSD artifacts) |
 | POST | `/tasks/:id/deliverables` | Add deliverable |
-| GET | `/tasks/:id/triage` | Get triage state |
-| PUT | `/tasks/:id/triage` | Replace triage state |
-| PATCH | `/tasks/:id/triage` | Merge-update triage state |
-| POST | `/tasks/:id/status` | Transition task status with event logging |
+
+### Knowledge
+| Method | Endpoint | Description |
+|--------|----------|-------------|
+| GET | `/knowledge` | List entries (query: `stage`, `project`, `repo`, `scope`, `limit`) |
+| POST | `/knowledge` | Add knowledge entry |
+| DELETE | `/knowledge/:id` | Delete entry |
+| POST | `/knowledge/:id/promote` | Promote staged → canonical |
+| POST | `/knowledge/:id/reject` | Reject (delete) staged entry |
+| PATCH | `/knowledge/:id` | Update entry text/domain |
+
+### Services
+| Method | Endpoint | Description |
+|--------|----------|-------------|
+| GET | `/services/health` | Health status of all services |
+
+### Other
+| Method | Endpoint | Description |
+|--------|----------|-------------|
 | GET | `/agents` | List agents |
-| POST | `/agents` | Create agent |
-| GET | `/agents/:id` | Get agent |
-| PATCH | `/agents/:id` | Update agent |
-| DELETE | `/agents/:id` | Delete agent |
+| GET | `/agent-status` | Live agent status with tmux detection |
 | GET | `/workspaces` | List workspaces |
-| POST | `/workspaces` | Create workspace |
-| GET | `/workspaces/:id` | Get workspace |
-| PATCH | `/workspaces/:id` | Update workspace |
-| DELETE | `/workspaces/:id` | Delete workspace |
-| GET | `/events` | List events (query: `since`, `limit`) |
-| POST | `/events` | Create event |
-| GET | `/sessions` | List sessions |
-| POST | `/sessions` | Create session |
-| GET | `/agent-status` | Live agent status with tmux session detection |
-| GET | `/system-stats` | CPU load, memory usage, concurrency limits |
-| GET | `/knowledge` | List knowledge entries (query: `project`, `repo`, `scope`, `limit`) |
-| POST | `/knowledge` | Add knowledge entry (`text`, `project`, `repo`, `importance`, `category`) |
-| DELETE | `/knowledge/:id` | Delete knowledge entry |
+| GET | `/board` | Dashboard board data |
+| GET | `/system-stats` | CPU, memory, concurrency |
 
 ## Setup
 
 ### Prerequisites
 
-- [OpenClaw](https://github.com/openclaw-ai/openclaw) gateway running locally
-- Node.js 20+
-- SQLite (bundled via `better-sqlite3`)
+- Node.js 20+ with tsx
+- PostgreSQL 17 with pgvector extension
+- Python 3.12+ with context-fabrica installed
+- OpenClaw gateway (optional, for Slack/Telegram integration)
 
 ### Install
 
 ```bash
-# Clone into your OpenClaw plugins directory
+# Clone
 cd ~/GitProjects/openclaw-plugins
-git clone https://github.com/your-org/mission-control.git
+git clone https://github.com/jimmdd/mission-control.git
 cd mission-control
 npm install
 
-# Verify TypeScript compiles
-npm run build
+# Set up PostgreSQL
+brew install postgresql@17 pgvector
+brew services start postgresql@17
+createdb context_fabrica
+psql -d context_fabrica -c "CREATE EXTENSION IF NOT EXISTS vector;"
+
+# Install context-fabrica
+pip install context-fabrica
+python -m context_fabrica.bootstrap_cli --dsn "postgresql://$(whoami)@localhost/context_fabrica"
+
+# Configure environment
+cat >> ~/.openclaw/.env << 'EOF'
+CONTEXT_FABRICA_DSN=postgresql://$(whoami)@localhost/context_fabrica
+GOOGLE_GENERATIVE_AI_API_KEY=your-gemini-key
+ANTHROPIC_API_KEY=your-anthropic-key
+MISSION_CONTROL_URL=http://127.0.0.1:18790/ext/mission-control
+EOF
 ```
 
-### Register with OpenClaw
-
-Add to your OpenClaw gateway config (`~/.openclaw/config.yaml`):
-
-```yaml
-plugins:
-  - path: ~/GitProjects/openclaw-plugins/mission-control
-    config:
-      dbPath: ~/.openclaw/mission-control/mc.db
-```
-
-Restart the gateway:
+### Start Standalone Service
 
 ```bash
-launchctl kickstart -k gui/$(id -u)/ai.openclaw.gateway
+# Start MC
+npm start
+# Or via launchd (auto-restart on crash):
+launchctl load ~/Library/LaunchAgents/ai.openclaw.mission-control.plist
+
+# Verify
+curl http://localhost:18790/health
+open http://localhost:18790/ext/mission-control/
 ```
 
-### Verify
+### Register with OpenClaw (optional)
+
+The plugin proxies to the standalone MC service. Set `dbPath` to the PostgreSQL DSN:
+
+```json
+{
+  "plugins": {
+    "entries": {
+      "mission-control": {
+        "config": {
+          "dbPath": "postgresql://user@localhost/context_fabrica"
+        }
+      }
+    }
+  }
+}
+```
+
+### Initial Knowledge Extraction
 
 ```bash
-# Dashboard should load at:
-open http://localhost:18789/ext/mission-control/
+# Scan all repos
+for repo in $(ls ~/GitProjects/hivemapper/); do
+  mc-explore hivemapper/$repo
+done
 
-# API should respond:
-curl http://localhost:18789/ext/mission-control/api/tasks
+# Review staged entries in the dashboard
+open http://localhost:18790/ext/mission-control/
 ```
-
-## Memory & Knowledge Integration
-
-Mission Control integrates with [claw-memory-ultra](https://github.com/jimmdd/claw-memory-ultra) (LanceDB-backed vector memory) to give agents context about repositories they're working on.
-
-### Three Knowledge Tiers
-
-Knowledge is stored in LanceDB with Gemini embeddings and retrieved via similarity search, scoped per repo/project.
-
-**Tier 1 — Developer Notes** (human-injected, always surface with priority boost):
-```
-## Developer Notes (MUST FOLLOW)
-- (repo:acme/firmware) Production branch is main. Feature
-  branches from main or release-candidate. Only modify src/drivers.
-```
-
-**Tier 2 — Procedural Skills** (auto-created from complex tasks, full content injected):
-```
-# Skill: Adding API endpoints to odc-api
-Domain: api
-
-Add new REST endpoints following the existing pattern.
-
-## Steps
-1. Define route in src/routes/ following existing naming convention
-2. Add validation schema in src/schemas/ using Zod
-3. Add handler in src/handlers/ — use existing DB helpers, don't raw-query
-4. Register route in src/app.ts
-5. Run tests: `npm test -- --grep "api"`
-
-## Pitfalls
-- DB migrations must run first: `npm run migrate:test`
-- The CI runs on Node 18 — avoid Node 20 APIs
-- Rate limiter is applied globally; test with `X-Test-Bypass: true` header
-
-## Verification
-- `npm test` exits 0
-- `tsc --noEmit` exits 0
-- New endpoint responds with correct status codes
-```
-
-**Tier 3 — Atomic Facts** (auto-distilled one-liners, compact):
-```
-## Past Learnings (REFERENCE)
-- [fact] (repo:acme/backend-api) Tests require NODE_ENV=test
-- [decision] (repo:acme/network) Config loader reads from /etc/bee/config.json
-```
-
-### Skill Auto-Creation
-
-Skills are automatically created when a completed task shows complexity signals:
-- **5+ commits** — multi-step work worth documenting
-- **4+ files changed** — broad impact across the codebase
-- **Error recovery detected** — retry, fix, revert keywords in artifacts (hard-won knowledge)
-
-When a skill already exists for the same repo+domain, it gets **patched** (merged with new learnings) rather than replaced. Over time, skills become battle-tested procedures.
-
-### Progressive Disclosure
-
-Token-efficient retrieval with three levels:
-1. **Metadata scan** — titles and domains loaded first (~3k tokens)
-2. **Full content** — top 3 matching skills loaded in full
-3. **Overflow summary** — remaining skills show title + summary + char count
-
-### Feedback Loop (Knowledge Lineage)
-
-Each knowledge entry tracks:
-- `recall_count` — how many times it was retrieved for a task
-- `helped_count` — how many of those tasks succeeded
-- `task_outcome` — whether the originating task succeeded or failed
-
-During retrieval, entries with high help ratios (helped/recalled) get a scoring boost. Knowledge that consistently helps gets surfaced more; knowledge that doesn't help naturally decays in relevance.
-
-```
-knowledge-feedback.py --task-id TASK_ID --outcome success   # boost entries that helped
-knowledge-feedback.py --entry-id ENTRY_ID --action recall   # track individual recall
-```
-
-### Knowledge Sources
-
-Knowledge can be added through:
-- **Auto-distillation** — `knowledge-distill.py` runs after each task, producing skills or facts
-- **Dashboard** — Knowledge Base panel with scope picker and text input
-- **Gateway chat** — Agent calls `mc_add_knowledge` tool
-- **REST API** — `POST /ext/mission-control/api/knowledge`
-- **CLI** — `python3 ~/.openclaw/swarm/knowledge-manage.py inject --text "..." --project X --repo Y`
-
-## Swarm Infrastructure
-
-Mission Control is the central hub. The surrounding scripts live in `~/.openclaw/swarm/`:
-
-| Component | Script | Interval | Purpose |
-|-----------|--------|----------|---------|
-| Linear Sync | `linear-sync.py` | 300s | Sync tickets from Linear, detect done state |
-| Bridge | `bridge.py` | 60s | Triage tasks, plan, dispatch steps, handle Q&A |
-| Planner | `planner.py` | On-demand | Generate structured plans (Sonnet), verify steps (MiniMax) |
-| Agent Monitor | `check-agents.sh` | 120s | Health checks, Codex reviews, retry logic |
-| PR Watcher | `watch-pr-reviews.sh` | 120s | Detect GitHub review comments and approvals |
-| Agent Launcher | `run-claude.sh` | On-demand | Launch Claude with prompt, retry, cost controls |
-| Spawn Script | `spawn-agent.sh` | On-demand | Create worktree, register agent, start tmux |
-| Knowledge Manager | `knowledge-manage.py` | On-demand | Inject/list/delete knowledge entries in LanceDB |
-| Knowledge Distiller | `knowledge-distill.py` | On-demand | Extract skills + facts from completed tasks into LanceDB |
-| Knowledge Feedback | `knowledge-feedback.py` | On-demand | Track recall/helped counts for knowledge quality scoring |
-| Pre-Review | `pre-review.sh` | On-demand | Run Codex review on branch diff before PR creation |
-
-All scripts live in `swarm/` and are deployed to `~/.openclaw/swarm/` (or `bridge/`, `sync/`). Copy `swarm-config.example.json` to `~/.openclaw/swarm/swarm-config.json` and fill in your org/repo details.
-
-### Concurrency
-
-Configurable via environment variables:
-
-| Variable | Default | Description |
-|----------|---------|-------------|
-| `MAX_CLAUDE_AGENTS` | 10 | Max concurrent Claude Code agents |
-| `MAX_CODEX_AGENTS` | 3 | Max concurrent Codex agents (fallback) |
-
-Agents run in tmux sessions for isolation. Each agent gets its own git worktree. When Claude slots are full, new tasks fall back to Codex.
 
 ## Project Structure
 
 ```
 mission-control/
-├── index.ts                         # Plugin entry point
+├── server.ts                        # Standalone HTTP server entry point
+├── index.ts                         # OpenClaw plugin (thin proxy to standalone MC)
 ├── openclaw.plugin.json             # Plugin manifest
 ├── package.json
-├── tsconfig.json
 ├── public/
-│   ├── index.html                   # Dashboard (command center)
-│   └── space.html                   # Space page (operational/read-only view)
+│   ├── index.html                   # Dashboard (services, tasks, knowledge review)
+│   └── space.html                   # Space page (operational view)
 ├── src/
 │   ├── db.ts                        # SQLite schema, CRUD operations
 │   ├── routes.ts                    # HTTP API + dashboard serving
-│   ├── tools.ts                     # Agent-callable tools
-│   └── shims.d.ts                   # Type shims
+│   └── tools.ts                     # Agent-callable tools (proxy to MC API)
+├── health/
+│   ├── service-health.py            # Service health checker (9 services)
+│   └── mc-health-check.sh           # Health monitor with alerting
 └── swarm/                           # Orchestration scripts
-    ├── swarm-config.example.json    # Example config (copy to ~/.openclaw/swarm/)
     ├── bridge.py                    # Triage, plan, dispatch, Q&A loop
-    ├── planner.py                   # Orchestrator (Sonnet planning, MiniMax verification)
-    ├── linear-sync.py               # Linear ticket ingestion + completion sync
-    ├── spawn-agent.sh               # Create worktree, register agent, start tmux
-    ├── run-claude.sh                # Launch Claude Code agent with retry/budget
-    ├── run-codex.sh                 # Launch Codex agent (fallback)
-    ├── check-agents.sh              # Health monitor, review orchestration
-    ├── watch-pr-reviews.sh          # Poll GitHub for review comments
-    ├── review-prs.sh                # PR review orchestration
-    ├── pre-review.sh                # Pre-PR Codex review on branch diff
+    ├── linear-sync.py               # Linear ticket sync + research distillation
+    ├── knowledge-manage.py          # Knowledge CRUD via context-fabrica
     ├── knowledge-distill.py         # Extract skills + facts from completed tasks
+    ├── knowledge-review.py          # Review staged knowledge (promote/reject)
     ├── knowledge-feedback.py        # Track recall/helped counts
-    ├── knowledge-manage.py          # CLI for knowledge CRUD
-    ├── swarm-state.py               # State tracking and snapshots
-    ├── status.sh                    # Swarm health report
-    ├── cleanup-worktrees.sh         # Clean stale git worktrees
-    └── research-agent.sh            # Research task launcher
+    ├── mc-explore.py                # Codebase knowledge extractor CLI
+    ├── mc_explore_common.py         # Shared utilities for explore + watcher
+    ├── repo-watcher.py              # Background repo change → knowledge updater
+    ├── repo-watcher-precheck.sh     # SHA comparison precheck (zero tokens)
+    ├── watch-pr-reviews.sh          # GitHub PR review comment detection
+    ├── check-agents.sh              # Agent health monitor
+    ├── spawn-agent.sh               # Create worktree, register agent, start tmux
+    ├── run-claude.sh                # Launch Claude Code agent
+    └── run-codex.sh                 # Launch Codex agent (fallback)
 ```
+
+## Dependencies
+
+- **[context-fabrica](https://github.com/jimmdd/context-fabrica)** — Knowledge storage (PostgreSQL + pgvector + entity relations)
+- **[OpenClaw](https://github.com/openclaw-ai/openclaw)** — Agent gateway (optional, for Slack/Telegram/tool registration)
+- **better-sqlite3** — Task database
+- **Gemini API** — Embeddings (gemini-embedding-001) + knowledge extraction (gemini-2.5-flash)
+- **Anthropic API** — Agent model (claude-sonnet-4-6) + planning
 
 ## License
 

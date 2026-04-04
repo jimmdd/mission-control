@@ -754,10 +754,10 @@ echo "$RUNNING_IDS" | while read -r TASK_ID; do
     linear_post_completion "$MC_TASK_ID" "$PR_URL" "$summary_text"
   fi
 
-  # Distill knowledge from task artifacts into shared LanceDB
+  # Distill knowledge from task artifacts into Context Fabrica
   if [ -f "$SWARM_DIR/knowledge-distill.py" ]; then
     echo "[$TIMESTAMP] DISTILL: $TASK_ID — extracting knowledge..." >> "$LOG"
-    python3 "$SWARM_DIR/knowledge-distill.py" \
+    "$HOME/.openclaw/venv-3.12/bin/python3" "$SWARM_DIR/knowledge-distill.py" \
       --task-id "$TASK_ID" \
       --repo "$REPO" \
       --branch "$BRANCH" \

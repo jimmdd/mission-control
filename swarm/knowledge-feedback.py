@@ -1,14 +1,13 @@
-#!/usr/bin/env python3
+#!/Users/mm/.openclaw/venv-3.12/bin/python3
 """
 Knowledge Feedback — Track whether recalled knowledge helped downstream tasks.
 
-Called after a task completes to update the recall_count and helped_count
-of knowledge entries that were injected into the agent's prompt.
+Called after a task completes to update outcome tracking in Context Fabrica.
 
 This creates a feedback loop:
   - Knowledge recalled → injected into prompt → task succeeds/fails
-  - Successful tasks boost helped_count → future recall scoring weights these higher
-  - Failed tasks don't boost → entries that don't help naturally decay in relevance
+  - Successful tasks record positive outcomes → future recall scoring weights these higher
+  - Failed tasks record negative outcomes → entries that don't help naturally decay
 
 Usage:
   python3 knowledge-feedback.py --task-id TASK_ID --outcome success|failure
@@ -21,14 +20,14 @@ import json
 import logging
 import os
 import sys
-import time
 from pathlib import Path
 from typing import List
 
-import lancedb
+from context_fabrica.storage import PostgresPgvectorAdapter
+from context_fabrica.config import PostgresSettings
 
-LANCEDB_PATH = os.path.expanduser("~/.openclaw/memory/lancedb-pro")
-MC_BASE_URL = os.environ.get("MISSION_CONTROL_URL", "http://localhost:18789/ext/mission-control")
+CONTEXT_FABRICA_DSN = os.environ.get("CONTEXT_FABRICA_DSN", "postgresql://mm@localhost/context_fabrica")
+EMBEDDING_DIM = 3072
 
 logging.basicConfig(
     level=logging.INFO,
@@ -48,42 +47,39 @@ def _load_env():
                     os.environ[key.strip()] = value.strip()
 
 
-def get_table():
-    db = lancedb.connect(LANCEDB_PATH)
-    return db.open_table("memories")
+def _make_adapter() -> PostgresPgvectorAdapter:
+    return PostgresPgvectorAdapter.from_dsn(CONTEXT_FABRICA_DSN, embedding_dimensions=EMBEDDING_DIM)
 
 
 def increment_metadata_counter(entry_id: str, counter: str):
-    """Increment a counter in an entry's metadata JSON.
-
-    LanceDB doesn't support in-place updates, so we read-delete-reinsert.
-    """
+    """Increment a counter in a record's metadata via Context Fabrica."""
     try:
-        table = get_table()
-        results = table.search().where(f"id = '{entry_id}'").limit(1).to_list()
-        if not results:
+        adapter = _make_adapter()
+        record = adapter.fetch_record(entry_id)
+        if not record:
             logging.warning(f"Entry {entry_id[:8]} not found")
             return
 
-        row = results[0]
-        meta = json.loads(row.get("metadata", "{}") or "{}")
+        meta = record.metadata if isinstance(record.metadata, dict) else {}
         meta[counter] = meta.get(counter, 0) + 1
-        meta["last_feedback_at"] = int(time.time() * 1000)
 
-        # Delete and reinsert with updated metadata
-        table.delete(f"id = '{entry_id}'")
+        # Update via direct SQL (metadata is JSONB in postgres)
+        schema = adapter.settings.schema
+        with adapter.connect() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    f"UPDATE {schema}.memory_records SET metadata = %s WHERE record_id = %s",
+                    (json.dumps(meta), entry_id),
+                )
+            conn.commit()
 
-        updated_row = {
-            "id": row["id"],
-            "text": row["text"],
-            "vector": row["vector"],
-            "category": row["category"],
-            "scope": row["scope"],
-            "importance": row["importance"],
-            "timestamp": row["timestamp"],
-            "metadata": json.dumps(meta),
-        }
-        table.add([updated_row])
+        # Also record outcome for the feedback loop
+        outcome = "useful" if counter == "helped_count" else "recalled"
+        try:
+            adapter.record_outcome(entry_id, query_text="", outcome=outcome)
+        except Exception:
+            pass
+
         logging.info(f"  Updated {entry_id[:8]}: {counter}={meta[counter]}")
 
     except Exception as e:
@@ -105,23 +101,22 @@ def mark_helped(entry_ids: List[str]):
 def process_task_outcome(task_id: str, outcome: str):
     """Find all entries recalled for a task and update their feedback counters."""
     try:
-        table = get_table()
-        # Find entries that were recalled for this task
-        # These are tracked via the recall_log in metadata
-        results = table.search().limit(1000).to_list()
+        adapter = _make_adapter()
+        # Search for entries that were recalled for this task via metadata
+        schema = adapter.settings.schema
+        with adapter.connect() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    f"""SELECT record_id FROM {schema}.memory_records
+                        WHERE metadata->>'recalled_for_tasks' LIKE %s""",
+                    (f"%{task_id}%",),
+                )
+                rows = cur.fetchall()
     except Exception as e:
         logging.error(f"Failed to search for recalled entries: {e}")
         return
 
-    matched = []
-    for row in results:
-        try:
-            meta = json.loads(row.get("metadata", "{}") or "{}")
-            recalled_for = meta.get("recalled_for_tasks", [])
-            if task_id in recalled_for:
-                matched.append(row["id"])
-        except (json.JSONDecodeError, TypeError):
-            continue
+    matched = [row[0] for row in rows]
 
     if not matched:
         logging.info(f"No entries found that were recalled for task {task_id[:8]}")

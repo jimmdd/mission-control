@@ -15,7 +15,7 @@ export type TaskStatus =
   | "on_hold"
   | "done";
 export type TaskPriority = "low" | "normal" | "high" | "urgent";
-export type TaskType = "implementation" | "investigation";
+export type TaskType = "implementation" | "investigation" | "research";
 
 export interface WorkspaceRecord {
   id: string;
@@ -278,7 +278,7 @@ CREATE TABLE IF NOT EXISTS tasks (
   external_id TEXT,
   external_url TEXT,
   source TEXT DEFAULT 'manual',
-  task_type TEXT DEFAULT 'implementation' CHECK (task_type IN ('implementation', 'investigation')),
+  task_type TEXT DEFAULT 'implementation' CHECK (task_type IN ('implementation', 'investigation', 'research')),
   triage_state TEXT,
   created_at TEXT DEFAULT (datetime('now')),
   updated_at TEXT DEFAULT (datetime('now'))
@@ -430,9 +430,50 @@ export class MissionControlDB {
     const row = this.db
       .prepare("SELECT sql FROM sqlite_master WHERE type='table' AND name='tasks'")
       .get() as { sql: string } | undefined;
-    if (!row || row.sql.includes("task_type")) return;
+    if (!row) return;
+    if (!row.sql.includes("task_type")) {
+      this.db.exec(`ALTER TABLE tasks ADD COLUMN task_type TEXT DEFAULT 'implementation' CHECK (task_type IN ('implementation', 'investigation', 'research'))`);
+      return;
+    }
+    if (row.sql.includes("'research'")) return;
 
-    this.db.exec(`ALTER TABLE tasks ADD COLUMN task_type TEXT DEFAULT 'implementation' CHECK (task_type IN ('implementation', 'investigation'))`);
+    this.db.exec(`
+      PRAGMA foreign_keys = OFF;
+      BEGIN;
+      CREATE TABLE tasks_task_type_migrated (
+        id TEXT PRIMARY KEY,
+        title TEXT NOT NULL,
+        description TEXT,
+        status TEXT DEFAULT 'inbox' CHECK (status IN ('pending_dispatch', 'planning', 'inbox', 'assigned', 'in_progress', 'testing', 'review', 'on_hold', 'done')),
+        priority TEXT DEFAULT 'normal' CHECK (priority IN ('low', 'normal', 'high', 'urgent')),
+        assigned_agent_id TEXT REFERENCES agents(id) ON DELETE SET NULL,
+        created_by_agent_id TEXT REFERENCES agents(id) ON DELETE SET NULL,
+        workspace_id TEXT DEFAULT 'default' REFERENCES workspaces(id),
+        due_date TEXT,
+        parent_task_id TEXT REFERENCES tasks(id),
+        external_id TEXT,
+        external_url TEXT,
+        source TEXT DEFAULT 'manual',
+        task_type TEXT DEFAULT 'implementation' CHECK (task_type IN ('implementation', 'investigation', 'research')),
+        triage_state TEXT,
+        created_at TEXT DEFAULT (datetime('now')),
+        updated_at TEXT DEFAULT (datetime('now'))
+      );
+      INSERT INTO tasks_task_type_migrated(
+        id, title, description, status, priority, assigned_agent_id, created_by_agent_id,
+        workspace_id, due_date, parent_task_id, external_id, external_url,
+        source, task_type, triage_state, created_at, updated_at
+      )
+      SELECT
+        id, title, description, status, priority, assigned_agent_id, created_by_agent_id,
+        workspace_id, due_date, parent_task_id, external_id, external_url,
+        source, task_type, triage_state, created_at, updated_at
+      FROM tasks;
+      DROP TABLE tasks;
+      ALTER TABLE tasks_task_type_migrated RENAME TO tasks;
+      COMMIT;
+      PRAGMA foreign_keys = ON;
+    `);
   }
 
   private migrateTaskStatus(): void {
