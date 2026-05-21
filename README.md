@@ -250,6 +250,33 @@ curl http://localhost:18790/health
 open http://localhost:18790/ext/mission-control/
 ```
 
+### CLI Usage
+
+Mission Control now ships with a terminal CLI that talks to the same standalone HTTP API as the dashboard.
+
+```bash
+# Run via npm
+npm run mc -- tasks list --status inbox
+
+# Or use the local launcher directly
+./mc tasks create --title "[CAP-99] Fix auth bug" --description "Handle expired sessions" --priority high
+
+# Interactive mode for common write flows
+./mc tasks create --interactive
+./mc workspaces create --interactive
+./mc knowledge add --interactive
+
+# Useful commands
+./mc tasks get <task-id>
+./mc tasks activities <task-id>
+./mc knowledge list --project myorg --repo backend-api
+./mc services health
+./mc board --json
+```
+
+The CLI uses `MISSION_CONTROL_URL` if set, otherwise defaults to `http://127.0.0.1:18790`.
+It also supports friendlier terminal output for tasks, activities, deliverables, board, services, and system stats; add `--json` any time you want the raw API payload instead.
+
 ### Register with OpenClaw (optional)
 
 The plugin proxies to the standalone MC service. Set `dbPath` to the PostgreSQL DSN:
