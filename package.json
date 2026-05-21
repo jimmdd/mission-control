@@ -4,6 +4,9 @@
   "description": "OpenClaw plugin: Agent task management with SQLite, workspaces, and triage workflows",
   "type": "module",
   "main": "index.ts",
+  "bin": {
+    "mc": "./mc"
+  },
   "openclaw": {
     "extensions": [
       "./index.ts"
@@ -24,11 +27,13 @@
   ],
   "scripts": {
     "build": "tsc --noEmit",
-    "start": "npx tsx server.ts"
+    "start": "npx tsx server.ts",
+    "mc": "tsx src/cli.ts"
   },
   "dependencies": {
     "better-sqlite3": "^12.6.2",
-    "@sinclair/typebox": "0.34.48"
+    "@sinclair/typebox": "0.34.48",
+    "tsx": "^4.19.4"
   },
   "devDependencies": {
     "@types/better-sqlite3": "^7.6.12",
