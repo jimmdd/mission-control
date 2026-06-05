@@ -39,7 +39,7 @@ It is built for teams running real coding agents, not just prompt demos.
   - Context Fabrica-backed storage for notes, facts, and procedural skills
   - repo exploration and distilled learnings from completed work
 - **Review loop support**
-  - verification artifacts
+  - GSD Core planning and verification artifacts
   - PR-aware orchestration for local swarm runtime
 - **Standalone-first architecture**
   - external ticketing, PR sync, and gateway/chat systems live under `integrations/`
@@ -82,6 +82,7 @@ Mission Control runs as a standalone service on port `18790` by default.
 ├─────────────────────────────────────────────────────────────┤
 │ Local swarm runtime                                         │
 │  ├── planner / bridge                                       │
+│  ├── GSD Core backend adapter                               │
 │  ├── tmux agent sessions                                    │
 │  ├── repo watcher                                           │
 │  └── worktrees, prompts, progress, review loops             │
@@ -107,7 +108,7 @@ Planner creates structured execution plan
   ↓
 Agent runtime executes in isolated worktree
   ↓
-Verification + review loop
+GSD Core verification + review loop
   ↓
 Artifacts stored as deliverables
   ↓
@@ -262,9 +263,45 @@ If you already have `pi` installed, Mission Control can use it out of the box as
 
 ---
 
+## GSD backend
+
+Mission Control currently targets **GSD Core** through a small backend adapter in `swarm/gsd_backend.py`.
+
+Supported backend:
+
+```bash
+MISSION_CONTROL_GSD_BACKEND=core
+```
+
+In `core` mode, Mission Control prompts agents to use the maintained `@opengsd/gsd-core` command surface:
+
+- `/gsd:plan-phase --prd`
+- `/gsd:execute-phase`
+- `/gsd:verify-work`
+- `/gsd:plan-phase --gaps`
+- `/gsd:new-project --auto` for greenfield work
+
+The monitor and knowledge distiller expect GSD Core artifacts under `.planning/`, especially:
+
+- `.planning/phases/*/*-PLAN.md`
+- `.planning/phases/*/*-VERIFICATION.md`
+- `.planning/SUMMARY.md`
+
+If `MISSION_CONTROL_GSD_BACKEND` is set to anything other than `core`, the monitor fails closed instead of pretending the artifacts are valid. This leaves a clean path for a future `gsd-pi` adapter, which will need to read `.gsd` state and use Pi's command/runtime model rather than GSD Core's `.planning` files.
+
+---
+
 ## Knowledge system
 
 Mission Control uses **Context Fabrica** for durable operational memory.
+
+Mission Control uses the installed `context-fabrica` package directly, but it defaults to a separate Postgres schema:
+
+```bash
+CONTEXT_FABRICA_SCHEMA=mission_control
+```
+
+This avoids clobbering an existing Context Fabrica installation. Mission Control's knowledge flow uses Gemini 3072-dimension embeddings, so sharing the default Context Fabrica schema with a different embedding dimension can create pgvector dimension conflicts.
 
 ### Knowledge sources
 
@@ -390,6 +427,11 @@ mission-control/
 │   └── routes.ts
 ├── health/
 ├── swarm/
+│   ├── gsd_backend.py
+│   ├── context_fabrica_config.py
+│   ├── bridge.py
+│   ├── planner.py
+│   └── check-agents.sh
 └── integrations/
     ├── github/
     ├── linear/
@@ -404,6 +446,8 @@ mission-control/
 - CLI
 - local swarm orchestration
 - Context Fabrica integration
+- GSD Core backend adapter
+- task artifact harvesting and knowledge distillation
 
 **Integrations**
 - issue trackers
@@ -435,7 +479,8 @@ These can create tasks, sync comments, or react to review events, but the intern
 
 ## Dependencies
 
-- **[context-fabrica](https://github.com/jimmdd/context-fabrica)** — knowledge storage and retrieval
+- **[context-fabrica](https://github.com/TaskForest/context-fabrica)** — knowledge storage and retrieval
+- **[@opengsd/gsd-core](https://github.com/open-gsd/gsd-core)** — current GSD planning and verification backend
 - **better-sqlite3** — local task database
 - **Gemini API** — embeddings and knowledge extraction
 - **Anthropic API** — planning and agent support
