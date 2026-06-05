@@ -1,0 +1,24 @@
+{
+  "id": "mission-control",
+  "name": "Mission Control",
+  "description": "Optional OpenClaw proxy for the standalone Mission Control service",
+  "version": "1.0.0",
+  "configSchema": {
+    "type": "object",
+    "additionalProperties": false,
+    "properties": {
+      "serviceUrl": {
+        "type": "string",
+        "default": "http://127.0.0.1:18790",
+        "description": "Base URL for the standalone Mission Control service"
+      }
+    }
+  },
+  "uiHints": {
+    "serviceUrl": {
+      "label": "Mission Control URL",
+      "placeholder": "http://127.0.0.1:18790",
+      "help": "Base URL for the standalone Mission Control service"
+    }
+  }
+}

@@ -98,7 +98,7 @@ export interface TaskDeliverableRecord {
 export interface SessionRecord {
   id: string;
   agent_id: string | null;
-  openclaw_session_id: string;
+  session_id: string;
   channel: string | null;
   status: string;
   session_type: string;
@@ -227,7 +227,7 @@ export interface CreateEventInput {
 
 export interface CreateSessionInput {
   agent_id?: string;
-  openclaw_session_id: string;
+  session_id: string;
   channel?: string;
   status?: string;
   session_type?: string;
@@ -314,10 +314,10 @@ CREATE TABLE IF NOT EXISTS task_deliverables (
   created_at TEXT DEFAULT (datetime('now'))
 );
 
-CREATE TABLE IF NOT EXISTS openclaw_sessions (
+CREATE TABLE IF NOT EXISTS agent_sessions (
   id TEXT PRIMARY KEY,
   agent_id TEXT REFERENCES agents(id) ON DELETE SET NULL,
-  openclaw_session_id TEXT NOT NULL,
+  session_id TEXT NOT NULL,
   channel TEXT,
   status TEXT DEFAULT 'active',
   session_type TEXT DEFAULT 'persistent',
@@ -335,7 +335,7 @@ CREATE INDEX IF NOT EXISTS idx_events_created ON events(created_at DESC);
 CREATE INDEX IF NOT EXISTS idx_agents_status ON agents(status);
 CREATE INDEX IF NOT EXISTS idx_activities_task ON task_activities(task_id, created_at DESC);
 CREATE INDEX IF NOT EXISTS idx_deliverables_task ON task_deliverables(task_id);
-CREATE INDEX IF NOT EXISTS idx_openclaw_sessions_task ON openclaw_sessions(task_id);
+CREATE INDEX IF NOT EXISTS idx_agent_sessions_task ON agent_sessions(task_id);
 CREATE INDEX IF NOT EXISTS idx_tasks_parent ON tasks(parent_task_id);
 CREATE UNIQUE INDEX IF NOT EXISTS idx_tasks_external_id ON tasks(external_id);
 `;
@@ -632,7 +632,7 @@ export class MissionControlDB {
 
   deleteTask(id: string): boolean {
     return this.db.transaction(() => {
-      this.db.prepare("DELETE FROM openclaw_sessions WHERE task_id = ?").run(id);
+      this.db.prepare("DELETE FROM agent_sessions WHERE task_id = ?").run(id);
       this.db.prepare("DELETE FROM events WHERE task_id = ?").run(id);
       const result = this.db.prepare("DELETE FROM tasks WHERE id = ?").run(id);
       return result.changes > 0;
@@ -735,7 +735,7 @@ export class MissionControlDB {
 
   deleteAgent(id: string): boolean {
     return this.db.transaction(() => {
-      this.db.prepare("DELETE FROM openclaw_sessions WHERE agent_id = ?").run(id);
+      this.db.prepare("DELETE FROM agent_sessions WHERE agent_id = ?").run(id);
       this.db.prepare("DELETE FROM events WHERE agent_id = ?").run(id);
       this.db
         .prepare("UPDATE tasks SET assigned_agent_id = NULL WHERE assigned_agent_id = ?")
@@ -1004,12 +1004,12 @@ export class MissionControlDB {
     if (taskId) {
       return this.db
         .prepare(
-          "SELECT * FROM openclaw_sessions WHERE task_id = ? ORDER BY created_at DESC LIMIT ? OFFSET ?"
+          "SELECT * FROM agent_sessions WHERE task_id = ? ORDER BY created_at DESC LIMIT ? OFFSET ?"
         )
         .all(taskId, pagination.limit, pagination.offset) as SessionRecord[];
     }
     return this.db
-      .prepare("SELECT * FROM openclaw_sessions ORDER BY created_at DESC LIMIT ? OFFSET ?")
+      .prepare("SELECT * FROM agent_sessions ORDER BY created_at DESC LIMIT ? OFFSET ?")
       .all(pagination.limit, pagination.offset) as SessionRecord[];
   }
 
@@ -1019,15 +1019,15 @@ export class MissionControlDB {
 
     this.db
       .prepare(
-        `INSERT INTO openclaw_sessions (
-          id, agent_id, openclaw_session_id, channel, status, session_type,
+        `INSERT INTO agent_sessions (
+          id, agent_id, session_id, channel, status, session_type,
           task_id, ended_at, created_at, updated_at
         ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
       )
       .run(
         id,
         data.agent_id ?? null,
-        data.openclaw_session_id,
+        data.session_id,
         data.channel ?? null,
         data.status ?? "active",
         data.session_type ?? "persistent",
@@ -1038,7 +1038,7 @@ export class MissionControlDB {
       );
 
     return this.db
-      .prepare("SELECT * FROM openclaw_sessions WHERE id = ?")
+      .prepare("SELECT * FROM agent_sessions WHERE id = ?")
       .get(id) as SessionRecord;
   }
 

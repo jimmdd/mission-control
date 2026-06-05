@@ -3,19 +3,20 @@
 # Runs every 10 minutes via cron.
 #
 # Lifecycle per agent:
-#   tmux alive? → PR exists? → CI green? → GSD valid? → Codex review → issues? → iterate (max 3) → complete → notify Linear
-SWARM_DIR="$HOME/.openclaw/swarm"
+#   tmux alive? → PR exists? → CI green? → GSD valid? → Codex review → issues? → iterate (max 3) → complete
+MC_HOME="${MC_HOME:-$HOME/.mission-control}"
+SWARM_DIR="$MC_HOME/swarm"
 REGISTRY="$SWARM_DIR/active-tasks.json"
 LOG="$SWARM_DIR/logs/monitor-$(date +%Y%m%d).log"
 TIMESTAMP=$(date '+%Y-%m-%d %H:%M:%S')
 
-if [ -f "$HOME/.openclaw/.env" ]; then
+if [ -f "$MC_HOME/.env" ]; then
   set -a
-  source "$HOME/.openclaw/.env"
+  source "$MC_HOME/.env"
   set +a
 fi
 
-MC_URL="${MISSION_CONTROL_URL:-http://localhost:18789/ext/mission-control}"
+MC_URL="${MISSION_CONTROL_URL:-http://localhost:18790}"
 CONFIG="$SWARM_DIR/swarm-config.json"
 CFG_REVIEW_EFFORT=$(jq -r '.codex.reviewEffort // "xhigh"' "$CONFIG" 2>/dev/null || echo "xhigh")
 CODEX_EFFORT="${CODEX_REVIEW_EFFORT:-$CFG_REVIEW_EFFORT}"
@@ -94,8 +95,10 @@ prune_state_artifacts() {
   local events_file="$SWARM_DIR/events.jsonl"
   if [ -f "$events_file" ]; then
     python3 - <<'PY'
+import os
 from pathlib import Path
-path = Path.home() / ".openclaw" / "swarm" / "events.jsonl"
+mc_home = Path(os.environ.get("MC_HOME", str(Path.home() / ".mission-control")))
+path = mc_home / "swarm" / "events.jsonl"
 lines = path.read_text().splitlines()
 if len(lines) > 20000:
     path.write_text("\n".join(lines[-20000:]) + "\n")
@@ -105,8 +108,10 @@ PY
   local snapshots_dir="$SWARM_DIR/state-snapshots"
   if [ -d "$snapshots_dir" ]; then
     python3 - <<'PY'
+import os
 from pathlib import Path
-snapshots = sorted((Path.home() / ".openclaw" / "swarm" / "state-snapshots").glob("snapshot-*.json"), reverse=True)
+mc_home = Path(os.environ.get("MC_HOME", str(Path.home() / ".mission-control")))
+snapshots = sorted((mc_home / "swarm" / "state-snapshots").glob("snapshot-*.json"), reverse=True)
 for stale in snapshots[50:]:
     stale.unlink(missing_ok=True)
 PY
@@ -114,6 +119,46 @@ PY
 }
 
 prune_state_artifacts
+
+build_agent_env_exports() {
+  local task_id="$1"
+  local profile launcher model provider thinking effort fallback env_json entry key value
+  profile=$(jq -r ".[] | select(.id == \"$task_id\") | .agentProfile // .agent // \"codex\"" "$REGISTRY" 2>/dev/null)
+  launcher=$(jq -r ".[] | select(.id == \"$task_id\") | .launcher // (if (.agent // \"\") == \"codex\" then \"codex\" else \"claude\" end)" "$REGISTRY" 2>/dev/null)
+  model=$(jq -r ".[] | select(.id == \"$task_id\") | .agentModel // \"\"" "$REGISTRY" 2>/dev/null)
+  provider=$(jq -r ".[] | select(.id == \"$task_id\") | .agentProvider // \"\"" "$REGISTRY" 2>/dev/null)
+  thinking=$(jq -r ".[] | select(.id == \"$task_id\") | .agentThinking // \"\"" "$REGISTRY" 2>/dev/null)
+  effort=$(jq -r ".[] | select(.id == \"$task_id\") | .agentEffort // \"\"" "$REGISTRY" 2>/dev/null)
+  fallback=$(jq -r ".[] | select(.id == \"$task_id\") | .costControls.fallbackModel // \"\"" "$REGISTRY" 2>/dev/null)
+  env_json=$(jq -c ".[] | select(.id == \"$task_id\") | .agentEnv // {}" "$REGISTRY" 2>/dev/null)
+
+  exports=""
+  [ -n "$profile" ] && exports+="export AGENT_PROFILE='$profile'; "
+  [ -n "$model" ] && [ "$model" != "null" ] && exports+="export AGENT_MODEL='$model'; "
+  [ -n "$provider" ] && [ "$provider" != "null" ] && exports+="export AGENT_PROVIDER='$provider'; "
+  [ -n "$thinking" ] && [ "$thinking" != "null" ] && exports+="export AGENT_THINKING='$thinking'; "
+  [ -n "$effort" ] && [ "$effort" != "null" ] && exports+="export AGENT_EFFORT='$effort'; "
+  [ -n "$fallback" ] && [ "$fallback" != "null" ] && exports+="export AGENT_FALLBACK_MODEL='$fallback'; "
+  while IFS= read -r entry; do
+    [ -z "$entry" ] && continue
+    key=$(echo "$entry" | jq -r '.key')
+    value=$(echo "$entry" | jq -r '.value')
+    exports+="export ${key}='${value//\'/\'\\\'\'}'; "
+  done < <(echo "$env_json" | jq -c 'to_entries[]?')
+
+  printf '%s' "$launcher|$exports"
+}
+
+resolve_launcher_path() {
+  local launcher="$1"
+  if [ "$launcher" = "codex" ]; then
+    printf '%s' "$SWARM_DIR/run-codex.sh"
+  elif [ "$launcher" = "pi" ]; then
+    printf '%s' "$SWARM_DIR/run-pi.sh"
+  else
+    printf '%s' "$SWARM_DIR/run-claude.sh"
+  fi
+}
 
 reconcile_completed_agents_to_mc() {
   local completed_ids
@@ -192,65 +237,6 @@ mc_complete_task() {
 }
 
 reconcile_completed_agents_to_mc
-
-linear_post_completion() {
-  local task_id="$1"
-  local pr_url="$2"
-  local summary="$3"
-
-  local api_key="${LINEAR_API_KEY:-}"
-  [ -z "$api_key" ] && return
-
-  local task_data
-  task_data=$(curl -s "$MC_URL/api/tasks/$task_id" 2>/dev/null)
-
-  local linear_url
-  linear_url=$(echo "$task_data" | jq -r '.external_url // .linear_issue_url // empty' 2>/dev/null)
-
-  if [ -z "$linear_url" ]; then
-    local parent_id
-    parent_id=$(echo "$task_data" | jq -r '.parent_task_id // empty' 2>/dev/null)
-    [ -n "$parent_id" ] && linear_url=$(curl -s "$MC_URL/api/tasks/$parent_id" | jq -r '.external_url // .linear_issue_url // empty' 2>/dev/null)
-  fi
-
-  [ -z "$linear_url" ] && return
-
-  local issue_tag
-  issue_tag=$(echo "$linear_url" | grep -oE '[A-Z]+-[0-9]+' | tail -1)
-  [ -z "$issue_tag" ] && return
-
-  local team_key issue_num
-  team_key=$(echo "$issue_tag" | grep -oE '^[A-Z]+')
-  issue_num=$(echo "$issue_tag" | grep -oE '[0-9]+$')
-
-  local lookup_result
-  lookup_result=$(curl -s "https://api.linear.app/graphql" \
-    -H "Content-Type: application/json" \
-    -H "Authorization: $api_key" \
-    -d "{\"query\": \"query { issues(filter: { number: { eq: $issue_num }, team: { key: { eq: \\\"$team_key\\\" } } }) { nodes { id } } }\"}" 2>/dev/null)
-
-  local linear_id
-  linear_id=$(echo "$lookup_result" | jq -r '.data.issues.nodes[0].id // empty' 2>/dev/null)
-  [ -z "$linear_id" ] && return
-
-  local is_change_request
-  is_change_request=$(jq -r ".[] | select(.mcTaskId == \"$task_id\" or .id == \"$task_id\") | .changeRequestAt // empty" "$SWARM_DIR/active-tasks.json" 2>/dev/null)
-
-  local body
-  if [ -n "$is_change_request" ]; then
-    body="**Agent updated the PR:**\\n\\nPR: $pr_url\\n\\n$summary"
-  else
-    body="**Agent completed work:**\\n\\nPR: $pr_url\\n\\n$summary"
-  fi
-
-  curl -s "https://api.linear.app/graphql" \
-    -H "Content-Type: application/json" \
-    -H "Authorization: $api_key" \
-    -d "{\"query\": \"mutation(\$id: String!, \$body: String!) { commentCreate(input: { issueId: \$id, body: \$body }) { success } }\", \"variables\": {\"id\": \"$linear_id\", \"body\": \"$body\"}}" \
-    > /dev/null 2>&1
-
-  echo "[$TIMESTAMP] LINEAR: Posted completion comment to $issue_id" >> "$LOG"
-}
 
 # Validate GSD artifacts in worktree. Returns 0 if valid, 1 if missing/failed.
 # Sets GSD_STATUS to "passed", "gaps_found", "missing", or "no_planning".
@@ -450,8 +436,10 @@ relaunch_agent_for_ci_fix() {
   local ci_details="$3"
   local cycle="$4"
 
-  local agent_type
-  agent_type=$(jq -r ".[] | select(.id == \"$task_id\") | .agent // \"claude\"" "$REGISTRY")
+  local launcher_info launcher env_exports
+  launcher_info=$(build_agent_env_exports "$task_id")
+  launcher="${launcher_info%%|*}"
+  env_exports="${launcher_info#*|}"
   local session
   session=$(jq -r ".[] | select(.id == \"$task_id\") | .tmuxSession" "$REGISTRY")
 
@@ -477,15 +465,11 @@ $(echo -e "$ci_details")
 Do NOT create a new PR. Fix the existing code and push.
 CIFIXEOF
 
-  if [ "$agent_type" = "codex" ]; then
-    LAUNCHER="$SWARM_DIR/run-codex.sh"
-  else
-    LAUNCHER="$SWARM_DIR/run-claude.sh"
-  fi
+  LAUNCHER=$(resolve_launcher_path "$launcher")
 
   tmux kill-session -t "$session" 2>/dev/null || true
   tmux new-session -d -s "$session" -c "$worktree" \
-    "PROMPT_OVERRIDE=$fix_prompt $LAUNCHER $task_id"
+    "bash -lc '${env_exports}PROMPT_OVERRIDE=$fix_prompt exec $LAUNCHER $task_id'"
 
   state_update "$task_id" "{\"status\": \"running\", \"ciFixCycles\": $cycle}" "ci-fix-relaunch"
 
@@ -543,8 +527,10 @@ relaunch_agent_with_review() {
   local review="$3"
   local cycle="$4"
 
-  local agent_type
-  agent_type=$(jq -r ".[] | select(.id == \"$task_id\") | .agent // \"claude\"" "$REGISTRY")
+  local launcher_info launcher env_exports
+  launcher_info=$(build_agent_env_exports "$task_id")
+  launcher="${launcher_info%%|*}"
+  env_exports="${launcher_info#*|}"
   local session
   session=$(jq -r ".[] | select(.id == \"$task_id\") | .tmuxSession" "$REGISTRY")
 
@@ -567,15 +553,11 @@ $review
 Do NOT create a new PR. Fix the existing code and push.
 REVIEWEOF
 
-  if [ "$agent_type" = "codex" ]; then
-    LAUNCHER="$SWARM_DIR/run-codex.sh"
-  else
-    LAUNCHER="$SWARM_DIR/run-claude.sh"
-  fi
+  LAUNCHER=$(resolve_launcher_path "$launcher")
 
   tmux kill-session -t "$session" 2>/dev/null || true
   tmux new-session -d -s "$session" -c "$worktree" \
-    "PROMPT_OVERRIDE=$iteration_prompt $LAUNCHER $task_id"
+    "bash -lc '${env_exports}PROMPT_OVERRIDE=$iteration_prompt exec $LAUNCHER $task_id'"
 
   state_update "$task_id" "{\"status\": \"running\", \"reviewCycles\": $cycle}" "review-relaunch"
 
@@ -611,18 +593,16 @@ echo "$RUNNING_IDS" | while read -r TASK_ID; do
       NEW_RETRY=$((RETRY_COUNT + 1))
       echo "[$TIMESTAMP] DEAD: $TASK_ID — respawning (attempt $NEW_RETRY/$MAX_RETRIES)" >> "$LOG"
 
-      AGENT_TYPE=$(jq -r ".[] | select(.id == \"$TASK_ID\") | .agent // \"claude\"" "$REGISTRY")
+      launcher_info=$(build_agent_env_exports "$TASK_ID")
+      AGENT_LAUNCHER="${launcher_info%%|*}"
+      ENV_EXPORTS="${launcher_info#*|}"
       WORKTREE_DIR=$(jq -r ".[] | select(.id == \"$TASK_ID\") | .worktree // empty" "$REGISTRY")
 
-      if [ "$AGENT_TYPE" = "codex" ]; then
-        LAUNCHER="$SWARM_DIR/run-codex.sh"
-      else
-        LAUNCHER="$SWARM_DIR/run-claude.sh"
-      fi
+      LAUNCHER=$(resolve_launcher_path "$AGENT_LAUNCHER")
 
       WORK_DIR="${WORKTREE_DIR:-$REPO}"
       if [ -d "$WORK_DIR" ]; then
-        tmux new-session -d -s "$SESSION" -c "$WORK_DIR" "$LAUNCHER $TASK_ID"
+        tmux new-session -d -s "$SESSION" -c "$WORK_DIR" "bash -lc '${ENV_EXPORTS}exec $LAUNCHER $TASK_ID'"
         state_update "$TASK_ID" "{\"retryCount\": $NEW_RETRY, \"status\": \"running\", \"lastRespawnAt\": $(date +%s)000}" "dead-session-respawn"
         [ -n "$MC_TASK_ID" ] && mc_post_activity "$MC_TASK_ID" "updated" "Agent respawned (attempt $NEW_RETRY/$MAX_RETRIES)"
       else
@@ -652,7 +632,6 @@ echo "$RUNNING_IDS" | while read -r TASK_ID; do
     if [ "$MC_STATUS" = "done" ] || [ "$MC_STATUS" = "review" ]; then
       echo "[$TIMESTAMP] INVESTIGATION DONE: $TASK_ID — agent reported findings" >> "$LOG"
       state_update "$TASK_ID" '{"status": "ready"}' "investigation-ready"
-      linear_post_completion "$MC_TASK_ID" "" "Investigation completed — findings posted to Mission Control"
     else
       echo "[$TIMESTAMP] RUNNING: $TASK_ID — investigation in progress (no PR expected)" >> "$LOG"
     fi
@@ -751,13 +730,12 @@ echo "$RUNNING_IDS" | while read -r TASK_ID; do
 
     mc_add_deliverable "$MC_TASK_ID" "Pull Request #$PR_NUM" "$PR_URL"
     mc_complete_task "$MC_TASK_ID" "$summary_text"
-    linear_post_completion "$MC_TASK_ID" "$PR_URL" "$summary_text"
   fi
 
   # Distill knowledge from task artifacts into Context Fabrica
   if [ -f "$SWARM_DIR/knowledge-distill.py" ]; then
     echo "[$TIMESTAMP] DISTILL: $TASK_ID — extracting knowledge..." >> "$LOG"
-    "$HOME/.openclaw/venv-3.12/bin/python3" "$SWARM_DIR/knowledge-distill.py" \
+    "${MC_PYTHON_BIN:-$MC_HOME/venv-3.12/bin/python3}" "$SWARM_DIR/knowledge-distill.py" \
       --task-id "$TASK_ID" \
       --repo "$REPO" \
       --branch "$BRANCH" \

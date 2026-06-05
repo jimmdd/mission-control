@@ -1,4 +1,4 @@
-#!/Users/mm/.openclaw/venv-3.12/bin/python3
+#!/usr/bin/env python3
 """CLI for injecting, listing, and deleting knowledge entries in Context Fabrica.
 Called by Mission Control API and usable directly from CLI.
 
@@ -17,18 +17,17 @@ from uuid import uuid4
 
 from context_fabrica.models import KnowledgeRecord
 from context_fabrica.storage import PostgresPgvectorAdapter
+from context_fabrica_config import make_context_fabrica_adapter
 
 EMBEDDING_MODEL = "gemini-embedding-001"
 EMBEDDING_DIM = 3072
 EMBEDDING_URL = "https://generativelanguage.googleapis.com/v1beta/models/gemini-embedding-001:embedContent"
 
-CONTEXT_FABRICA_DSN = os.environ.get("CONTEXT_FABRICA_DSN", "postgresql://mm@localhost/context_fabrica")
-
 
 def get_gemini_key() -> str:
     key = os.environ.get("GOOGLE_GENERATIVE_AI_API_KEY", "")
     if not key:
-        env_file = Path.home() / ".openclaw" / ".env"
+        env_file = Path(os.environ.get("MC_HOME", str(Path.home() / ".mission-control"))) / ".env"
         if env_file.exists():
             for line in env_file.read_text().splitlines():
                 if line.startswith("GOOGLE_GENERATIVE_AI_API_KEY="):
@@ -56,7 +55,7 @@ def embed_text(text: str, api_key: str) -> List[float]:
 
 
 def _make_adapter() -> PostgresPgvectorAdapter:
-    return PostgresPgvectorAdapter.from_dsn(CONTEXT_FABRICA_DSN, embedding_dimensions=EMBEDDING_DIM)
+    return make_context_fabrica_adapter(bootstrap=True)
 
 
 def build_scope(project: str, repo: str = "") -> str:

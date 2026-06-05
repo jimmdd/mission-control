@@ -1,17 +1,18 @@
 #!/bin/bash
 set -euo pipefail
 
-METRICS_LOG="$HOME/.openclaw/metrics/repo-watcher.log"
-STATE_FILE="$HOME/.openclaw/swarm/repo-watcher-state.json"
+MC_HOME="${MC_HOME:-$HOME/.mission-control}"
+METRICS_LOG="$MC_HOME/metrics/repo-watcher.log"
+STATE_FILE="$MC_HOME/swarm/repo-watcher-state.json"
 GITPROJECTS="$HOME/GitProjects"
-VENV_PYTHON="$HOME/.openclaw/venv-3.12/bin/python3"
+VENV_PYTHON="${MC_PYTHON_BIN:-$MC_HOME/venv-3.12/bin/python3}"
 
 mkdir -p "$(dirname "$METRICS_LOG")"
 ts() { date '+%Y-%m-%d %H:%M:%S'; }
 
 if [ ! -f "$STATE_FILE" ]; then
     echo "$(ts) TRIGGER no_state_file" >> "$METRICS_LOG"
-    exec "$VENV_PYTHON" "$HOME/.openclaw/swarm/repo-watcher.py"
+    exec "$VENV_PYTHON" "$MC_HOME/swarm/repo-watcher.py"
 fi
 
 changed=0
@@ -37,4 +38,4 @@ if [ $changed -eq 0 ]; then
 fi
 
 echo "$(ts) TRIGGER repos_changed" >> "$METRICS_LOG"
-exec "$VENV_PYTHON" "$HOME/.openclaw/swarm/repo-watcher.py"
+exec "$VENV_PYTHON" "$MC_HOME/swarm/repo-watcher.py"

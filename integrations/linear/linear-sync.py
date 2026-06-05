@@ -22,12 +22,18 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
-MC_BASE_URL = os.environ.get("MISSION_CONTROL_URL", "http://localhost:18789/ext/mission-control")
+MC_HOME = Path(os.environ.get("MC_HOME", str(Path.home() / ".mission-control")))
+MC_BASE_URL = os.environ.get("MISSION_CONTROL_URL", "http://localhost:18790")
 LINEAR_API_URL = "https://api.linear.app/graphql"
-ENV_FILE = Path.home() / ".openclaw" / ".env"
-STATE_FILE = Path.home() / ".openclaw" / "sync" / "linear-state.json"
-LOG_DIR = Path.home() / ".openclaw" / "sync" / "logs"
-SWARM_CONFIG_FILE = Path.home() / ".openclaw" / "swarm" / "swarm-config.json"
+ENV_FILE = MC_HOME / ".env"
+STATE_FILE = MC_HOME / "sync" / "linear-state.json"
+LOG_DIR = MC_HOME / "sync" / "logs"
+SWARM_CONFIG_FILE = MC_HOME / "swarm" / "swarm-config.json"
+SWARM_SCRIPTS_DIR = Path(__file__).resolve().parents[2] / "swarm"
+if str(SWARM_SCRIPTS_DIR) not in sys.path:
+    sys.path.insert(0, str(SWARM_SCRIPTS_DIR))
+
+from context_fabrica_config import context_fabrica_dsn, make_context_fabrica_adapter
 
 DEFAULT_LINEAR_CONFIG = {
     "label": "your-label",
@@ -392,14 +398,13 @@ BOT_COMMENT_MARKERS = [
     f"**{LINEAR_BOT_NAME}**:",
     BOT_REPLY_PREFIX,
 ]
-LIBRARIAN_DIR = Path.home() / ".openclaw" / "librarian"
-CONTEXT_FABRICA_DSN = os.environ.get("CONTEXT_FABRICA_DSN", "postgresql://mm@localhost/context_fabrica")
+LIBRARIAN_DIR = MC_HOME / "librarian"
 GEMINI_FLASH = "gemini-2.5-flash"
 GEMINI_API_BASE = "https://generativelanguage.googleapis.com/v1beta"
 EMBEDDING_URL = "https://generativelanguage.googleapis.com/v1beta/models/gemini-embedding-001:embedContent"
 GEMINI_PRO = "gemini-2.5-pro"
-RESEARCH_DIR = Path.home() / ".openclaw" / "swarm" / "research"
-SWARM_DIR = Path.home() / ".openclaw" / "swarm"
+RESEARCH_DIR = MC_HOME / "swarm" / "research"
+SWARM_DIR = MC_HOME / "swarm"
 GITPROJECTS_DIR = Path.home() / "GitProjects"
 
 
@@ -601,7 +606,6 @@ def _distill_research(question: str, findings: str, repo_path: str) -> None:
     if not api_key:
         return
     try:
-        from context_fabrica.storage import PostgresPgvectorAdapter
         from context_fabrica.models import KnowledgeRecord
 
         summary = findings.strip().split("\n\n")[0] if findings else ""
@@ -631,7 +635,7 @@ def _distill_research(question: str, findings: str, repo_path: str) -> None:
                 scope = f"repo:{parts[gp_idx + 1]}/{parts[gp_idx + 2]}"
                 domain = parts[gp_idx + 1]
 
-        adapter = PostgresPgvectorAdapter.from_dsn(CONTEXT_FABRICA_DSN, embedding_dimensions=3072)
+        adapter = make_context_fabrica_adapter(bootstrap=True)
 
         record = KnowledgeRecord(
             record_id=f"research-{datetime.now(timezone.utc).strftime('%Y%m%d%H%M%S')}",
@@ -766,8 +770,6 @@ def _gather_librarian_context(question: str) -> str:
     api_key = os.environ.get("GOOGLE_GENERATIVE_AI_API_KEY", "")
     if api_key:
         try:
-            from context_fabrica.storage import PostgresPgvectorAdapter
-
             embed_payload = json.dumps({
                 "model": "models/gemini-embedding-001",
                 "content": {"parts": [{"text": question}]},
@@ -779,7 +781,7 @@ def _gather_librarian_context(question: str) -> str:
             with urllib.request.urlopen(embed_req, timeout=15) as resp:
                 vector = json.loads(resp.read())["embedding"]["values"]
 
-            adapter = PostgresPgvectorAdapter.from_dsn(CONTEXT_FABRICA_DSN, embedding_dimensions=3072)
+            adapter = make_context_fabrica_adapter(bootstrap=True)
             results = adapter.search_chunks(vector, top_k=10)
 
             if results:

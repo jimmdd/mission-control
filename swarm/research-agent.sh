@@ -6,7 +6,8 @@ set -euo pipefail
 
 QUESTION_ID=${1:?"Usage: research-agent.sh <question-id> <repo-path>"}
 REPO_PATH=${2:?"Usage: research-agent.sh <question-id> <repo-path>"}
-SWARM_DIR="$HOME/.openclaw/swarm"
+MC_HOME="${MC_HOME:-$HOME/.mission-control}"
+SWARM_DIR="$MC_HOME/swarm"
 PROMPT_FILE="$SWARM_DIR/prompts/research-${QUESTION_ID}.md"
 LOG="$SWARM_DIR/logs/research-${QUESTION_ID}.log"
 

@@ -22,9 +22,10 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 
-PLANS_DIR = Path.home() / ".openclaw" / "bridge" / "plans"
-PROGRESS_DIR = Path.home() / ".openclaw" / "bridge" / "progress"
-SWARM_CONFIG_PATH = Path.home() / ".openclaw" / "swarm" / "swarm-config.json"
+MC_HOME = Path(os.environ.get("MC_HOME", str(Path.home() / ".mission-control")))
+PLANS_DIR = MC_HOME / "bridge" / "plans"
+PROGRESS_DIR = MC_HOME / "bridge" / "progress"
+SWARM_CONFIG_PATH = MC_HOME / "swarm" / "swarm-config.json"
 
 # Defaults — overridden by swarm-config.json "planner" section
 _DEFAULTS = {
@@ -569,7 +570,7 @@ def build_step_prompt(
     description = task.get("description", "")
     ticket_id_match = re.search(r'[A-Z]+-\d+', task_title)
     ticket_id = ticket_id_match.group(0) if ticket_id_match else "TICKET"
-    mc_base = "http://localhost:18789/ext/mission-control"
+    mc_base = os.environ.get("MISSION_CONTROL_URL", "http://localhost:18790")
 
     acceptance = "\n".join(
         f"- {c}" for c in step.get("acceptance_criteria", step.get("done_when", []))
@@ -595,8 +596,8 @@ Use this context to understand what has already been done. Your branch includes 
         if knowledge.get("past_learnings"):
             knowledge_section += f"\n## Past Learnings\n{knowledge['past_learnings']}\n"
 
-    linear_url = task.get("external_url") or task.get("linear_issue_url", "")
-    linear_section = f"\nLinear ticket: {linear_url}\n" if linear_url else ""
+    external_url = task.get("external_url") or task.get("linear_issue_url", "")
+    external_section = f"\nExternal reference: {external_url}\n" if external_url else ""
 
     # Final step creates the PR; intermediate steps just commit and push
     if is_final_step:
@@ -673,7 +674,7 @@ curl -X POST {mc_base}/api/tasks/{task.get('id', 'TASK_ID')}/activities \\
 
 ## Context
 {description}
-{linear_section}
+{external_section}
 ## Your Mission
 {step.get('description', '')}
 

@@ -2236,7 +2236,7 @@
             <div class="metric-chip"><span class="chip-icon" style="color: var(--text-secondary)">⏱</span> <span id="chip-uptime-val">00:00:00</span></div>
         </div>
         <div class="controls">
-            <a class="nav-link-pill" href="/ext/mission-control/space">SPACE OPS</a>
+            <a class="nav-link-pill" href="/space">SPACE OPS</a>
             <div class="filters" id="filters">
                 <!-- Filters rendered here -->
             </div>
@@ -2334,15 +2334,6 @@
                             <input type="hidden" id="new-task-type" value="implementation">
                         </div>
                         <div style="display: flex; gap: 8px; align-items: center;">
-                            <div id="linear-sync-row" style="display: none; align-items: center; gap: 6px;">
-                                <label style="display: flex; align-items: center; gap: 4px; cursor: pointer; font-size: 10px; color: var(--text-secondary); font-family: var(--font-mono);">
-                                    <input type="checkbox" id="new-task-sync-linear" onchange="toggleLinearTeamSelect()" style="accent-color: var(--accent-color);">
-                                    SYNC TO LINEAR
-                                </label>
-                                <select id="new-task-linear-team" style="display: none; background: var(--bg-panel); color: var(--text-primary); border: 1px solid var(--border-color); border-radius: 3px; padding: 2px 6px; font-size: 11px; font-family: var(--font-mono);">
-                                    <option value="">Select team...</option>
-                                </select>
-                            </div>
                             <span id="new-task-error" style="color: var(--status-error); font-size: 12px; display: none;"></span>
                             <button type="button" class="filter-pill" onclick="toggleNewTaskDesc()" style="border: none;">+ Desc</button>
                             <button type="button" class="filter-pill" onclick="toggleNewTaskForm()" style="border: none;">Cancel</button>
@@ -2608,10 +2599,7 @@
                 const sep = base.includes('?') ? '&' : '?';
                 return `${base}${sep}token=${encodeURIComponent(state.accessToken)}`;
             };
-            if (window.location.pathname.startsWith('/ext/mission-control')) {
-                return withToken(`/ext/mission-control/api${path}`);
-            }
-            return withToken(`http://localhost:4000/api${path}`);
+            return withToken(`/api${path}`);
         };
 
         // State
@@ -3128,7 +3116,7 @@
                     agent = match ? match[1] : 'reviewer';
                 } else if (msg.includes('Change request received')) {
                     type = 'feedback'; label = 'CHANGE REQ';
-                    agent = 'linear';
+                        agent = 'external';
                 } else if (msg.includes('CI passed')) {
                     type = 'complete'; label = 'COMPLETE';
                     agent = 'system';
@@ -3144,11 +3132,11 @@
                     type = 'feedback'; label = 'CHANGES REQ';
                     const userMatch = msg.match(/@(\S+)/);
                     agent = userMatch ? userMatch[1] : 'reviewer';
-                } else if (msg.includes('Linear ticket marked')) {
-                    type = 'done'; label = 'LINEAR DONE';
-                    agent = 'linear';
-                    isMilestone = true;
-                }
+                    } else if (msg.includes('External ticket marked') || msg.includes('Linear ticket marked')) {
+                        type = 'done'; label = 'EXTERNAL DONE';
+                        agent = 'external';
+                        isMilestone = true;
+                    }
                 
                 if (type && label) {
                     steps.push({ type, label, time: act.created_at, msg, agent, isMilestone: isMilestone || false });
@@ -3588,7 +3576,7 @@
                 const isExpandable = hasChildren;
 
                 const stageMap = [
-                    { status: 'inbox', label: 'SYNCED', desc: 'Uplinked from Linear' },
+                    { status: 'inbox', label: 'SYNCED', desc: 'Uplinked from external system' },
                     { status: 'planning', label: 'TRIAGE', desc: 'Analyzing requirements' },
                     { status: 'assigned', label: 'DISPATCH', desc: 'Assigning to agents' },
                     { status: 'in_progress', label: 'ACTIVE', desc: 'Agents executing' },
@@ -3824,10 +3812,10 @@
             const descToggle = document.getElementById('desc-toggle');
             if (descToggle) descToggle.textContent = '(show)';
             
-            const linearUrl = task.external_url || task.linear_issue_url;
-            const sourceLabel = linearUrl ? 'LINEAR' : 'MANUAL';
-            const sourceHtml = linearUrl 
-                ? `<a href="${linearUrl}" target="_blank" rel="noopener noreferrer">${sourceLabel}</a>`
+            const externalUrl = task.external_url || task.linear_issue_url;
+            const sourceLabel = externalUrl ? 'EXTERNAL' : 'MANUAL';
+            const sourceHtml = externalUrl
+                ? `<a href="${externalUrl}" target="_blank" rel="noopener noreferrer">${sourceLabel}</a>`
                 : sourceLabel;
 
             let triageBtnHtml = '';
@@ -4004,7 +3992,7 @@
                     'investigation_findings': 'investigation findings',
                     'research_findings': 'research findings',
                     'planning_questions': 'triage started',
-                    'linear_comment': 'linear reply',
+                    'linear_comment': 'external reply',
                     'heartbeat': 'agent heartbeat',
                     'spawned': 'agent spawned',
                     'status_changed': 'status changed',
@@ -4542,7 +4530,7 @@
                                 } else if (child.status === 'on_hold') {
                                     pendingStep = { type: 'pending-hold', label: 'ON HOLD', agent: '', css: 'feedback' };
                                 } else if (child.status === 'done') {
-                                    pendingStep = { type: 'done', label: 'LINEAR DONE', agent: 'linear', css: 'complete', isMilestone: true };
+                                    pendingStep = { type: 'done', label: 'EXTERNAL DONE', agent: 'external', css: 'complete', isMilestone: true };
                                 }
 
                                 lifecycleHtml = `
@@ -4611,8 +4599,6 @@
             container.innerHTML = html;
         };
 
-        let linearTeamsLoaded = false;
-
         window.toggleNewTaskForm = () => {
             const container = document.getElementById('new-task-form-container');
             const btn = document.getElementById('btn-new-task');
@@ -4620,7 +4606,6 @@
                 container.style.display = 'block';
                 btn.classList.add('active');
                 document.getElementById('new-task-title').focus();
-                if (!linearTeamsLoaded) loadLinearConfig();
             } else {
                 container.style.display = 'none';
                 btn.classList.remove('active');
@@ -4628,35 +4613,9 @@
                 document.getElementById('new-task-desc').value = '';
                 document.getElementById('new-task-desc').style.display = 'none';
                 document.getElementById('new-task-error').style.display = 'none';
-                document.getElementById('new-task-sync-linear').checked = false;
-                document.getElementById('new-task-linear-team').style.display = 'none';
                 setNewTaskPriority('normal');
                 setNewTaskType('implementation');
             }
-        };
-
-        async function loadLinearConfig() {
-            try {
-                const res = await fetch(getApiUrl('/linear/config'));
-                if (!res.ok) return;
-                const cfg = await res.json();
-                if (!cfg.enabled || !cfg.hasApiKey) return;
-
-                document.getElementById('linear-sync-row').style.display = 'flex';
-
-                const teamsRes = await fetch(getApiUrl('/linear/teams'));
-                if (!teamsRes.ok) return;
-                const { teams } = await teamsRes.json();
-                const select = document.getElementById('new-task-linear-team');
-                select.innerHTML = '<option value="">Select team...</option>' +
-                    teams.map(t => `<option value="${t.id}">${t.key} — ${t.name}</option>`).join('');
-                linearTeamsLoaded = true;
-            } catch {}
-        }
-
-        window.toggleLinearTeamSelect = () => {
-            const checked = document.getElementById('new-task-sync-linear').checked;
-            document.getElementById('new-task-linear-team').style.display = checked ? 'inline-block' : 'none';
         };
 
         window.toggleNewTaskDesc = () => {
@@ -4703,12 +4662,6 @@
             try {
                 const taskType = document.getElementById('new-task-type').value || 'implementation';
                 const payload = { title, description, priority, task_type: taskType, source: 'dashboard' };
-                const syncLinear = document.getElementById('new-task-sync-linear')?.checked;
-                const linearTeamId = document.getElementById('new-task-linear-team')?.value;
-                if (syncLinear && linearTeamId) {
-                    payload.sync_to_linear = true;
-                    payload.linear_team_id = linearTeamId;
-                }
 
                 const res = await fetch(getApiUrl('/tasks'), {
                     method: 'POST',
@@ -4722,8 +4675,6 @@
                 document.getElementById('new-task-title').value = '';
                 document.getElementById('new-task-desc').value = '';
                 document.getElementById('new-task-desc').style.display = 'none';
-                document.getElementById('new-task-sync-linear').checked = false;
-                document.getElementById('new-task-linear-team').style.display = 'none';
                 setNewTaskPriority('normal');
                 setNewTaskType('implementation');
                 errorEl.style.display = 'none';

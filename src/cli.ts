@@ -1,12 +1,17 @@
 #!/usr/bin/env node
 
+import { execFile, spawn } from "node:child_process";
+import { existsSync, readFileSync } from "node:fs";
+import { homedir } from "node:os";
+import { join } from "node:path";
 import { createInterface } from "node:readline/promises";
 import { stdin as input, stdout as outputStream } from "node:process";
 
 type Json = Record<string, unknown> | unknown[];
 
 const MC_URL = process.env.MISSION_CONTROL_URL ?? "http://127.0.0.1:18790";
-const API_PREFIX = "/ext/mission-control/api";
+const API_PREFIX = "/api";
+const MC_HOME = process.env.MC_HOME ?? join(homedir(), ".mission-control");
 
 type ParsedArgs = {
   positionals: string[];
@@ -30,7 +35,27 @@ type RenderKind =
   | "knowledge"
   | "repos"
   | "config"
+  | "swarm-sessions"
   | "result";
+
+type SwarmRegistryEntry = Record<string, unknown> & {
+  id?: string;
+  tmuxSession?: string;
+  agent?: string;
+  description?: string;
+  repo?: string;
+  worktree?: string;
+  branch?: string;
+  status?: string;
+  mcTaskId?: string;
+  reviewCycles?: number;
+  retryCount?: number;
+};
+
+const SWARM_DIR = join(MC_HOME, "swarm");
+const SWARM_REGISTRY = join(SWARM_DIR, "active-tasks.json");
+const SWARM_STATUS_SCRIPT = join(SWARM_DIR, "status.sh");
+const SWARM_MONITOR_SESSION = "mission-control-swarm";
 
 function parseArgs(argv: string[]): ParsedArgs {
   const positionals: string[] = [];
@@ -78,6 +103,78 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 function asArray(value: unknown): Record<string, unknown>[] {
   if (!Array.isArray(value)) return [];
   return value.filter(isRecord);
+}
+
+function readSwarmRegistry(): SwarmRegistryEntry[] {
+  if (!existsSync(SWARM_REGISTRY)) return [];
+  try {
+    const parsed = JSON.parse(readFileSync(SWARM_REGISTRY, "utf-8"));
+    return Array.isArray(parsed) ? parsed.filter(isRecord) as SwarmRegistryEntry[] : [];
+  } catch {
+    return [];
+  }
+}
+
+function execFileText(command: string, args: string[], timeout = 15000): Promise<string> {
+  return new Promise((resolve, reject) => {
+    execFile(command, args, { timeout, encoding: "utf-8" }, (error, stdout, stderr) => {
+      if (error) {
+        reject(new Error((stderr || error.message).trim()));
+        return;
+      }
+      resolve(String(stdout ?? ""));
+    });
+  });
+}
+
+async function listTmuxSessions(): Promise<Set<string>> {
+  try {
+    const output = await execFileText("tmux", ["list-sessions", "-F", "#{session_name}"]);
+    return new Set(
+      output
+        .split("\n")
+        .map(line => line.trim())
+        .filter(Boolean),
+    );
+  } catch {
+    return new Set();
+  }
+}
+
+async function captureTmuxPane(session: string, lines = 5): Promise<string> {
+  try {
+    const output = await execFileText("tmux", ["capture-pane", "-pt", session, "-S", `-${lines}`], 10000);
+    return output.trim();
+  } catch {
+    return "";
+  }
+}
+
+function findSwarmEntry(identifier: string, entries: SwarmRegistryEntry[]): SwarmRegistryEntry | undefined {
+  return entries.find(entry => entry.id === identifier || entry.mcTaskId === identifier || entry.tmuxSession === identifier);
+}
+
+async function ensureTmuxSessionExists(session: string): Promise<boolean> {
+  try {
+    await execFileText("tmux", ["has-session", "-t", session], 5000);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+function runInteractive(command: string, args: string[]): Promise<void> {
+  return new Promise((resolve, reject) => {
+    const child = spawn(command, args, { stdio: "inherit" });
+    child.on("error", reject);
+    child.on("exit", code => {
+      if (code && code !== 0) {
+        reject(new Error(`${command} exited with code ${code}`));
+        return;
+      }
+      resolve();
+    });
+  });
 }
 
 async function mcFetch(method: string, path: string, body?: unknown): Promise<Json> {
@@ -410,6 +507,23 @@ function renderConfig(data: unknown): void {
   }
 }
 
+function renderSwarmSessions(data: unknown): void {
+  const rows = asArray(data).map(entry => ({
+    taskId: entry.id ?? "",
+    mcTaskId: entry.mcTaskId ?? "",
+    session: entry.tmuxSession ?? "",
+    agent: entry.agent ?? "",
+    status: entry.status ?? "",
+    branch: entry.branch ?? "",
+    repo: truncate(entry.repo ?? "", 28),
+    description: truncate(entry.description ?? "", 52),
+    live: entry.tmuxAlive ?? false,
+    preview: truncate(entry.preview ?? "", 80),
+  }));
+  console.table(rows);
+  console.log(`Active registry entries: ${rows.length}`);
+}
+
 function renderResult(data: unknown): void {
   if (isRecord(data) && typeof data.success === "boolean") {
     console.log(data.success ? "Success" : "Failed");
@@ -468,6 +582,9 @@ function outputValue(data: unknown, jsonMode: boolean, kind: RenderKind = "defau
       return;
     case "config":
       renderConfig(data);
+      return;
+    case "swarm-sessions":
+      renderSwarmSessions(data);
       return;
     case "result":
       renderResult(data);
@@ -676,7 +793,9 @@ Commands:
   system-stats
   repos
   config
-  linear teams
+  swarm sessions
+  swarm attach <task-id|mc-task-id|tmux-session>
+  swarm monitor
 
 Global options:
   --json       Print raw JSON
@@ -690,8 +809,78 @@ Examples:
   mc tasks create --interactive
   mc tasks create --title "[CAP-99] Fix auth bug" --description "Handle expired sessions" --priority high
   mc knowledge add --interactive
+  mc swarm sessions
+  mc swarm attach task-123
+  mc swarm monitor
   mc services health --json
 `);
+}
+
+async function getSwarmSessionRows(): Promise<Record<string, unknown>[]> {
+  const entries = readSwarmRegistry();
+  const tmuxSessions = await listTmuxSessions();
+  const rows: Record<string, unknown>[] = [];
+
+  for (const entry of entries) {
+    const session = typeof entry.tmuxSession === "string" ? entry.tmuxSession : "";
+    rows.push({
+      ...entry,
+      tmuxAlive: session ? tmuxSessions.has(session) : false,
+      preview: session ? await captureTmuxPane(session, 5) : "",
+    });
+  }
+
+  return rows;
+}
+
+async function handleSwarm(args: ParsedArgs, jsonMode: boolean): Promise<void> {
+  const [action, identifier] = args.positionals;
+  switch (action) {
+    case "sessions": {
+      outputValue(await getSwarmSessionRows(), jsonMode, "swarm-sessions");
+      return;
+    }
+    case "attach": {
+      if (!identifier) throw new Error("Usage: mc swarm attach <task-id|mc-task-id|tmux-session>");
+      const entries = readSwarmRegistry();
+      const entry = findSwarmEntry(identifier, entries);
+      const session = entry?.tmuxSession ?? identifier;
+      if (!(await ensureTmuxSessionExists(session))) {
+        throw new Error(`tmux session not found: ${session}`);
+      }
+      await runInteractive("tmux", ["attach-session", "-t", session]);
+      return;
+    }
+    case "monitor": {
+      const entries = readSwarmRegistry().filter(entry => typeof entry.tmuxSession === "string" && entry.tmuxSession);
+      if (entries.length === 0) {
+        throw new Error("No active swarm sessions found in registry");
+      }
+
+      const existing = await ensureTmuxSessionExists(SWARM_MONITOR_SESSION);
+      if (existing) {
+        await execFileText("tmux", ["kill-session", "-t", SWARM_MONITOR_SESSION], 10000).catch(() => undefined);
+      }
+
+      const boardLoop = `while true; do clear; echo 'Mission Control Swarm Monitor'; echo; '${SWARM_STATUS_SCRIPT}' || true; sleep 3; done`;
+      await execFileText("tmux", ["new-session", "-d", "-s", SWARM_MONITOR_SESSION, "-n", "board", "bash", "-lc", boardLoop], 10000);
+
+      for (const entry of entries) {
+        const session = String(entry.tmuxSession);
+        const windowName = truncate(entry.id ?? session, 18).replace(/\s+/g, "-");
+        const tmuxExists = await ensureTmuxSessionExists(session);
+        const command = tmuxExists
+          ? `while true; do clear; echo 'Agent session: ${session}'; echo 'Task: ${String(entry.id ?? "")}'; echo 'Description: ${String(entry.description ?? "")}'; echo; tmux capture-pane -pt '${session}' -S -200 2>/dev/null || echo 'Unable to capture pane'; sleep 2; done`
+          : `while true; do clear; echo 'Agent session missing: ${session}'; echo 'Task: ${String(entry.id ?? "")}'; sleep 5; done`;
+        await execFileText("tmux", ["new-window", "-t", SWARM_MONITOR_SESSION, "-n", windowName, "bash", "-lc", command], 10000).catch(() => undefined);
+      }
+
+      await runInteractive("tmux", ["attach-session", "-t", SWARM_MONITOR_SESSION]);
+      return;
+    }
+    default:
+      throw new Error("Unknown swarm command. Try: sessions, attach, monitor");
+  }
 }
 
 async function handleTasks(args: ParsedArgs, jsonMode: boolean): Promise<void> {
@@ -899,9 +1088,8 @@ async function run(): Promise<void> {
     case "config":
       outputValue(await mcFetch("GET", `${API_PREFIX}/config`), jsonMode, "config");
       return;
-    case "linear":
-      if (rest[0] !== "teams") throw new Error("Usage: mc linear teams");
-      outputValue(await mcFetch("GET", `${API_PREFIX}/linear/teams`), jsonMode, "default");
+    case "swarm":
+      await handleSwarm(subArgs, jsonMode);
       return;
     default:
       throw new Error(`Unknown command: ${command}`);

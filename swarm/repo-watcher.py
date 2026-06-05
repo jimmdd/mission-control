@@ -1,4 +1,4 @@
-#!/Users/mm/.openclaw/venv-3.12/bin/python3
+#!/usr/bin/env python3
 """Repo-watcher: monitors Git repos for architectural changes and extracts knowledge."""
 
 import fnmatch

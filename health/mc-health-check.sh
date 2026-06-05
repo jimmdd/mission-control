@@ -5,8 +5,9 @@
 set -euo pipefail
 
 MC_URL="${MISSION_CONTROL_URL:-http://127.0.0.1:18790}"
-STATE_FILE="$HOME/.openclaw/mission-control/health-state.json"
-ALERT_SCRIPT="$HOME/.openclaw/swarm/notify.sh"
+MC_HOME="${MC_HOME:-$HOME/.mission-control}"
+STATE_FILE="$MC_HOME/health-state.json"
+ALERT_SCRIPT="$MC_HOME/swarm/notify.sh"
 MAX_FAILURES=2
 
 ts() { date '+%Y-%m-%d %H:%M:%S'; }
@@ -32,7 +33,7 @@ echo "$(ts) FAIL #${failures}"
 echo "{\"failures\": ${failures}, \"last_fail\": \"$(date -u '+%Y-%m-%dT%H:%M:%SZ')\"}" > "$STATE_FILE"
 
 # Attempt restart
-launchctl kickstart gui/$(id -u)/ai.openclaw.mission-control 2>/dev/null || true
+launchctl kickstart gui/$(id -u)/ai.mission-control 2>/dev/null || true
 
 # Alert after consecutive failures
 if [ "$failures" -ge "$MAX_FAILURES" ]; then

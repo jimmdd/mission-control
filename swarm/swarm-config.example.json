@@ -1,14 +1,43 @@
 {
-  "claude": {
-    "model": "claude-opus-4-6",
-    "fallbackModel": "",
-    "maxAgents": 10
-  },
-  "codex": {
-    "model": "gpt-5.4",
-    "effort": "medium",
-    "reviewEffort": "high",
-    "maxAgents": 3
+  "agents": {
+    "defaultProfile": "pi",
+    "profiles": {
+      "pi": {
+        "launcher": "pi",
+        "provider": "google",
+        "model": "google/gemini-2.5-pro",
+        "thinking": "high",
+        "maxAgents": 5,
+        "fallbackProfile": "codex",
+        "env": {}
+      },
+      "claude": {
+        "launcher": "claude",
+        "model": "claude-opus-4-6",
+        "fallbackModel": "",
+        "maxAgents": 10,
+        "fallbackProfile": "codex",
+        "env": {}
+      },
+      "codex": {
+        "launcher": "codex",
+        "model": "gpt-5.4",
+        "effort": "medium",
+        "reviewEffort": "high",
+        "maxAgents": 3,
+        "env": {}
+      },
+      "ollama-local": {
+        "launcher": "codex",
+        "model": "qwen2.5-coder:14b",
+        "effort": "medium",
+        "maxAgents": 2,
+        "env": {
+          "OPENAI_BASE_URL": "http://127.0.0.1:11434/v1",
+          "OPENAI_API_KEY": "ollama"
+        }
+      }
+    }
   },
   "triage": {
     "triage_model": "gemini-2.5-flash",
@@ -26,9 +55,9 @@
     "max_step_retries": 2,
     "step_categories": {
       "deep": { "agent": "claude", "description": "Complex implementation" },
-      "quick": { "agent": "claude", "description": "Simple, scoped change" },
-      "test": { "agent": "claude", "description": "Writing or fixing tests" },
-      "research": { "agent": "claude", "description": "Investigation, no code changes" },
+      "quick": { "agent": "pi", "description": "Simple, scoped change" },
+      "test": { "agent": "codex", "description": "Writing or fixing tests" },
+      "research": { "agent": "ollama-local", "description": "Investigation, no code changes" },
       "review": { "agent": "codex", "description": "Code review or validation" }
     }
   },

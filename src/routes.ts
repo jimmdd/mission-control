@@ -4,7 +4,6 @@ import { homedir, cpus, totalmem, freemem, loadavg } from "node:os";
 import { fileURLToPath } from "node:url";
 import { execFile, spawn } from "node:child_process";
 import type { IncomingMessage, ServerResponse } from "node:http";
-import type { OpenClawPluginApi } from "openclaw/plugin-sdk";
 import type {
   CreateActivityInput,
   CreateAgentInput,
@@ -182,21 +181,20 @@ function sanitizeConfig(config: Record<string, unknown>): Record<string, unknown
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
 }
-const PLUGIN_PREFIX = "/ext/mission-control";
-const API_PREFIX = `${PLUGIN_PREFIX}/api`;
+const API_PREFIX = "/api";
 
-function getSwarmConfig(): Record<string, unknown> {
-  try {
-    const p = join(homedir(), ".openclaw", "swarm", "swarm-config.json");
-    if (existsSync(p)) return JSON.parse(readFileSync(p, "utf-8"));
-  } catch {}
-  return {};
+function resolveApiRoutePath(pathname: string): string | null {
+  if (pathname === API_PREFIX || pathname.startsWith(`${API_PREFIX}/`)) {
+    return pathname.slice(API_PREFIX.length) || "/";
+  }
+  return null;
 }
 
 async function getSwarmAgentStatusMap(
   logger: McLogger
 ): Promise<Record<string, Record<string, unknown>>> {
-  const registryPath = join(homedir(), ".openclaw", "swarm", "active-tasks.json");
+    const mcHome = process.env.MC_HOME ?? join(homedir(), ".mission-control");
+    const registryPath = join(mcHome, "swarm", "active-tasks.json");
   const raw = readFileSync(registryPath, "utf-8");
   const entries = JSON.parse(raw) as Array<Record<string, unknown>>;
 
@@ -251,39 +249,6 @@ async function getSwarmAgentStatusMap(
   return byTask;
 }
 
-function getLinearConfig(): { enabled: boolean; label: string; triageLabel: string; mentionTag: string; botName: string } {
-  const cfg = getSwarmConfig();
-  const linear = (cfg.linear ?? {}) as Record<string, unknown>;
-  return {
-    enabled: linear.enabled !== false,
-    label: typeof linear.label === "string" ? linear.label : "",
-    triageLabel: typeof linear.triageLabel === "string" ? linear.triageLabel : "",
-    mentionTag: typeof linear.mentionTag === "string" ? linear.mentionTag : "",
-    botName: typeof linear.botName === "string" ? linear.botName : "Mission Control",
-  };
-}
-
-const LINEAR_API = "https://api.linear.app/graphql";
-
-async function linearGraphQL(query: string, variables?: Record<string, unknown>): Promise<Record<string, unknown>> {
-  const apiKey = process.env.LINEAR_API_KEY;
-  if (!apiKey) throw new Error("LINEAR_API_KEY not set");
-
-  const resp = await fetch(LINEAR_API, {
-    method: "POST",
-    headers: { "Content-Type": "application/json", Authorization: apiKey },
-    body: JSON.stringify({ query, variables }),
-  });
-
-  if (!resp.ok) throw new Error(`Linear API ${resp.status}: ${resp.statusText}`);
-  const json = (await resp.json()) as Record<string, unknown>;
-  if (json.errors) {
-    const msgs = (json.errors as Array<{ message: string }>).map(e => e.message).join("; ");
-    throw new Error(`Linear GraphQL: ${msgs}`);
-  }
-  return (json.data ?? {}) as Record<string, unknown>;
-}
-
 interface TriageQuestion {
   question?: string;
   q?: string;
@@ -296,132 +261,6 @@ interface TriageQuestion {
 interface TriageState {
   questions?: TriageQuestion[];
   status?: string;
-}
-
-function parseTriageState(raw: unknown): TriageState | null {
-  if (!raw) return null;
-  try {
-    const parsed = typeof raw === "string" ? JSON.parse(raw) : raw;
-    if (parsed && Array.isArray(parsed.questions)) return parsed as TriageState;
-  } catch {}
-  return null;
-}
-
-/** Post triage answers back to Linear as a formatted comment. Fire-and-forget. */
-function syncTriageAnswersToLinear(
-  externalId: string,
-  oldState: TriageState | null,
-  newState: TriageState,
-): void {
-  const apiKey = process.env.LINEAR_API_KEY;
-  if (!apiKey) return;
-
-  const cfg = getLinearConfig();
-  if (!cfg.enabled) return;
-
-  const newQs = newState.questions ?? [];
-  const oldQs = oldState?.questions ?? [];
-  const prefix = `${cfg.mentionTag} **${cfg.botName}**`;
-
-  const threadMutation = `mutation($issueId: String!, $body: String!, $parentId: String!) {
-    commentCreate(input: { issueId: $issueId, body: $body, parentId: $parentId }) { success }
-  }`;
-  const topLevelMutation = `mutation($issueId: String!, $body: String!) {
-    commentCreate(input: { issueId: $issueId, body: $body }) { success }
-  }`;
-
-  const unthreaded: { question: string; answer: string }[] = [];
-
-  for (let i = 0; i < newQs.length; i++) {
-    const nq = newQs[i];
-    const oq = oldQs[i];
-    const hasNewAnswer = !!(nq.answer || nq.answered);
-    const hadOldAnswer = !!(oq?.answer || oq?.answered);
-    if (!hasNewAnswer || hadOldAnswer) continue;
-
-    const answer = nq.answer ?? "(no text)";
-    const linearCommentId = nq.linear_comment_id;
-
-    if (linearCommentId) {
-      const body = `${prefix}: **A:** ${answer}`;
-      linearGraphQL(threadMutation, {
-        issueId: externalId,
-        body,
-        parentId: linearCommentId,
-      }).catch(err => {
-        console.error(`[MC] Failed to reply to Q${i + 1} thread: ${err}`);
-      });
-    } else {
-      unthreaded.push({
-        question: nq.question ?? nq.q ?? `Question ${i + 1}`,
-        answer,
-      });
-    }
-  }
-
-  if (unthreaded.length > 0) {
-    const body = unthreaded.map(qa =>
-      `**Q:** ${qa.question}\n**A:** ${qa.answer}`
-    ).join("\n\n");
-
-    linearGraphQL(topLevelMutation, {
-      issueId: externalId,
-      body: `${prefix}: Triage answers via Mission Control:\n\n${body}`,
-    }).catch(err => {
-      console.error(`[MC] Failed to sync triage answers to Linear: ${err}`);
-    });
-  }
-}
-
-async function fetchLinearTeams(): Promise<Array<{ id: string; name: string; key: string }>> {
-  const data = await linearGraphQL(`{ teams { nodes { id name key } } }`);
-  const teams = data.teams as { nodes: Array<{ id: string; name: string; key: string }> };
-  return teams.nodes;
-}
-
-let labelIdCache: Record<string, string> = {};
-
-async function resolveLinearLabelId(labelName: string): Promise<string | null> {
-  if (labelIdCache[labelName]) return labelIdCache[labelName];
-
-  const data = await linearGraphQL(
-    `query($name: String!) { issueLabels(filter: { name: { eq: $name } }) { nodes { id name } } }`,
-    { name: labelName },
-  );
-  const labels = data.issueLabels as { nodes: Array<{ id: string; name: string }> };
-  if (labels.nodes.length > 0) {
-    labelIdCache[labelName] = labels.nodes[0].id;
-    return labels.nodes[0].id;
-  }
-  return null;
-}
-
-const MC_PRIORITY_TO_LINEAR: Record<string, number> = { urgent: 1, high: 2, normal: 3, low: 4 };
-
-async function createLinearIssue(
-  teamId: string,
-  title: string,
-  description: string | undefined,
-  priority: string,
-  labelName: string,
-): Promise<{ id: string; identifier: string; url: string }> {
-  const labelId = await resolveLinearLabelId(labelName);
-  const linearPriority = MC_PRIORITY_TO_LINEAR[priority] ?? 3;
-  const labelIds = labelId ? [labelId] : [];
-
-  const data = await linearGraphQL(
-    `mutation($input: IssueCreateInput!) {
-      issueCreate(input: $input) {
-        success
-        issue { id identifier url }
-      }
-    }`,
-    { input: { title, description: description ?? "", teamId, priority: linearPriority, labelIds } },
-  );
-
-  const result = data.issueCreate as { success: boolean; issue: { id: string; identifier: string; url: string } };
-  if (!result.success) throw new Error("Linear issue creation failed");
-  return result.issue;
 }
 
 function getDashboardHtml(): string | null {
@@ -485,39 +324,27 @@ export function createHandler(db: MissionControlDB, logger?: McLogger): (req: In
       return;
     }
 
-    // Serve dashboard UI at /ext/mission-control/ or /ext/mission-control
+    // Serve dashboard UI at / or /dashboard
     if (
-      pathname === PLUGIN_PREFIX ||
-      pathname === `${PLUGIN_PREFIX}/` ||
-      pathname === `${PLUGIN_PREFIX}/dashboard` ||
-      pathname === `${PLUGIN_PREFIX}/dashboard/`
+      pathname === "/" ||
+      pathname === "/dashboard" ||
+      pathname === "/dashboard/"
     ) {
       serveDashboard(res);
       return;
     }
 
-    if (pathname === `${PLUGIN_PREFIX}/space` || pathname === `${PLUGIN_PREFIX}/space/`) {
+    if (pathname === "/space" || pathname === "/space/") {
       serveSpace(res);
       return;
     }
 
     // API routes
-    if (pathname.startsWith(`${API_PREFIX}/`)) {
+    if (resolveApiRoutePath(pathname) !== null) {
       await handleApiRequest(req, res, url, db, log);
       return;
     }
   };
-}
-
-export function registerRoutes(api: OpenClawPluginApi, db: MissionControlDB): void {
-  api.logger.info(`mission-control: registering HTTP routes at ${API_PREFIX}`);
-  const handler = createHandler(db, api.logger);
-  api.registerHttpRoute({
-    path: PLUGIN_PREFIX,
-    auth: "plugin",
-    match: "prefix",
-    handler,
-  });
 }
 
 async function handleApiRequest(
@@ -532,7 +359,11 @@ async function handleApiRequest(
     const method = req.method ?? "GET";
     const readOnly = isTruthyEnv("MISSION_CONTROL_READ_ONLY");
 
-    const routePath = pathname.replace(API_PREFIX, "");
+    const routePath = resolveApiRoutePath(pathname);
+    if (routePath === null) {
+      sendJson(res, 404, { error: "Not found" });
+      return;
+    }
     const segments = routePath.split("/").filter(Boolean);
 
     if (segments[0] === "meta" && segments.length === 1 && method === "GET") {
@@ -570,7 +401,7 @@ async function handleApiRequest(
           return;
         }
 
-        // Backward compat: accept old linear_issue_id/url field names
+        // Backward compat: accept old linear_issue_id/url field names as generic external refs
         if (body.linear_issue_id && !body.external_id) {
           body.external_id = body.linear_issue_id;
           delete body.linear_issue_id;
@@ -579,44 +410,7 @@ async function handleApiRequest(
           body.external_url = body.linear_issue_url;
           delete body.linear_issue_url;
         }
-
-        const syncToLinear = body.sync_to_linear === true;
-        const linearTeamId = typeof body.linear_team_id === "string" ? body.linear_team_id : "";
-        delete body.sync_to_linear;
-        delete body.linear_team_id;
-
-        let task = db.createTask(body as unknown as CreateTaskInput);
-        if (syncToLinear && linearTeamId) {
-          try {                const linearCfg = getLinearConfig();
-                const taskType = typeof body.task_type === "string" ? body.task_type : "implementation";
-                const linearLabel = taskType !== "implementation" && linearCfg.triageLabel
-                  ? linearCfg.triageLabel
-                  : linearCfg.label;
-                const issue = await createLinearIssue(
-                  linearTeamId,
-                  body.title as string,
-                  typeof body.description === "string" ? body.description : undefined,
-                  typeof body.priority === "string" ? body.priority : "normal",
-                  linearLabel,
-                );
-                task = db.updateTask(task.id, {
-                  external_id: issue.id,
-                  external_url: issue.url,
-                }) ?? task;
-                db.createActivity({
-                  task_id: task.id,
-                  activity_type: "synced",
-                  message: `Synced to Linear as ${issue.identifier}`,
-                });
-              } catch (err) {
-                db.createActivity({
-                  task_id: task.id,
-                  activity_type: "sync_failed",
-                  message: `Linear sync failed: ${err instanceof Error ? err.message : "Unknown error"}`,
-                });
-              }
-            }
-
+        const task = db.createTask(body as unknown as CreateTaskInput);
         sendJson(res, 201, task);
         return;
       }
@@ -651,7 +445,6 @@ async function handleApiRequest(
               const needsTriageCheck = typeof body.triage_state === "string";
               const needsPriorityCheck = typeof body.priority === "string" && ["urgent", "high"].includes(body.priority);
               const oldTask = (needsTriageCheck || needsPriorityCheck) ? db.getTask(taskId) : null;
-              const oldTriageState = needsTriageCheck && oldTask ? parseTriageState(oldTask.triage_state) : null;
 
               if (needsPriorityCheck && oldTask) {
                 const stalled = ["on_hold", "inbox", "planning"];
@@ -672,13 +465,6 @@ async function handleApiRequest(
                   activity_type: "status_changed",
                   message: `Priority escalated to ${body.priority} — moved from ${oldTask.status} to inbox for immediate dispatch`,
                 });
-              }
-
-              if (needsTriageCheck && task.external_id) {
-                const newTriageState = parseTriageState(body.triage_state);
-                if (newTriageState) {
-                  syncTriageAnswersToLinear(task.external_id, oldTriageState, newTriageState);
-                }
               }
 
               sendJson(res, 200, task);
@@ -740,17 +526,6 @@ async function handleApiRequest(
                   ? `Task marked done in Mission Control. Reason: ${reason}`
                   : "Task marked done in Mission Control.",
               });
-
-              if (task.external_id) {
-                const cfg = getLinearConfig();
-                const note = reason
-                  ? `${cfg.mentionTag} **${cfg.botName}**: Task marked done in Mission Control.\n\nReason: ${reason}`
-                  : `${cfg.mentionTag} **${cfg.botName}**: Task marked done in Mission Control.`;
-                linearGraphQL(
-                  `mutation($id: String!, $body: String!) { commentCreate(input: { issueId: $id, body: $body }) { success } }`,
-                  { id: task.external_id, body: note },
-                ).catch(err => console.error(`[MC] Failed to post done note to Linear: ${err}`));
-              }
 
               sendJson(res, 200, { success: true, task: updated });
               return;
@@ -823,15 +598,6 @@ async function handleApiRequest(
                 message: `${modeLabel} promoted to implementation — moved ${task.status} -> planning. Reason: ${reason}`,
               });
 
-              if (task.external_id) {
-                const cfg = getLinearConfig();
-                const line = `${cfg.mentionTag} **${cfg.botName}**: ${modeLabel} promoted to implementation in Mission Control.\n\nReason: ${reason}`;
-                linearGraphQL(
-                  `mutation($id: String!, $body: String!) { commentCreate(input: { issueId: $id, body: $body }) { success } }`,
-                  { id: task.external_id, body: line },
-                ).catch(err => console.error(`[MC] Failed to post promotion note to Linear: ${err}`));
-              }
-
               sendJson(res, 200, { success: true, task: updated });
               return;
             }
@@ -863,60 +629,6 @@ async function handleApiRequest(
                     typeof body.metadata === "string" ? body.metadata : undefined,
                 };
                 const activity = db.createActivity(input);
-
-                if (
-                  input.activity_type === "investigation_findings"
-                  || input.activity_type === "research_findings"
-                ) {
-                  const task = db.getTask(taskId);
-                  const externalId = task?.external_id;
-                  if (externalId) {
-                    const cfg = getLinearConfig();
-                    const prefix = `${cfg.mentionTag} **${cfg.botName}**`;
-                    const isResearchFindings = input.activity_type === "research_findings";
-                    const header = isResearchFindings
-                      ? `${prefix}: 🧠 Research findings:\n\n`
-                      : `${prefix}: 🔍 Investigation findings:\n\n`;
-                    const maxChunk = 10000;
-                    const fullText = input.message;
-
-                    if (fullText.length <= maxChunk) {
-                      linearGraphQL(
-                        `mutation($id: String!, $body: String!) { commentCreate(input: { issueId: $id, body: $body }) { success } }`,
-                        { id: externalId, body: header + fullText },
-                      ).catch(err => console.error(`[MC] Failed to post findings to Linear: ${err}`));
-                    } else {
-                      const chunks: string[] = [];
-                      let remaining = fullText;
-                      while (remaining.length > 0) {
-                        if (remaining.length <= maxChunk) {
-                          chunks.push(remaining);
-                          break;
-                        }
-                        let splitAt = remaining.lastIndexOf("\n", maxChunk);
-                        if (splitAt < maxChunk * 0.5) splitAt = maxChunk;
-                        chunks.push(remaining.slice(0, splitAt));
-                        remaining = remaining.slice(splitAt).trimStart();
-                      }
-
-                      const postChunks = async () => {
-                        for (let i = 0; i < chunks.length; i++) {
-                          const label = chunks.length > 1 ? ` (${i + 1}/${chunks.length})` : "";
-                          const body = (
-                            i === 0
-                              ? header
-                              : `${prefix}: ${isResearchFindings ? "🧠" : "🔍"} Findings continued${label}:\n\n`
-                          ) + chunks[i];
-                          await linearGraphQL(
-                            `mutation($id: String!, $body: String!) { commentCreate(input: { issueId: $id, body: $body }) { success } }`,
-                            { id: externalId, body },
-                          );
-                        }
-                      };
-                      postChunks().catch(err => console.error(`[MC] Failed to post findings to Linear: ${err}`));
-                    }
-                  }
-                }
 
                 sendJson(res, 201, activity);
                 return;
@@ -1205,7 +917,7 @@ async function handleApiRequest(
             const sessions = db.listSessions();
             const session = sessions.find(
               (item) =>
-                item.openclaw_session_id === body.session_id && item.status === "active"
+                item.session_id === body.session_id && item.status === "active"
             );
 
             if (!session) {
@@ -1427,7 +1139,8 @@ async function handleApiRequest(
         }
 
         if (segments[0] === "config" && segments.length === 1) {
-          const configPath = join(homedir(), ".openclaw", "swarm", "swarm-config.json");
+          const mcHome = process.env.MC_HOME ?? join(homedir(), ".mission-control");
+          const configPath = join(mcHome, "swarm", "swarm-config.json");
 
           const readConfig = (): Record<string, unknown> => {
             try {
@@ -1468,29 +1181,6 @@ async function handleApiRequest(
             return;
           }
         }
-        if (segments[0] === "linear" && segments.length >= 2) {
-          if (segments[1] === "config" && method === "GET") {
-            const cfg = getLinearConfig();
-            const hasApiKey = !!process.env.LINEAR_API_KEY;
-            sendJson(res, 200, { ...cfg, hasApiKey });
-            return;
-          }
-
-          if (segments[1] === "teams" && method === "GET") {
-            if (!process.env.LINEAR_API_KEY) {
-              sendJson(res, 200, { teams: [], error: "LINEAR_API_KEY not set" });
-              return;
-            }
-            try {
-              const teams = await fetchLinearTeams();
-              sendJson(res, 200, { teams });
-            } catch (err) {
-              sendJson(res, 500, { teams: [], error: err instanceof Error ? err.message : "Failed to fetch teams" });
-            }
-            return;
-          }
-        }
-
         if (segments[0] === "repos" && segments.length === 1 && method === "GET") {
           const gitProjectsDir = join(homedir(), "GitProjects");
           const repos: Array<{ project: string; repo: string }> = [];
@@ -1513,7 +1203,8 @@ async function handleApiRequest(
         }
 
         if (segments[0] === "knowledge") {
-          const knowledgeScript = join(homedir(), ".openclaw", "swarm", "knowledge-manage.py");
+          const mcHome = process.env.MC_HOME ?? join(homedir(), ".mission-control");
+          const knowledgeScript = join(mcHome, "swarm", "knowledge-manage.py");
 
           if (segments.length === 1 && method === "POST") {
             const body = await parseBody(req);
@@ -1545,7 +1236,7 @@ async function handleApiRequest(
 
             // If stage filter requested, use review script for stage-aware listing
             if (stage) {
-              const reviewScript = join(homedir(), ".openclaw", "swarm", "knowledge-review.py");
+              const reviewScript = join(mcHome, "swarm", "knowledge-review.py");
               const result = await runPython([reviewScript, "list", "--stage", stage, "--limit", limit]);
               sendJson(res, 200, result);
               return;
@@ -1632,7 +1323,7 @@ async function handleApiRequest(
           }
 
           // Knowledge review endpoints (shell out to knowledge-review.py)
-          const reviewScript = join(homedir(), ".openclaw", "swarm", "knowledge-review.py");
+          const reviewScript = join(mcHome, "swarm", "knowledge-review.py");
 
           if (segments.length === 3 && segments[0] === "knowledge" && segments[2] === "promote" && method === "POST") {
             const result = await runPython([reviewScript, "promote", "--id", segments[1]]);
@@ -1662,7 +1353,8 @@ async function handleApiRequest(
         }
 
         if (segments[0] === "services" && segments[1] === "health" && segments.length === 2 && method === "GET") {
-          const healthScript = join(homedir(), ".openclaw", "mission-control", "service-health.py");
+          const mcHome = process.env.MC_HOME ?? join(homedir(), ".mission-control");
+          const healthScript = join(mcHome, "health", "service-health.py");
           const result = await runPython([healthScript]);
           sendJson(res, 200, result);
           return;
@@ -1745,7 +1437,8 @@ function runClaude(prompt: string, timeout = 120000): Promise<string> {
 
 function runPython(args: string[]): Promise<Record<string, unknown>> {
   return new Promise((resolve, reject) => {
-    const pythonBin = join(homedir(), ".openclaw", "venv-3.12", "bin", "python3");
+    const mcHome = process.env.MC_HOME ?? join(homedir(), ".mission-control");
+    const pythonBin = process.env.MC_PYTHON_BIN ?? join(mcHome, "venv-3.12", "bin", "python3");
     execFile(pythonBin, args, { timeout: 30000 }, (err, stdout, stderr) => {
       if (err) {
         reject(new Error(stderr || err.message));

@@ -344,7 +344,7 @@
       <div class="top-actions">
         <span class="status-pill" id="conn">Connecting...</span>
         <button class="btn" id="refresh">Refresh</button>
-        <a class="link-btn" href="/ext/mission-control/">Dashboard</a>
+        <a class="link-btn" href="/">Dashboard</a>
       </div>
     </div>
 
@@ -471,9 +471,9 @@
 
     function api(path) {
       const sep = path.includes('?') ? '&' : '?';
-      if (!state.accessToken) return `/ext/mission-control/api${path}`;
-      return `/ext/mission-control/api${path}${sep}token=${encodeURIComponent(state.accessToken)}`;
-    }
+        if (!state.accessToken) return `/api${path}`;
+        return `/api${path}${sep}token=${encodeURIComponent(state.accessToken)}`;
+      }
 
     function ago(ts) {
       if (!ts) return '--';

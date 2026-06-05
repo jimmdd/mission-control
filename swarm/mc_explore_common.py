@@ -13,11 +13,13 @@ from uuid import uuid4
 
 from context_fabrica.models import KnowledgeRecord, Relation
 from context_fabrica.storage import PostgresPgvectorAdapter
+from context_fabrica_config import make_context_fabrica_adapter
 
 # === Constants ===
 
-SWARM_DIR = Path.home() / ".openclaw" / "swarm"
-ENV_FILE = Path.home() / ".openclaw" / ".env"
+MC_HOME = Path(os.environ.get("MC_HOME", str(Path.home() / ".mission-control")))
+SWARM_DIR = MC_HOME / "swarm"
+ENV_FILE = MC_HOME / ".env"
 GITPROJECTS = Path.home() / "GitProjects"
 EMBEDDING_MODEL = "gemini-embedding-001"
 EMBEDDING_DIM = 3072
@@ -73,8 +75,7 @@ def get_gemini_key() -> str:
 
 
 def make_adapter() -> PostgresPgvectorAdapter:
-    dsn = os.environ.get("CONTEXT_FABRICA_DSN", "postgresql://mm@localhost/context_fabrica")
-    return PostgresPgvectorAdapter.from_dsn(dsn, embedding_dimensions=EMBEDDING_DIM)
+    return make_context_fabrica_adapter(bootstrap=True)
 
 
 # === Gemini APIs ===

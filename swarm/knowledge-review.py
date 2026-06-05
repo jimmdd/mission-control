@@ -1,4 +1,4 @@
-#!/Users/mm/.openclaw/venv-3.12/bin/python3
+#!/usr/bin/env python3
 """Knowledge review CLI for Mission Control.
 Subcommands: list, promote, reject, update.
 Called by MC API routes via shell-out.
@@ -13,24 +13,17 @@ import os
 
 from context_fabrica.models import KnowledgeRecord
 from context_fabrica.storage import PostgresPgvectorAdapter
+from context_fabrica_config import context_fabrica_dsn, make_context_fabrica_adapter
 
 EMBEDDING_DIM = 3072
 
 
 def get_dsn() -> str:
-    dsn = os.environ.get("CONTEXT_FABRICA_DSN", "")
-    if not dsn:
-        env_file = Path.home() / ".openclaw" / ".env"
-        if env_file.exists():
-            for line in env_file.read_text().splitlines():
-                if line.startswith("CONTEXT_FABRICA_DSN="):
-                    dsn = line.split("=", 1)[1].strip()
-                    break
-    return dsn or "postgresql://mm@localhost/context_fabrica"
+    return context_fabrica_dsn()
 
 
 def _make_adapter() -> PostgresPgvectorAdapter:
-    return PostgresPgvectorAdapter.from_dsn(get_dsn(), embedding_dimensions=EMBEDDING_DIM)
+    return make_context_fabrica_adapter(bootstrap=True)
 
 
 def _record_to_dict(rec: KnowledgeRecord) -> dict:

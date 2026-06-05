@@ -1,4 +1,4 @@
-#!/Users/mm/.openclaw/venv-3.12/bin/python3
+#!/usr/bin/env python3
 """mc-explore: Scan a repo and extract architectural knowledge into context-fabrica."""
 
 import argparse

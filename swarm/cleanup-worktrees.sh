@@ -1,6 +1,7 @@
 #!/bin/bash
 # Cleans up merged/done worktrees and task registry entries
-SWARM_DIR="$HOME/.openclaw/swarm"
+MC_HOME="${MC_HOME:-$HOME/.mission-control}"
+SWARM_DIR="$MC_HOME/swarm"
 REGISTRY="$SWARM_DIR/active-tasks.json"
 TIMESTAMP=$(date '+%Y-%m-%d %H:%M:%S')
 STATE_TOOL="$SWARM_DIR/swarm-state.py"

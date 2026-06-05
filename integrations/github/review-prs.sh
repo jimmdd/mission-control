@@ -1,7 +1,8 @@
 #!/bin/bash
 set -euo pipefail
 
-SWARM_DIR="$HOME/.openclaw/swarm"
+MC_HOME="${MC_HOME:-$HOME/.mission-control}"
+SWARM_DIR="$MC_HOME/swarm"
 CONFIG="$SWARM_DIR/swarm-config.json"
 STATE_DIR="$SWARM_DIR/pr-review-state"
 STATE_FILE="$STATE_DIR/reviewed-prs.json"

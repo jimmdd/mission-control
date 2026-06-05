@@ -11,7 +11,7 @@
     "noEmit": true
   },
   "include": [
-    "index.ts",
+    "server.ts",
     "src/**/*.ts"
   ]
 }

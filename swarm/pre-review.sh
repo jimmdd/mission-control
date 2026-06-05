@@ -9,7 +9,8 @@ set -euo pipefail
 
 WORKTREE=$1
 BASE_BRANCH=${2:-origin/main}
-SWARM_DIR="$HOME/.openclaw/swarm"
+MC_HOME="${MC_HOME:-$HOME/.mission-control}"
+SWARM_DIR="$MC_HOME/swarm"
 CONFIG="$SWARM_DIR/swarm-config.json"
 
 CODEX_MODEL=$(jq -r '.codex.model // "gpt-5.4"' "$CONFIG" 2>/dev/null || echo "gpt-5.4")
@@ -30,7 +31,7 @@ CHANGED_FILES=$(git diff --name-only "$BASE_BRANCH" -- . ":(exclude)*.lock" 2>/d
 FILE_COUNT=$(echo "$CHANGED_FILES" | wc -l | tr -d ' ')
 
 # Build blast radius context if code-review-graph is available
-CRG_BIN="$HOME/.openclaw/venv-3.12/bin/code-review-graph"
+CRG_BIN="$MC_HOME/venv-3.12/bin/code-review-graph"
 BLAST_RADIUS=""
 if [ -x "$CRG_BIN" ]; then
   # Update graph for changed files

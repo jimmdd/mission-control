@@ -4,12 +4,13 @@
 
 set -euo pipefail
 
-SWARM_DIR="$HOME/.openclaw/swarm"
+MC_HOME="${MC_HOME:-$HOME/.mission-control}"
+SWARM_DIR="$MC_HOME/swarm"
 REGISTRY="$SWARM_DIR/active-tasks.json"
 STATE_TOOL="$SWARM_DIR/swarm-state.py"
 LOG="$SWARM_DIR/logs/pr-reviews.log"
 STATE_DIR="$SWARM_DIR/pr-review-state"
-MC_URL="${MISSION_CONTROL_URL:-http://localhost:18789/ext/mission-control}"
+MC_URL="${MISSION_CONTROL_URL:-http://localhost:18790}"
 LAUNCHER="$SWARM_DIR/run-claude.sh"
 TIMESTAMP=$(date -u +%Y-%m-%dT%H:%M:%SZ)
 

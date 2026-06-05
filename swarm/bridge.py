@@ -17,6 +17,7 @@ import json
 import logging
 import os
 import subprocess
+import shlex
 import sys
 import time
 import urllib.error
@@ -32,11 +33,12 @@ from planner import (
     _get_config as get_planner_config,
 )
 
-MC_BASE_URL = os.environ.get("MISSION_CONTROL_URL", "http://localhost:18789/ext/mission-control")
-ENV_FILE = Path.home() / ".openclaw" / ".env"
-LIBRARIAN_DIR = Path.home() / ".openclaw" / "librarian"
-SWARM_DIR = Path.home() / ".openclaw" / "swarm"
-BRIDGE_DIR = Path.home() / ".openclaw" / "bridge"
+MC_HOME = Path(os.environ.get("MC_HOME", str(Path.home() / ".mission-control")))
+MC_BASE_URL = os.environ.get("MISSION_CONTROL_URL", "http://localhost:18790")
+ENV_FILE = MC_HOME / ".env"
+LIBRARIAN_DIR = MC_HOME / "librarian"
+SWARM_DIR = MC_HOME / "swarm"
+BRIDGE_DIR = MC_HOME / "bridge"
 GITPROJECTS_DIR = Path.home() / "GitProjects"
 LOG_DIR = BRIDGE_DIR / "logs"
 
@@ -225,7 +227,7 @@ def _post_gsd_artifacts(task_id: str, worktree_paths: List[str]):
                 logging.warning(f"  Failed to post {filename} for {task_id[:8]}: {e}")
 
 
-SWARM_CONFIG_PATH = Path.home() / ".openclaw" / "swarm" / "swarm-config.json"
+SWARM_CONFIG_PATH = MC_HOME / "swarm" / "swarm-config.json"
 
 
 def _load_triage_config() -> dict:
@@ -253,12 +255,8 @@ def _triage_model_deep() -> str:
     return _load_triage_config()["triage_model_deep"]
 
 
-CONTEXT_FABRICA_DSN = os.environ.get("CONTEXT_FABRICA_DSN", "postgresql://mm@localhost/context_fabrica")
+from context_fabrica_config import make_context_fabrica_adapter
 
-from context_fabrica.storage import PostgresPgvectorAdapter
-from context_fabrica.config import PostgresSettings
-
-_pg_settings = PostgresSettings(dsn=CONTEXT_FABRICA_DSN, embedding_dimensions=3072)
 _triage_cfg = _load_triage_config()
 EMBEDDING_MODEL = _triage_cfg["embedding_model"]
 EMBEDDING_URL = f"https://generativelanguage.googleapis.com/v1beta/models/{EMBEDDING_MODEL}:embedContent"
@@ -318,7 +316,7 @@ def recall_knowledge(repos: List[dict], query: str, top_k: int = KNOWLEDGE_MAX_R
 
     # Query context-fabrica via PostgresPgvectorAdapter
     try:
-        adapter = PostgresPgvectorAdapter(_pg_settings)
+        adapter = make_context_fabrica_adapter(bootstrap=True)
         domains = set()
         for r in repos:
             domains.add(f"{r['project']}/{r['repo']}")
@@ -793,75 +791,6 @@ def post_planning_questions(task_id: str, questions: List[dict], triage_result: 
         logging.warning(f"Failed to save triage state: {e}")
 
 
-def _linear_gql(api_key: str, query: str, variables: dict) -> Optional[dict]:
-    payload = json.dumps({"query": query, "variables": variables}).encode()
-    req = urllib.request.Request(
-        "https://api.linear.app/graphql",
-        data=payload,
-        headers={"Content-Type": "application/json", "Authorization": api_key},
-    )
-    try:
-        with urllib.request.urlopen(req, timeout=15) as resp:
-            return json.loads(resp.read())
-    except Exception as e:
-        logging.warning(f"  Linear GraphQL error: {e}")
-        return None
-
-
-def sync_questions_to_linear(task: dict, questions: List[dict]):
-    linear_issue_id = task.get("external_id") or task.get("linear_issue_id")
-    if not linear_issue_id:
-        return
-
-    api_key = os.environ.get("LINEAR_API_KEY", "")
-    if not api_key:
-        return
-
-    task_id = task["id"]
-    mutation = """
-    mutation($issueId: String!, $body: String!) {
-      commentCreate(input: { issueId: $issueId, body: $body }) {
-        success comment { id }
-      }
-    }
-    """
-
-    posted = 0
-    for i, q in enumerate(questions, 1):
-        qtext = q.get("question", q.get("q", ""))
-        lines = [f"**Q{i}.** {qtext}"]
-        if q.get("options"):
-            lines.append("")
-            for j, opt in enumerate(q["options"]):
-                label = chr(ord('a') + j)
-                lines.append(f"  {label}) {opt}")
-        lines.append("\n_Reply in this thread to answer._")
-        body = "\n".join(lines)
-
-        result = _linear_gql(api_key, mutation, {"issueId": linear_issue_id, "body": body})
-        if result:
-            comment_data = result.get("data", {}).get("commentCreate", {})
-            comment_id = comment_data.get("comment", {}).get("id")
-            if comment_id:
-                q["linear_comment_id"] = comment_id
-                posted += 1
-
-    if posted:
-        logging.info(f"  Posted {posted}/{len(questions)} questions as individual Linear comments")
-        try:
-            triage_state = mc_request("GET", f"/api/tasks/{task_id}/triage-state")
-            if triage_state and triage_state.get("questions"):
-                all_qs = triage_state["questions"]
-                q_by_id = {q.get("id"): q for q in questions if q.get("linear_comment_id")}
-                for tq in all_qs:
-                    if tq.get("id") in q_by_id:
-                        tq["linear_comment_id"] = q_by_id[tq["id"]]["linear_comment_id"]
-                mc_request("PUT", f"/api/tasks/{task_id}/triage-state", triage_state)
-                logging.info(f"  Saved Linear comment IDs to triage state")
-        except Exception as e:
-            logging.warning(f"  Failed to save comment IDs to triage state: {e}")
-
-
 def _extract_ticket_id(title: str) -> str:
     import re
     match = re.search(r'[A-Z]+-\d+', title)
@@ -883,7 +812,7 @@ def generate_prompt(task: dict, repo_context: str, project: str, repo: str,
 {description}
 """
     if linear_url:
-        prompt += f"\nLinear ticket: {linear_url}\n"
+        prompt += f"\nExternal reference: {linear_url}\n"
 
     prompt += f"""
 ## Codebase Info ({project}/{repo})
@@ -956,7 +885,7 @@ Run the same checks that GitHub Actions CI will run:
 ### Step 6: Codex Review
 Run the pre-review script to get an external Codex review on your branch diff:
 ```bash
-~/.openclaw/swarm/pre-review.sh "$(pwd)" origin/main
+                ~/.mission-control/swarm/pre-review.sh "$(pwd)" origin/main
 ```
 Read the output. If VERDICT is FAIL:
 1. Fix the issues identified
@@ -988,7 +917,7 @@ curl -X POST {MC_BASE_URL}/api/tasks/{task['id']}/activities \\
   -H "Content-Type: application/json" \\
   -d '{{"activity_type": "needs_human", "message": "DESCRIBE THE BLOCKER AND WHAT YOU NEED"}}'
 ```
-The bridge will post this to Linear and wait for a human response. Your session will be resumed when the answer arrives.
+Mission Control will pause this task and wait for a human response before resuming.
 
 ## Constraints
 - Do NOT modify unrelated files
@@ -1014,7 +943,7 @@ def generate_investigation_prompt(task: dict, repo_context: str, project: str, r
 {description}
 """
     if linear_url:
-        prompt += f"\nLinear ticket: {linear_url}\n"
+        prompt += f"\nExternal reference: {linear_url}\n"
 
     prompt += f"""
 ## Codebase Info ({project}/{repo})
@@ -1196,7 +1125,7 @@ def _build_triage_context(task_id: str) -> str:
         lines = []
         for cc in context_comments:
             lines.append(f"**{cc.get('author', '?')}**: {cc.get('body', '')}")
-        sections.append("## Additional Context (from Linear comments)\n" + "\n\n".join(lines))
+        sections.append("## Additional Context (from external comments)\n" + "\n\n".join(lines))
 
     questions = ts.get("questions", []) if ts else []
     answered = [q for q in questions if q.get("answer")]
@@ -1501,7 +1430,7 @@ def process_in_progress_plans():
     """
     from planner import verify_step_completion
 
-    PROGRESS_DIR = Path.home() / ".openclaw" / "bridge" / "progress"
+    PROGRESS_DIR = MC_HOME / "bridge" / "progress"
     if not PROGRESS_DIR.exists():
         return
 
@@ -1625,13 +1554,6 @@ def process_in_progress_plans():
             mc_update_task(task_id, {"status": "review"})
             logging.info(f"  Plan complete for {task_id[:8]} — PR created, moved to review")
 
-            # Post completion comment to Linear so process_review_tasks can detect human replies
-            task = _fetch_task(task_id)
-            if task:
-                linear_issue_id = task.get("external_id") or task.get("linear_issue_id")
-                if linear_issue_id:
-                    _post_linear_comment(linear_issue_id,
-                        "**Completed by bridge**\n\nWork complete — PR opened. Task is now in review.")
             continue
 
         # Check if any steps permanently failed — escalate
@@ -1957,9 +1879,8 @@ def process_task(task: dict):
             mc_update_task(task_id, {"status": "planning"})
             mc_log_activity(task_id, "status_changed", f"Moved to planning: {triage.get('reasoning', 'needs clarification')}")
             post_planning_questions(task_id, questions, triage_result=triage)
-            sync_questions_to_linear(task, [q for q in questions if not q.get("answer")])
             mc_log_activity(task_id, "updated",
-                f"Self-answered {auto_answered}/{len(questions)} questions. Posted {len(unanswered)} to Linear for human input.")
+                f"Self-answered {auto_answered}/{len(questions)} questions. {len(unanswered)} require human follow-up in Mission Control.")
 
         return
 
@@ -2158,91 +2079,6 @@ def process_planning_tasks():
             _spawn_for_repos(task, repos)
 
 
-# === Linear Reply Watching (Post-PR Change Requests) ===
-
-def _extract_issue_tag(linear_url: str) -> Optional[str]:
-    """Extract issue tag (e.g. CAP-85) from Linear issue URL."""
-    match = re.search(r'([A-Z]+-\d+)', linear_url)
-    return match.group(1) if match else None
-
-
-def _lookup_linear_issue_id(issue_tag: str) -> Optional[str]:
-    """Look up Linear issue UUID from tag (e.g. CAP-85)."""
-    api_key = os.environ.get("LINEAR_API_KEY", "")
-    if not api_key:
-        return None
-
-    match = re.match(r'([A-Z]+)-(\d+)', issue_tag)
-    if not match:
-        return None
-    team_key, issue_num = match.group(1), int(match.group(2))
-
-    query = """
-    query($num: Float!, $teamKey: String!) {
-        issues(filter: { number: { eq: $num }, team: { key: { eq: $teamKey } } }) {
-            nodes { id }
-        }
-    }
-    """
-    payload = json.dumps({
-        "query": query,
-        "variables": {"num": issue_num, "teamKey": team_key}
-    }).encode()
-
-    req = urllib.request.Request(
-        "https://api.linear.app/graphql",
-        data=payload,
-        headers={"Content-Type": "application/json", "Authorization": api_key},
-    )
-    try:
-        with urllib.request.urlopen(req, timeout=15) as resp:
-            data = json.loads(resp.read())
-            nodes = data.get("data", {}).get("issues", {}).get("nodes", [])
-            return nodes[0]["id"] if nodes else None
-    except Exception as e:
-        logging.warning(f"  Failed to look up Linear issue {issue_tag}: {e}")
-        return None
-
-
-def _fetch_linear_comments(issue_id: str) -> List[dict]:
-    """Fetch comments from a Linear issue."""
-    api_key = os.environ.get("LINEAR_API_KEY", "")
-    if not api_key:
-        return []
-
-    query = """
-    query($id: String!) {
-        issue(id: $id) {
-            comments(first: 50) {
-                nodes {
-                    id
-                    body
-                    createdAt
-                    user { name }
-                }
-            }
-        }
-    }
-    """
-    payload = json.dumps({
-        "query": query,
-        "variables": {"id": issue_id}
-    }).encode()
-
-    req = urllib.request.Request(
-        "https://api.linear.app/graphql",
-        data=payload,
-        headers={"Content-Type": "application/json", "Authorization": api_key},
-    )
-    try:
-        with urllib.request.urlopen(req, timeout=15) as resp:
-            data = json.loads(resp.read())
-            return data.get("data", {}).get("issue", {}).get("comments", {}).get("nodes", [])
-    except Exception as e:
-        logging.warning(f"  Failed to fetch comments for {issue_id[:8]}: {e}")
-        return []
-
-
 def _find_agent_registry_entry(mc_task_id: str) -> Optional[dict]:
     """Find agent entry in active-tasks.json by MC task ID."""
     registry_file = SWARM_DIR / "active-tasks.json"
@@ -2258,42 +2094,56 @@ def _find_agent_registry_entry(mc_task_id: str) -> Optional[dict]:
         return None
 
 
-def _post_linear_comment(linear_issue_id: str, body: str):
-    api_key = os.environ.get("LINEAR_API_KEY", "")
-    if not api_key or not linear_issue_id:
-        return
-    mutation = """
-    mutation AddComment($issueId: String!, $body: String!) {
-      commentCreate(input: { issueId: $issueId, body: $body }) { success }
-    }
-    """
-    payload = json.dumps({"query": mutation, "variables": {"issueId": linear_issue_id, "body": body}}).encode()
-    req = urllib.request.Request(
-        "https://api.linear.app/graphql",
-        data=payload,
-        headers={"Content-Type": "application/json", "Authorization": api_key},
-    )
-    try:
-        with urllib.request.urlopen(req, timeout=15):
-            logging.info(f"  Posted reply to Linear issue {linear_issue_id[:8]}")
-    except Exception as e:
-        logging.warning(f"  Failed to post to Linear: {e}")
+def _launcher_for_entry(entry: dict) -> str:
+    launcher = entry.get("launcher")
+    if launcher == "codex":
+        return str(SWARM_DIR / "run-codex.sh")
+    if launcher == "pi":
+        return str(SWARM_DIR / "run-pi.sh")
+    return str(SWARM_DIR / "run-claude.sh")
 
 
-def _relaunch_for_change_request(task: dict, change_requests_text: str, linear_issue_id: str = "", source: str = "linear"):
-    """Re-launch an agent with change request feedback from Linear."""
+def _env_exports_for_entry(entry: dict) -> str:
+    exports = []
+    profile = entry.get("agentProfile") or entry.get("agent")
+    if profile:
+        exports.append(f"export AGENT_PROFILE={shlex.quote(str(profile))};")
+    model = entry.get("agentModel")
+    if model:
+        exports.append(f"export AGENT_MODEL={shlex.quote(str(model))};")
+    provider = entry.get("agentProvider")
+    if provider:
+        exports.append(f"export AGENT_PROVIDER={shlex.quote(str(provider))};")
+    thinking = entry.get("agentThinking")
+    if thinking:
+        exports.append(f"export AGENT_THINKING={shlex.quote(str(thinking))};")
+    effort = entry.get("agentEffort")
+    if effort:
+        exports.append(f"export AGENT_EFFORT={shlex.quote(str(effort))};")
+    cost_controls = entry.get("costControls") if isinstance(entry.get("costControls"), dict) else {}
+    fallback = cost_controls.get("fallbackModel")
+    if fallback:
+        exports.append(f"export AGENT_FALLBACK_MODEL={shlex.quote(str(fallback))};")
+    agent_env = entry.get("agentEnv") if isinstance(entry.get("agentEnv"), dict) else {}
+    for key, value in agent_env.items():
+        exports.append(f"export {key}={shlex.quote(str(value))};")
+    return " ".join(exports) + (" " if exports else "")
+
+
+def _relaunch_for_change_request(task: dict, change_requests_text: str, source: str = "dashboard"):
+    """Re-launch an agent with change request feedback from Mission Control."""
     task_id = task["id"]
 
     entry = _find_agent_registry_entry(task_id)
     if not entry:
         logging.warning(f"  No agent registry entry for {task_id[:8]} — cannot re-launch")
         mc_log_activity(task_id, "updated",
-                        "Change request received from Linear but no agent found to re-launch. Manual intervention needed.")
+                        "Change request received but no agent found to re-launch. Manual intervention needed.")
         return
 
     worktree = entry.get("worktree", "")
     session = entry.get("tmuxSession", "")
-    agent_type = entry.get("agent", "claude")
+    agent_profile = entry.get("agentProfile", entry.get("agent", "claude"))
     reg_id = entry.get("id", "")
 
     if not worktree or not Path(worktree).exists():
@@ -2304,7 +2154,7 @@ def _relaunch_for_change_request(task: dict, change_requests_text: str, linear_i
 
     mc_update_task(task_id, {"status": "in_progress"})
 
-    prompt_title = "Change Request from Linear Review" if source == "linear" else "Change Request from Mission Control"
+    prompt_title = "Change Request from Mission Control"
     prompt_file = SWARM_DIR / "prompts" / f"{reg_id}-change-request.md"
     prompt_file.parent.mkdir(parents=True, exist_ok=True)
     prompt_file.write_text(f"""# {prompt_title}
@@ -2331,15 +2181,16 @@ Do NOT ask for confirmation. Complete all steps autonomously.
     except Exception:
         pass
 
-    launcher = str(SWARM_DIR / ("run-codex.sh" if agent_type == "codex" else "run-claude.sh"))
+    launcher = _launcher_for_entry(entry)
+    env_exports = _env_exports_for_entry(entry)
 
     try:
         subprocess.run(
             ["tmux", "new-session", "-d", "-s", session, "-c", worktree,
-             f"PROMPT_OVERRIDE={prompt_file} {launcher} {reg_id}"],
+             f"bash -lc '{env_exports}PROMPT_OVERRIDE={shlex.quote(str(prompt_file))} exec {shlex.quote(launcher)} {shlex.quote(reg_id)}'"],
             capture_output=True, text=True, timeout=30,
         )
-        logging.info(f"  Re-launched agent {reg_id} for change request")
+        logging.info(f"  Re-launched agent {reg_id} for change request ({agent_profile})")
     except Exception as e:
         logging.error(f"  Failed to re-launch agent: {e}")
         mc_log_activity(task_id, "updated", f"Failed to re-launch agent for change request: {e}")
@@ -2358,18 +2209,10 @@ Do NOT ask for confirmation. Complete all steps autonomously.
     except Exception:
         pass
 
-    if source == "linear":
-        mc_log_activity(task_id, "updated", "Change request received from Linear reviewer — re-launching agent")
-    else:
-        mc_log_activity(task_id, "updated", "Change request received from dashboard note — re-launching agent")
-
-    if linear_issue_id:
-        _post_linear_comment(linear_issue_id,
-                             "**Bridge agent acknowledged** — working on the requested changes. "
-                             "I'll update the PR and reply here when done.")
+    mc_log_activity(task_id, "updated", "Change request received from Mission Control — re-launching agent")
 
 
-def _relaunch_for_investigation_followup(task: dict, followup_text: str, source: str = "dashboard", linear_issue_id: str = ""):
+def _relaunch_for_investigation_followup(task: dict, followup_text: str, source: str = "dashboard"):
     task_id = task["id"]
 
     entry = _find_agent_registry_entry(task_id)
@@ -2381,7 +2224,7 @@ def _relaunch_for_investigation_followup(task: dict, followup_text: str, source:
 
     worktree = entry.get("worktree", "")
     session = entry.get("tmuxSession", "")
-    agent_type = entry.get("agent", "claude")
+    agent_profile = entry.get("agentProfile", entry.get("agent", "claude"))
     reg_id = entry.get("id", "")
 
     if not worktree or not Path(worktree).exists():
@@ -2419,15 +2262,16 @@ This task is investigation-only. You received new follow-up context/questions.
     except Exception:
         pass
 
-    launcher = str(SWARM_DIR / ("run-codex.sh" if agent_type == "codex" else "run-claude.sh"))
+    launcher = _launcher_for_entry(entry)
+    env_exports = _env_exports_for_entry(entry)
 
     try:
         subprocess.run(
             ["tmux", "new-session", "-d", "-s", session, "-c", worktree,
-             f"PROMPT_OVERRIDE={prompt_file} {launcher} {reg_id}"],
+             f"bash -lc '{env_exports}PROMPT_OVERRIDE={shlex.quote(str(prompt_file))} exec {shlex.quote(launcher)} {shlex.quote(reg_id)}'"],
             capture_output=True, text=True, timeout=30,
         )
-        logging.info(f"  Re-launched investigation agent {reg_id} for follow-up")
+        logging.info(f"  Re-launched investigation agent {reg_id} for follow-up ({agent_profile})")
     except Exception as e:
         logging.error(f"  Failed to re-launch investigation follow-up agent: {e}")
         mc_log_activity(task_id, "updated", f"Failed to re-launch investigation follow-up agent: {e}")
@@ -2446,28 +2290,16 @@ This task is investigation-only. You received new follow-up context/questions.
     except Exception:
         pass
 
-    if source == "linear":
-        mc_log_activity(task_id, "updated", "Investigation follow-up received from Linear — re-launching investigation agent")
-    else:
-        mc_log_activity(task_id, "updated", "Investigation follow-up received from dashboard note — re-launching investigation agent")
-
-    if linear_issue_id:
-        _post_linear_comment(linear_issue_id,
-                             "**Bridge investigation follow-up acknowledged** — gathering more evidence and findings. "
-                             "I will post updated investigation results here.")
+    mc_log_activity(task_id, "updated", "Investigation follow-up received from Mission Control — re-launching investigation agent")
 
 
 def process_review_tasks():
-    """Watch for human replies on Linear for tasks in review/testing status.
-
-    When a human replies after the bot's completion comment, treat it as a
-    change request and re-launch the agent with an iteration prompt.
-    """
+    """Watch for Mission Control feedback on tasks in review/testing status."""
     review_tasks = fetch_tasks_by_status("review") + fetch_tasks_by_status("testing")
     if not review_tasks:
         return
 
-    logging.info(f"Checking {len(review_tasks)} review/testing tasks for Linear change requests")
+    logging.info(f"Checking {len(review_tasks)} review/testing tasks for Mission Control feedback")
 
     for task in review_tasks:
         task_id = task["id"]
@@ -2483,76 +2315,9 @@ def process_review_tasks():
                 _relaunch_for_change_request(task, dashboard_feedback, source="dashboard")
             continue
 
-        # Find Linear issue URL (check parent if child task)
-        linear_url = task.get("external_url") or task.get("linear_issue_url", "")
-        if not linear_url and task.get("parent_task_id"):
-            try:
-                parent = mc_request("GET", f"/api/tasks/{task['parent_task_id']}")
-                linear_url = parent.get("external_url") or parent.get("linear_issue_url", "")
-            except Exception:
-                pass
-
-        if not linear_url:
-            continue
-
-        # Extract issue tag and look up Linear ID
-        issue_tag = _extract_issue_tag(linear_url)
-        if not issue_tag:
-            continue
-
-        linear_id = _lookup_linear_issue_id(issue_tag)
-        if not linear_id:
-            continue
-
-        # Fetch comments on the Linear issue
-        comments = _fetch_linear_comments(linear_id)
-        if not comments:
-            continue
-
-        # Find the bot's LATEST completion comment timestamp
-        completion_time = None
-        for c in comments:
-            body = c.get("body", "")
-            if _is_bridge_generated(body):
-                ts = c.get("createdAt", "")
-                if not completion_time or ts > completion_time:
-                    completion_time = ts
-
-        if not completion_time:
-            continue  # No bot completion comment found yet
-
-        # Find human replies AFTER the completion comment
-        change_requests = []
-        for c in comments:
-            ts = c.get("createdAt", "")
-            body = c.get("body", "")
-            if ts > completion_time and not _is_bridge_generated(body):
-                change_requests.append(c)
-
-        if not change_requests:
-            continue
-
-        # Format the change request text
-        request_text = "\n\n---\n\n".join([
-            f"**{c.get('user', {}).get('name', 'Unknown')}** ({c['createdAt']}):\n{c['body']}"
-            for c in change_requests
-        ])
-
-        logging.info(f"Change request found for: {title} ({task_id[:8]}) — {len(change_requests)} reply(ies)")
-        if task_type == "investigation":
-            _relaunch_for_investigation_followup(task, request_text, source="linear", linear_issue_id=linear_id)
-        else:
-            _relaunch_for_change_request(task, request_text, linear_issue_id=linear_id)
-
 
 def process_human_escalations():
-    """Detect needs_human activities on in-progress tasks and escalate to Linear.
-
-    When an agent posts activity_type=needs_human, this:
-    1. Moves task to planning status (pauses further agent work)
-    2. Posts the blocker to Linear as a comment
-    3. When human replies, process_planning_tasks picks it up and resumes
-    """
+    """Detect needs_human activities on in-progress tasks and move them back to planning."""
     in_progress = fetch_tasks_by_status("in_progress")
     if not in_progress:
         return
@@ -2588,7 +2353,6 @@ def process_human_escalations():
         mc_log_activity(task_id, "updated",
                         f"Escalated to human: {escalation_msg}")
 
-        # Post to Linear if linked
         questions = [{
             "id": "agent_escalation",
             "question": escalation_msg,
@@ -2596,9 +2360,7 @@ def process_human_escalations():
             "question_type": "text",
         }]
         post_planning_questions(task_id, questions)
-        sync_questions_to_linear(task, questions)
-
-        logging.info(f"  Posted escalation to Linear for {task_id[:8]}")
+        logging.info(f"  Recorded escalation in Mission Control for {task_id[:8]}")
 
 
 def run_once():
@@ -2619,7 +2381,7 @@ def run_once():
     process_planning_tasks()
     process_in_progress_plans()
     process_human_escalations()
-    process_review_tasks()
+    # External review/ticket integrations should react to Mission Control state externally.
 
 
 def run_daemon(interval: int = 60):

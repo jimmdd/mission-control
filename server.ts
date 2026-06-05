@@ -4,7 +4,8 @@ import { createHandler } from "./src/routes.js";
 
 // Config
 const PORT = parseInt(process.env.MC_PORT ?? "18790", 10);
-const DB_PATH = process.env.MC_DB_PATH ?? `${process.env.HOME}/.openclaw/mission-control/mc.db`;
+const MC_HOME = process.env.MC_HOME ?? `${process.env.HOME}/.mission-control`;
+const DB_PATH = process.env.MC_DB_PATH ?? `${MC_HOME}/data/mc.db`;
 
 // Init DB
 const db = new MissionControlDB(DB_PATH);
@@ -42,7 +43,8 @@ const server = createServer(async (req, res) => {
 const HOST = process.env.MC_HOST ?? "0.0.0.0";
 server.listen(PORT, HOST, () => {
   console.log(`[mc] Mission Control listening on http://${HOST}:${PORT} (PID ${process.pid})`);
-  console.log(`[mc] log file: ${process.env.HOME}/.openclaw/mission-control/logs/mc.log`);
+  console.log(`[mc] home directory: ${MC_HOME}`);
+  console.log(`[mc] log file: ${MC_HOME}/logs/mc.log`);
 });
 
 // Graceful shutdown

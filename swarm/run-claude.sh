@@ -3,18 +3,19 @@
 set -euo pipefail
 
 TASK_NAME=$1
-SWARM_DIR="$HOME/.openclaw/swarm"
+MC_HOME="${MC_HOME:-$HOME/.mission-control}"
+SWARM_DIR="$MC_HOME/swarm"
 CONFIG="$SWARM_DIR/swarm-config.json"
 STATE_TOOL="$SWARM_DIR/swarm-state.py"
 
-CFG_MODEL=$(jq -r '.claude.model // "claude-opus-4-6"' "$CONFIG" 2>/dev/null || echo "claude-opus-4-6")
-CFG_FALLBACK=$(jq -r '.claude.fallbackModel // ""' "$CONFIG" 2>/dev/null || echo "")
+CFG_MODEL=${AGENT_MODEL:-$(jq -r '.claude.model // "claude-opus-4-6"' "$CONFIG" 2>/dev/null || echo "claude-opus-4-6")}
+CFG_FALLBACK=${AGENT_FALLBACK_MODEL:-$(jq -r '.claude.fallbackModel // ""' "$CONFIG" 2>/dev/null || echo "")}
 
 MODEL=${2:-$CFG_MODEL}
 MAX_RETRIES=${MAX_AGENT_RETRIES:-3}
 PROMPT_FILE="${PROMPT_OVERRIDE:-$SWARM_DIR/prompts/${TASK_NAME}.md}"
 LOG="$SWARM_DIR/logs/agent-${TASK_NAME}.log"
-MC_URL="${MISSION_CONTROL_URL:-http://localhost:18789/ext/mission-control}"
+MC_URL="${MISSION_CONTROL_URL:-http://localhost:18790}"
 HEARTBEAT_INTERVAL_SECONDS="${HEARTBEAT_INTERVAL_SECONDS:-90}"
 
 MC_TASK_ID="${MC_TASK_ID:-}"
@@ -109,7 +110,7 @@ exit_code=1
 
 while [ "$attempt" -lt "$MAX_RETRIES" ]; do
   attempt=$((attempt + 1))
-  echo "=== Claude Agent starting: $TASK_NAME | Model: $MODEL | Attempt: $attempt/$MAX_RETRIES | $(date) ===" | tee -a "$LOG"
+  echo "=== Claude Agent starting: $TASK_NAME | Profile: ${AGENT_PROFILE:-claude} | Model: $MODEL | Attempt: $attempt/$MAX_RETRIES | $(date) ===" | tee -a "$LOG"
   [ -n "$BUDGET" ] && echo "  Budget: \$${BUDGET} | Turns: ${TURNS:-unlimited} | Fallback: ${FALLBACK:-none}" | tee -a "$LOG"
   update_registry "retryCount" "$attempt"
   update_registry "lastAttemptAt" "$(date +%s)000"

@@ -131,22 +131,16 @@ def main():
     # 1. Mission Control
     services.append(check_http_service("Mission Control", "http://127.0.0.1:18790/health"))
 
-    # 2. OpenClaw Gateway
-    services.append(check_http_service("OpenClaw Gateway", "http://127.0.0.1:18789/__openclaw__/health"))
-
-    # 3-6, 8. Launchd services
+    # 2-5. Core launchd services
     launchd_services = [
-        ("Bridge", "ai.openclaw.bridge"),
-        ("Linear Sync", "ai.openclaw.linear-sync"),
-        ("Watch PR Reviews", "ai.openclaw.watch-pr-reviews"),
-        ("Review PRs", "ai.openclaw.review-prs"),
-        ("Check Agents", "ai.openclaw.check-agents"),
-        ("Repo Watcher", "ai.openclaw.repo-watcher"),
+        ("Bridge", "ai.mission-control.bridge"),
+        ("Check Agents", "ai.mission-control.check-agents"),
+        ("Repo Watcher", "ai.mission-control.repo-watcher"),
     ]
     for name, label in launchd_services:
         services.append(check_launchd_service(name, label))
 
-    # 7. PostgreSQL
+    # 6. PostgreSQL
     services.append(check_postgresql())
 
     # Determine overall status
@@ -155,8 +149,8 @@ def main():
         overall = "healthy"
     elif any(s == "down" for s in statuses):
         down_count = statuses.count("down")
-        # Critical if more than half are down or if core services (MC, Gateway, PG) are down
-        core_names = {"Mission Control", "OpenClaw Gateway", "PostgreSQL"}
+        # Critical if more than half are down or if core services (MC, PG) are down
+        core_names = {"Mission Control", "PostgreSQL"}
         core_down = any(s["status"] == "down" and s["name"] in core_names for s in services)
         if down_count > len(statuses) // 2 or core_down:
             overall = "critical"

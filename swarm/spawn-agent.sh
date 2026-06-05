@@ -1,11 +1,11 @@
 #!/bin/bash
-# Usage: spawn-agent.sh <task-id> <repo-path> <branch-name> [agent-type] [description]
-# Example: spawn-agent.sh feat-templates ~/GitProjects/YourOrg/your-repo feat/templates claude "Add email templates"
+# Usage: spawn-agent.sh <task-id> <repo-path> <branch-name> [agent-profile] [description]
+# Example: spawn-agent.sh feat-templates ~/GitProjects/YourOrg/your-repo feat/templates pi "Add email templates"
 #
 # Environment variables (optional, forwarded to agent launcher):
 #   MAX_BUDGET_USD    — dollar cap per agent run (e.g. 5.00)
 #   MAX_TURNS         — turn limit (e.g. 50)
-#   FALLBACK_MODEL    — model to fall back to (e.g. claude-sonnet-4-20250514)
+#   FALLBACK_MODEL    — model to fall back to (legacy override)
 #   AGENTS_JSON       — path to Agent Teams JSON file, or "default" for built-in testing agent
 #   MAX_AGENT_RETRIES — retry limit (default: 3)
 #   MC_TASK_ID        — Mission Control task ID (for monitor → webhook callback)
@@ -15,43 +15,101 @@ set -euo pipefail
 TASK_ID=$1
 REPO_PATH=$2
 BRANCH_NAME=$3
-AGENT_TYPE=${4:-codex}   # codex | claude
-DESCRIPTION=$5
-SWARM_DIR="$HOME/.openclaw/swarm"
-MC_URL="${MISSION_CONTROL_URL:-http://localhost:18789/ext/mission-control}"
+DESCRIPTION=${5:-$1}
+MC_HOME="${MC_HOME:-$HOME/.mission-control}"
+SWARM_DIR="$MC_HOME/swarm"
+MC_URL="${MISSION_CONTROL_URL:-http://localhost:18790}"
 WORKTREE_BASE="$(dirname "$REPO_PATH")/worktrees"
 WORKTREE_PATH="$WORKTREE_BASE/$TASK_ID"
 REGISTRY="$SWARM_DIR/active-tasks.json"
 STATE_TOOL="$SWARM_DIR/swarm-state.py"
 
 CONFIG="$SWARM_DIR/swarm-config.json"
-CFG_MAX_CLAUDE=$(jq -r '.claude.maxAgents // 10' "$CONFIG" 2>/dev/null || echo 10)
-CFG_MAX_CODEX=$(jq -r '.codex.maxAgents // 3' "$CONFIG" 2>/dev/null || echo 3)
-MAX_CLAUDE_AGENTS=${MAX_CLAUDE_AGENTS:-$CFG_MAX_CLAUDE}
-MAX_CODEX_AGENTS=${MAX_CODEX_AGENTS:-$CFG_MAX_CODEX}
+DEFAULT_PROFILE=$(jq -r '.agents.defaultProfile // "codex"' "$CONFIG" 2>/dev/null || echo codex)
+AGENT_PROFILE=${4:-$DEFAULT_PROFILE}
 
 if [ -z "$TASK_ID" ] || [ -z "$REPO_PATH" ] || [ -z "$BRANCH_NAME" ]; then
-  echo "Usage: spawn-agent.sh <task-id> <repo-path> <branch-name> [codex|claude] [description]"
+  echo "Usage: spawn-agent.sh <task-id> <repo-path> <branch-name> [agent-profile] [description]"
   echo ""
-  echo "Env vars: MAX_BUDGET_USD, MAX_TURNS, FALLBACK_MODEL, AGENTS_JSON, MAX_AGENT_RETRIES, MAX_CLAUDE_AGENTS, MAX_CODEX_AGENTS"
+  echo "Env vars: MAX_BUDGET_USD, MAX_TURNS, FALLBACK_MODEL, AGENTS_JSON, MAX_AGENT_RETRIES"
   exit 1
 fi
 
-RUNNING_CLAUDE=$(jq '[.[] | select(.status == "running" and .agent == "claude")] | length' "$REGISTRY" 2>/dev/null || echo 0)
-RUNNING_CODEX=$(jq '[.[] | select(.status == "running" and .agent == "codex")] | length' "$REGISTRY" 2>/dev/null || echo 0)
+resolve_profile_json() {
+  local profile="$1"
+  jq -c --arg profile "$profile" '
+    if .agents.profiles[$profile] then
+      .agents.profiles[$profile]
+    elif $profile == "claude" then
+      {
+        launcher: "claude",
+        model: (.claude.model // "claude-opus-4-6"),
+        fallbackModel: (.claude.fallbackModel // ""),
+        maxAgents: (.claude.maxAgents // 10),
+        fallbackProfile: "codex",
+        env: {}
+      }
+    elif $profile == "pi" then
+      {
+        launcher: "pi",
+        provider: "google",
+        model: "google/gemini-2.5-pro",
+        thinking: "high",
+        maxAgents: 5,
+        fallbackProfile: "codex",
+        env: {}
+      }
+    elif $profile == "codex" then
+      {
+        launcher: "codex",
+        model: (.codex.model // "codex-mini"),
+        effort: (.codex.effort // "high"),
+        reviewEffort: (.codex.reviewEffort // "high"),
+        maxAgents: (.codex.maxAgents // 3),
+        env: {}
+      }
+    else empty end
+  ' "$CONFIG" 2>/dev/null
+}
 
-if [ "$AGENT_TYPE" = "claude" ] && [ "$RUNNING_CLAUDE" -ge "$MAX_CLAUDE_AGENTS" ]; then
-  echo "Claude slots full ($RUNNING_CLAUDE/$MAX_CLAUDE_AGENTS), falling back to Codex..."
-  AGENT_TYPE="codex"
-fi
-
-if [ "$AGENT_TYPE" = "codex" ] && [ "$RUNNING_CODEX" -ge "$MAX_CODEX_AGENTS" ]; then
-  echo "ERROR: All agent slots full (Claude: $RUNNING_CLAUDE/$MAX_CLAUDE_AGENTS, Codex: $RUNNING_CODEX/$MAX_CODEX_AGENTS)"
-  echo "Queue this task and retry later."
+PROFILE_JSON=$(resolve_profile_json "$AGENT_PROFILE")
+if [ -z "$PROFILE_JSON" ] || [ "$PROFILE_JSON" = "null" ]; then
+  echo "ERROR: Unknown agent profile '$AGENT_PROFILE'"
   exit 2
 fi
 
-TMUX_SESSION="${AGENT_TYPE}-${TASK_ID}"
+AGENT_LAUNCHER=$(echo "$PROFILE_JSON" | jq -r '.launcher // "codex"')
+AGENT_MODEL=$(echo "$PROFILE_JSON" | jq -r '.model // ""')
+AGENT_PROVIDER=$(echo "$PROFILE_JSON" | jq -r '.provider // ""')
+AGENT_THINKING=$(echo "$PROFILE_JSON" | jq -r '.thinking // ""')
+AGENT_FALLBACK_MODEL=$(echo "$PROFILE_JSON" | jq -r '.fallbackModel // ""')
+AGENT_EFFORT=$(echo "$PROFILE_JSON" | jq -r '.effort // ""')
+AGENT_MAX_AGENTS=$(echo "$PROFILE_JSON" | jq -r '.maxAgents // 1')
+AGENT_FALLBACK_PROFILE=$(echo "$PROFILE_JSON" | jq -r '.fallbackProfile // ""')
+AGENT_ENV_JSON=$(echo "$PROFILE_JSON" | jq -c '.env // {}')
+
+RUNNING_PROFILE=$(jq --arg profile "$AGENT_PROFILE" '[.[] | select(.status == "running" and (.agentProfile // .agent) == $profile)] | length' "$REGISTRY" 2>/dev/null || echo 0)
+
+if [ "$RUNNING_PROFILE" -ge "$AGENT_MAX_AGENTS" ]; then
+  if [ -n "$AGENT_FALLBACK_PROFILE" ]; then
+    echo "Agent profile '$AGENT_PROFILE' slots full ($RUNNING_PROFILE/$AGENT_MAX_AGENTS), falling back to '$AGENT_FALLBACK_PROFILE'..."
+    AGENT_PROFILE="$AGENT_FALLBACK_PROFILE"
+    PROFILE_JSON=$(resolve_profile_json "$AGENT_PROFILE")
+    AGENT_LAUNCHER=$(echo "$PROFILE_JSON" | jq -r '.launcher // "codex"')
+    AGENT_MODEL=$(echo "$PROFILE_JSON" | jq -r '.model // ""')
+    AGENT_PROVIDER=$(echo "$PROFILE_JSON" | jq -r '.provider // ""')
+    AGENT_THINKING=$(echo "$PROFILE_JSON" | jq -r '.thinking // ""')
+    AGENT_FALLBACK_MODEL=$(echo "$PROFILE_JSON" | jq -r '.fallbackModel // ""')
+    AGENT_EFFORT=$(echo "$PROFILE_JSON" | jq -r '.effort // ""')
+    AGENT_MAX_AGENTS=$(echo "$PROFILE_JSON" | jq -r '.maxAgents // 1')
+    AGENT_ENV_JSON=$(echo "$PROFILE_JSON" | jq -c '.env // {}')
+  else
+    echo "ERROR: Agent profile '$AGENT_PROFILE' is full ($RUNNING_PROFILE/$AGENT_MAX_AGENTS)"
+    exit 2
+  fi
+fi
+
+TMUX_SESSION="${AGENT_PROFILE}-${TASK_ID}"
 
 if [ ! -f "$SWARM_DIR/prompts/${TASK_ID}.md" ]; then
   echo "ERROR: No prompt file at $SWARM_DIR/prompts/${TASK_ID}.md"
@@ -89,7 +147,7 @@ git worktree add "$WORKTREE_PATH" -b "$BRANCH_NAME" "$WORKTREE_BASE_REF"
 
 # Inject MCP config for code-review-graph (if venv exists)
 cd "$WORKTREE_PATH"
-CRG_BIN="$HOME/.openclaw/venv-3.12/bin/code-review-graph"
+CRG_BIN="$MC_HOME/venv-3.12/bin/code-review-graph"
 if [ -x "$CRG_BIN" ] && [ ! -f ".mcp.json" ]; then
   cat > .mcp.json <<MCPEOF
 {
@@ -113,12 +171,21 @@ elif [ -f "package-lock.json" ]; then
   npm install
 fi
 
-# Determine launcher
-if [ "$AGENT_TYPE" = "claude" ]; then
-  LAUNCHER="$SWARM_DIR/run-claude.sh"
-else
-  LAUNCHER="$SWARM_DIR/run-codex.sh"
-fi
+case "$AGENT_LAUNCHER" in
+  claude)
+    LAUNCHER="$SWARM_DIR/run-claude.sh"
+    ;;
+  codex)
+    LAUNCHER="$SWARM_DIR/run-codex.sh"
+    ;;
+  pi)
+    LAUNCHER="$SWARM_DIR/run-pi.sh"
+    ;;
+  *)
+    echo "ERROR: Unsupported launcher '$AGENT_LAUNCHER' for profile '$AGENT_PROFILE'"
+    exit 2
+    ;;
+esac
 
 # Build env var string for tmux session
 # tmux send-keys doesn't inherit our env, so we export explicitly
@@ -128,6 +195,18 @@ ENV_EXPORTS=""
 [ -n "${FALLBACK_MODEL:-}" ]    && ENV_EXPORTS+="export FALLBACK_MODEL='$FALLBACK_MODEL'; "
 [ -n "${AGENTS_JSON:-}" ]       && ENV_EXPORTS+="export AGENTS_JSON='$AGENTS_JSON'; "
 [ -n "${MAX_AGENT_RETRIES:-}" ] && ENV_EXPORTS+="export MAX_AGENT_RETRIES='$MAX_AGENT_RETRIES'; "
+[ -n "$AGENT_PROFILE" ]         && ENV_EXPORTS+="export AGENT_PROFILE='$AGENT_PROFILE'; "
+[ -n "$AGENT_MODEL" ]           && ENV_EXPORTS+="export AGENT_MODEL='$AGENT_MODEL'; "
+[ -n "$AGENT_PROVIDER" ]        && ENV_EXPORTS+="export AGENT_PROVIDER='$AGENT_PROVIDER'; "
+[ -n "$AGENT_THINKING" ]        && ENV_EXPORTS+="export AGENT_THINKING='$AGENT_THINKING'; "
+[ -n "$AGENT_FALLBACK_MODEL" ]  && ENV_EXPORTS+="export AGENT_FALLBACK_MODEL='$AGENT_FALLBACK_MODEL'; "
+[ -n "$AGENT_EFFORT" ]          && ENV_EXPORTS+="export AGENT_EFFORT='$AGENT_EFFORT'; "
+while IFS= read -r entry; do
+  [ -z "$entry" ] && continue
+  key=$(echo "$entry" | jq -r '.key')
+  value=$(echo "$entry" | jq -r '.value')
+  ENV_EXPORTS+="export ${key}='${value//\'/\'\\\'\'}'; "
+done < <(echo "$AGENT_ENV_JSON" | jq -c 'to_entries[]?')
 
 # Spawn tmux session with env vars forwarded
 tmux new-session -d -s "$TMUX_SESSION" -c "$WORKTREE_PATH" \
@@ -141,22 +220,35 @@ AGENTS_DISPLAY="${AGENTS_JSON:-none}"
 TASK_JSON=$(jq -n \
   --arg id "$TASK_ID" \
   --arg session "$TMUX_SESSION" \
-  --arg agent "$AGENT_TYPE" \
+  --arg agent "$AGENT_PROFILE" \
+  --arg launcher "$AGENT_LAUNCHER" \
+  --arg model "$AGENT_MODEL" \
+  --arg provider "$AGENT_PROVIDER" \
+  --arg thinking "$AGENT_THINKING" \
+  --arg effort "$AGENT_EFFORT" \
   --arg desc "$DESCRIPTION" \
   --arg repo "$REPO_PATH" \
   --arg worktree "$WORKTREE_PATH" \
   --arg branch "$BRANCH_NAME" \
   --arg baseBranch "$WORKTREE_BASE_REF" \
   --arg mcTaskId "${MC_TASK_ID:-}" \
-  --arg fallbackModel "${FALLBACK_MODEL:-}" \
+  --arg fallbackModel "${AGENT_FALLBACK_MODEL:-${FALLBACK_MODEL:-}}" \
   --argjson startedAt "$(date +%s)000" \
   --argjson agentTeams "$([ -n "${AGENTS_JSON:-}" ] && echo true || echo false)" \
   --argjson maxBudgetUsd "${MAX_BUDGET_USD:-null}" \
   --argjson maxTurns "${MAX_TURNS:-null}" \
+  --argjson agentEnv "$AGENT_ENV_JSON" \
   '{
     id: $id,
     tmuxSession: $session,
     agent: $agent,
+    agentProfile: $agent,
+    launcher: $launcher,
+    agentModel: (if $model == "" then null else $model end),
+    agentProvider: (if $provider == "" then null else $provider end),
+    agentThinking: (if $thinking == "" then null else $thinking end),
+    agentEffort: (if $effort == "" then null else $effort end),
+    agentEnv: $agentEnv,
     description: $desc,
     repo: $repo,
     worktree: $worktree,
@@ -195,6 +287,9 @@ fi
 echo "Agent spawned: $TMUX_SESSION"
 echo "  Worktree: $WORKTREE_PATH"
 echo "  Branch:   $BRANCH_NAME"
+echo "  Profile:  $AGENT_PROFILE ($AGENT_LAUNCHER)"
+echo "  Provider: ${AGENT_PROVIDER:-default}"
+echo "  Model:    ${AGENT_MODEL:-default}"
 echo "  Budget:   \$$BUDGET_DISPLAY | Turns: $TURNS_DISPLAY"
 echo "  Agents:   $AGENTS_DISPLAY"
 echo "  View:     tmux attach -t $TMUX_SESSION"

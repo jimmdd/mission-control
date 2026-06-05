@@ -1,31 +1,30 @@
 import { request } from "node:http";
 import type { IncomingMessage, ServerResponse } from "node:http";
-import type { OpenClawPluginApi } from "openclaw/plugin-sdk";
-import { registerTools } from "./src/tools.js";
+import type { OpenClawPluginApi } from "./sdk-shim.js";
+import { registerTools } from "./tools.js";
 
 const MC_URL = process.env.MISSION_CONTROL_URL ?? "http://127.0.0.1:18790";
 
 const missionControlPlugin = {
   id: "mission-control",
   name: "Mission Control",
-  description:
-    "Agent task management with SQLite, workspaces, and triage workflows (proxy to standalone MC service)",
+  description: "Optional OpenClaw proxy for the standalone Mission Control service",
 
   register(api: OpenClawPluginApi) {
-    // Register tools (they proxy to MC via HTTP)
     registerTools(api);
 
-    // Proxy all HTTP routes to standalone MC service
     api.registerHttpRoute({
       path: "/ext/mission-control",
       auth: "plugin",
       match: "prefix",
       handler: async (req: IncomingMessage, res: ServerResponse): Promise<void> => {
-        const target = new URL(req.url ?? "/", MC_URL);
+        const incomingPath = req.url ?? "/";
+        const normalizedPath = incomingPath.replace(/^\/ext\/mission-control/, "") || "/";
+        const target = new URL(normalizedPath, MC_URL);
         const proxyReq = request(target, {
           method: req.method,
           headers: { ...req.headers, host: target.host },
-        }, (proxyRes) => {
+        }, proxyRes => {
           res.writeHead(proxyRes.statusCode ?? 502, proxyRes.headers);
           proxyRes.pipe(res);
         });
@@ -42,7 +41,6 @@ const missionControlPlugin = {
     api.registerService({
       id: "mission-control",
       start: async () => {
-        // Health check the standalone MC service
         try {
           const healthRes = await fetch(`${MC_URL}/health`);
           if (healthRes.ok) {
@@ -51,7 +49,7 @@ const missionControlPlugin = {
             api.logger.error("mission-control: standalone service returned non-OK health");
           }
         } catch {
-          api.logger.error("mission-control: standalone service unreachable at " + MC_URL);
+          api.logger.error(`mission-control: standalone service unreachable at ${MC_URL}`);
         }
       },
       stop: async () => {

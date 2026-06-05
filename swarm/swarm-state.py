@@ -222,10 +222,11 @@ def cmd_snapshot_restore(args: argparse.Namespace) -> int:
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Swarm registry state helper")
-    parser.add_argument("--registry", default=str(Path.home() / ".openclaw" / "swarm" / "active-tasks.json"))
-    parser.add_argument("--lock", default=str(Path.home() / ".openclaw" / "swarm" / "active-tasks.lock"))
-    parser.add_argument("--events", default=str(Path.home() / ".openclaw" / "swarm" / "events.jsonl"))
-    parser.add_argument("--snapshot-dir", default=str(Path.home() / ".openclaw" / "swarm" / "state-snapshots"))
+    mc_home = Path(os.environ.get("MC_HOME", str(Path.home() / ".mission-control")))
+    parser.add_argument("--registry", default=str(mc_home / "swarm" / "active-tasks.json"))
+    parser.add_argument("--lock", default=str(mc_home / "swarm" / "active-tasks.lock"))
+    parser.add_argument("--events", default=str(mc_home / "swarm" / "events.jsonl"))
+    parser.add_argument("--snapshot-dir", default=str(mc_home / "swarm" / "state-snapshots"))
 
     sub = parser.add_subparsers(dest="command", required=True)
 

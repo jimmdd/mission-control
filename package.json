@@ -1,16 +1,11 @@
 {
   "name": "mission-control",
   "version": "1.0.0",
-  "description": "OpenClaw plugin: Agent task management with SQLite, workspaces, and triage workflows",
+  "description": "Standalone mission control service for autonomous AI agent swarms",
   "type": "module",
-  "main": "index.ts",
+  "main": "server.ts",
   "bin": {
     "mc": "./mc"
-  },
-  "openclaw": {
-    "extensions": [
-      "./index.ts"
-    ]
   },
   "repository": {
     "type": "git",
@@ -19,11 +14,11 @@
   "author": "jimmdd",
   "license": "MIT",
   "keywords": [
-    "openclaw",
-    "openclaw-plugin",
     "mission-control",
     "task-management",
-    "agent-tools"
+    "agent-tools",
+    "agent-swarm",
+    "context-fabrica"
   ],
   "scripts": {
     "build": "tsc --noEmit",

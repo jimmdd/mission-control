@@ -1,4 +1,4 @@
-#!/Users/mm/.openclaw/venv-3.12/bin/python3
+#!/usr/bin/env python3
 """
 Knowledge Feedback — Track whether recalled knowledge helped downstream tasks.
 
@@ -24,9 +24,8 @@ from pathlib import Path
 from typing import List
 
 from context_fabrica.storage import PostgresPgvectorAdapter
-from context_fabrica.config import PostgresSettings
+from context_fabrica_config import make_context_fabrica_adapter
 
-CONTEXT_FABRICA_DSN = os.environ.get("CONTEXT_FABRICA_DSN", "postgresql://mm@localhost/context_fabrica")
 EMBEDDING_DIM = 3072
 
 logging.basicConfig(
@@ -37,7 +36,7 @@ logging.basicConfig(
 
 
 def _load_env():
-    env_file = Path.home() / ".openclaw" / ".env"
+    env_file = Path(os.environ.get("MC_HOME", str(Path.home() / ".mission-control"))) / ".env"
     if env_file.exists():
         for line in env_file.read_text().splitlines():
             line = line.strip()
@@ -48,7 +47,7 @@ def _load_env():
 
 
 def _make_adapter() -> PostgresPgvectorAdapter:
-    return PostgresPgvectorAdapter.from_dsn(CONTEXT_FABRICA_DSN, embedding_dimensions=EMBEDDING_DIM)
+    return make_context_fabrica_adapter(bootstrap=True)
 
 
 def increment_metadata_counter(entry_id: str, counter: str):

@@ -1,4 +1,4 @@
-#!/Users/mm/.openclaw/venv-3.12/bin/python3
+#!/usr/bin/env python3
 """
 Distills task completion artifacts into knowledge entries stored in Context Fabrica.
 Called by check-agents.sh after an agent completes a task.
@@ -31,11 +31,12 @@ from uuid import uuid4
 
 from context_fabrica.models import KnowledgeRecord
 from context_fabrica.storage import PostgresPgvectorAdapter
+from context_fabrica_config import make_context_fabrica_adapter
 
 # === Config ===
 
-CONTEXT_FABRICA_DSN = os.environ.get("CONTEXT_FABRICA_DSN", "postgresql://mm@localhost/context_fabrica")
-SWARM_CONFIG_PATH = Path.home() / ".openclaw" / "swarm" / "swarm-config.json"
+MC_HOME = Path(os.environ.get("MC_HOME", str(Path.home() / ".mission-control")))
+SWARM_CONFIG_PATH = MC_HOME / "swarm" / "swarm-config.json"
 EMBEDDING_MODEL = "gemini-embedding-001"
 EMBEDDING_DIM = 3072
 EMBEDDING_URL = "https://generativelanguage.googleapis.com/v1beta/models/gemini-embedding-001:embedContent"
@@ -70,7 +71,7 @@ def _load_distill_model() -> str:
 def get_gemini_key() -> str:
     key = os.environ.get("GOOGLE_GENERATIVE_AI_API_KEY", "")
     if not key:
-        env_file = Path.home() / ".openclaw" / ".env"
+        env_file = MC_HOME / ".env"
         if env_file.exists():
             for line in env_file.read_text().splitlines():
                 if line.startswith("GOOGLE_GENERATIVE_AI_API_KEY="):
@@ -80,7 +81,7 @@ def get_gemini_key() -> str:
 
 
 def _make_adapter() -> PostgresPgvectorAdapter:
-    return PostgresPgvectorAdapter.from_dsn(CONTEXT_FABRICA_DSN, embedding_dimensions=EMBEDDING_DIM)
+    return make_context_fabrica_adapter(bootstrap=True)
 
 
 # === Embedding ===

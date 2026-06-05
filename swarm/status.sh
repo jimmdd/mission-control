@@ -1,7 +1,8 @@
 #!/bin/bash
 set -euo pipefail
 
-SWARM_DIR="$HOME/.openclaw/swarm"
+MC_HOME="${MC_HOME:-$HOME/.mission-control}"
+SWARM_DIR="$MC_HOME/swarm"
 REGISTRY="$SWARM_DIR/active-tasks.json"
 EVENTS="$SWARM_DIR/events.jsonl"
 
@@ -28,8 +29,10 @@ echo "=== Last State Events ==="
 if [ -f "$EVENTS" ]; then
   python3 - <<'PY'
 import json
+import os
 from pathlib import Path
-events = Path.home() / ".openclaw" / "swarm" / "events.jsonl"
+mc_home = Path(os.environ.get("MC_HOME", str(Path.home() / ".mission-control")))
+events = mc_home / "swarm" / "events.jsonl"
 for line in events.read_text().splitlines()[-10:]:
     try:
         e = json.loads(line)
