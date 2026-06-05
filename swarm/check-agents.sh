@@ -17,6 +17,7 @@ if [ -f "$MC_HOME/.env" ]; then
 fi
 
 MC_URL="${MISSION_CONTROL_URL:-http://localhost:18790}"
+GSD_BACKEND="${MISSION_CONTROL_GSD_BACKEND:-core}"
 CONFIG="$SWARM_DIR/swarm-config.json"
 CFG_REVIEW_EFFORT=$(jq -r '.codex.reviewEffort // "xhigh"' "$CONFIG" 2>/dev/null || echo "xhigh")
 CODEX_EFFORT="${CODEX_REVIEW_EFFORT:-$CFG_REVIEW_EFFORT}"
@@ -242,6 +243,12 @@ reconcile_completed_agents_to_mc
 # Sets GSD_STATUS to "passed", "gaps_found", "missing", or "no_planning".
 validate_gsd_artifacts() {
   local worktree="$1"
+
+  if [ "$GSD_BACKEND" != "core" ]; then
+    GSD_STATUS="unsupported_backend:$GSD_BACKEND"
+    return 1
+  fi
+
   local planning_dir="$worktree/.planning"
 
   if [ ! -d "$planning_dir" ]; then

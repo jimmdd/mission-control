@@ -32,6 +32,14 @@ from planner import (
     get_completed_steps_summary, is_plan_complete, classify_step,
     _get_config as get_planner_config,
 )
+from gsd_backend import (
+    backend_label,
+    execute_command as gsd_execute_command,
+    gap_plan_command as gsd_gap_plan_command,
+    planning_dir_name as gsd_planning_dir_name,
+    plan_command as gsd_plan_command,
+    verify_command as gsd_verify_command,
+)
 
 MC_HOME = Path(os.environ.get("MC_HOME", str(Path.home() / ".mission-control")))
 MC_BASE_URL = os.environ.get("MISSION_CONTROL_URL", "http://localhost:18790")
@@ -203,14 +211,19 @@ _GSD_ARTIFACTS = [
 def _post_gsd_artifacts(task_id: str, worktree_paths: List[str]):
     """Post GSD artifact files from worktrees as task deliverables."""
     seen = set()  # avoid duplicates if multiple steps share a worktree
+    planning_dir = gsd_planning_dir_name()
     for wt in worktree_paths:
         wt_path = Path(wt)
         if not wt_path.exists() or wt in seen:
             continue
         seen.add(wt)
         for filename, dtype, default_title in _GSD_ARTIFACTS:
-            artifact = wt_path / filename
-            if not artifact.exists():
+            candidates = [wt_path / filename]
+            if filename in {"PLAN.md", "VERIFICATION.md"}:
+                suffix = filename.removesuffix(".md")
+                candidates.extend(sorted((wt_path / planning_dir / "phases").glob(f"*/*-{suffix}.md")))
+            artifact = next((path for path in candidates if path.exists()), None)
+            if artifact is None:
                 continue
             try:
                 content = artifact.read_text()
@@ -845,27 +858,34 @@ def generate_prompt(task: dict, repo_context: str, project: str, repo: str,
             prompt += "These are insights from agents who previously worked on this repo. Use them to avoid repeating mistakes.\n\n"
             prompt += f"{past_learnings}\n"
 
+    gsd_name = backend_label()
+    gsd_plan = gsd_plan_command()
+    gsd_new_project = gsd_plan_command(greenfield=True)
+    gsd_execute = gsd_execute_command()
+    gsd_verify = gsd_verify_command()
+    gsd_gap = gsd_gap_plan_command()
+
     prompt += f"""
-## Mandatory Workflow (GSD + Review Loop)
+## Mandatory Workflow ({gsd_name} + Review Loop)
 
 You MUST follow this exact workflow. Do NOT skip steps. Do NOT write code before planning.
 The loop continues until both GSD verification AND code review pass.
 
 ### Step 1: Plan
-Run `/gsd:plan-phase --prd` (or `/gsd:new-project --auto` for greenfield).
+Run `{gsd_plan}` (or `{gsd_new_project}` for greenfield).
 This creates PLAN.md with task breakdown, must-haves, and verification criteria.
 The plan-checker agent runs automatically to validate your plan before execution.
 If plan-checker finds blockers, fix them before proceeding.
 
 ### Step 2: Execute
-Run `/gsd:execute-phase` to implement with atomic commits.
+Run `{gsd_execute}` to implement with atomic commits.
 Follow the plan. Do not deviate without documenting why.
 
 ### Step 3: Verify (GUARDRAIL — source of truth)
-Run `/gsd:verify-work` to verify against the ORIGINAL plan's must-haves.
+Run `{gsd_verify}` to verify against the ORIGINAL plan's must-haves.
 This creates VERIFICATION.md with pass/fail status.
 Do NOT proceed until verification passes.
-If VERIFICATION.md shows `status: gaps_found`, run `/gsd:plan-phase --gaps`.
+If VERIFICATION.md shows `status: gaps_found`, run `{gsd_gap}`.
 Repeat until `status: passed`.
 
 ### Step 4: Self-Review (code-review-graph)
@@ -873,7 +893,7 @@ If the `code-review-graph` MCP server is available:
 1. Use the `get_review_context` tool on your changed files to check blast radius
 2. Use `query_graph` with `tests_for` to identify missing test coverage
 3. Fix any issues found (missing tests, unintended impacts)
-4. After fixing, RE-RUN `/gsd:verify-work` — fixes must not break original acceptance criteria
+4. After fixing, RE-RUN `{gsd_verify}` — fixes must not break original acceptance criteria
 5. If a fix conflicts with the original plan, DO NOT apply it. Log it as a note for human review.
 
 ### Step 5: Pre-PR Validation
@@ -889,7 +909,7 @@ Run the pre-review script to get an external Codex review on your branch diff:
 ```
 Read the output. If VERDICT is FAIL:
 1. Fix the issues identified
-2. RE-RUN `/gsd:verify-work` — fixes must not break original acceptance criteria
+2. RE-RUN `{gsd_verify}` — fixes must not break original acceptance criteria
 3. If a review suggestion conflicts with the plan's acceptance criteria, skip it and note: "Skipped review suggestion X — conflicts with acceptance criteria Y"
 4. Re-run pre-review.sh after fixes
 5. Maximum 3 review iterations. If still failing after 3, escalate to human (see below).

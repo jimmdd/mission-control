@@ -32,6 +32,7 @@ from uuid import uuid4
 from context_fabrica.models import KnowledgeRecord
 from context_fabrica.storage import PostgresPgvectorAdapter
 from context_fabrica_config import make_context_fabrica_adapter
+from gsd_backend import planning_dir_name as gsd_planning_dir_name
 
 # === Config ===
 
@@ -437,17 +438,18 @@ def harvest_artifacts(worktree: str, repo_path: str, branch: str,
                       codex_review: str = "", agent_summary: str = "") -> dict:
     artifacts = {}
     wt = Path(worktree) if worktree else Path(repo_path)
+    planning_dir = gsd_planning_dir_name()
 
     summary_candidates = [
         wt / "SUMMARY.md",
-        wt / ".planning" / "SUMMARY.md",
+        wt / planning_dir / "SUMMARY.md",
     ]
     for f in summary_candidates:
         if f.exists():
             artifacts["summary_md"] = f.read_text()[:4000]
             break
 
-    verification_candidates = list(wt.glob(".planning/phases/*/*-VERIFICATION.md"))
+    verification_candidates = list(wt.glob(f"{planning_dir}/phases/*/*-VERIFICATION.md"))
     if verification_candidates:
         latest = max(verification_candidates, key=lambda p: p.stat().st_mtime)
         artifacts["verification_md"] = latest.read_text()[:3000]

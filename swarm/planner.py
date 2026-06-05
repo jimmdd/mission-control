@@ -22,6 +22,14 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 
+from gsd_backend import (
+    backend_label,
+    execute_command as gsd_execute_command,
+    gap_plan_command as gsd_gap_plan_command,
+    plan_command as gsd_plan_command,
+    verify_command as gsd_verify_command,
+)
+
 MC_HOME = Path(os.environ.get("MC_HOME", str(Path.home() / ".mission-control")))
 PLANS_DIR = MC_HOME / "bridge" / "plans"
 PROGRESS_DIR = MC_HOME / "bridge" / "progress"
@@ -249,7 +257,7 @@ def _parse_json_array(text: Optional[str]) -> Optional[list]:
 
 PLAN_SYSTEM = """You are an orchestration architect decomposing complex tasks for an AI agent swarm.
 
-Each step you produce becomes a FULL AGENT SESSION — the agent will use GSD (a planning/execution
+Each step you produce becomes a FULL AGENT SESSION — the agent will use GSD Core (a planning/execution
 framework) internally to plan, implement, test, and verify its work. You are NOT writing
 implementation instructions. You are defining WHAT each agent should achieve, not HOW.
 
@@ -312,9 +320,9 @@ def generate_plan(
 ## Important
 Each step becomes a FULL AUTONOMOUS AGENT SESSION. The agent will:
 1. Read the codebase and understand context
-2. Run /gsd:plan-phase internally to create its own detailed implementation plan
-3. Run /gsd:execute-phase to implement with atomic commits
-4. Run /gsd:verify-work to verify against acceptance criteria
+2. Run the configured GSD Core planning command internally to create its own detailed implementation plan
+3. Run the configured GSD Core execution command to implement with atomic commits
+4. Run the configured GSD Core verification command to verify against acceptance criteria
 5. Create a PR (or commit and push for intermediate steps)
 
 You are defining WHAT each agent achieves, not the implementation details.
@@ -563,7 +571,7 @@ def build_step_prompt(
 ) -> str:
     """Build an orchestration prompt for a single plan step.
 
-    The agent uses GSD internally for planning and execution.
+    The agent uses GSD Core internally for planning and execution.
     This prompt defines WHAT to achieve, not HOW to implement it.
     """
     task_title = task.get("title", "")
@@ -598,29 +606,35 @@ Use this context to understand what has already been done. Your branch includes 
 
     external_url = task.get("external_url") or task.get("linear_issue_url", "")
     external_section = f"\nExternal reference: {external_url}\n" if external_url else ""
+    gsd_name = backend_label()
+    gsd_plan = gsd_plan_command()
+    gsd_new_project = gsd_plan_command(greenfield=True)
+    gsd_execute = gsd_execute_command()
+    gsd_verify = gsd_verify_command()
+    gsd_gap = gsd_gap_plan_command()
 
     # Final step creates the PR; intermediate steps just commit and push
     if is_final_step:
         completion_section = f"""
-## Mandatory Workflow (GSD)
+## Mandatory Workflow ({gsd_name})
 
 You MUST follow this exact workflow. Do NOT skip steps. Do NOT write code before planning.
 
 ### Step 1: Plan
-Run `/gsd:plan-phase --prd` (or `/gsd:new-project --auto` for greenfield).
+Run `{gsd_plan}` (or `{gsd_new_project}` for greenfield).
 This creates PLAN.md with task breakdown, must-haves, and verification criteria.
 Your GSD plan MUST target these acceptance criteria — they are your definition of done.
 
 ### Step 2: Execute
-Run `/gsd:execute-phase` to implement with atomic commits.
+Run `{gsd_execute}` to implement with atomic commits.
 
 ### Step 3: Verify
-Run `/gsd:verify-work` to verify against acceptance criteria.
+Run `{gsd_verify}` to verify against acceptance criteria.
 Also run: `{step.get('verify_command', 'npm test')}`
 Do NOT proceed until verification passes.
 
 ### Step 4: Gap Closure (if needed)
-If VERIFICATION.md shows `status: gaps_found`, run `/gsd:plan-phase --gaps`.
+If VERIFICATION.md shows `status: gaps_found`, run `{gsd_gap}`.
 Repeat until `status: passed`.
 
 ### Step 5: Pre-PR Validation
@@ -637,25 +651,25 @@ Do NOT create a PR until all checks pass.
 """
     else:
         completion_section = f"""
-## Mandatory Workflow (GSD)
+## Mandatory Workflow ({gsd_name})
 
 You MUST follow this exact workflow. Do NOT skip steps. Do NOT write code before planning.
 
 ### Step 1: Plan
-Run `/gsd:plan-phase --prd` (or `/gsd:new-project --auto` for greenfield).
+Run `{gsd_plan}` (or `{gsd_new_project}` for greenfield).
 This creates PLAN.md with task breakdown, must-haves, and verification criteria.
 Your GSD plan MUST target these acceptance criteria — they are your definition of done.
 
 ### Step 2: Execute
-Run `/gsd:execute-phase` to implement with atomic commits.
+Run `{gsd_execute}` to implement with atomic commits.
 
 ### Step 3: Verify
-Run `/gsd:verify-work` to verify against acceptance criteria.
+Run `{gsd_verify}` to verify against acceptance criteria.
 Also run: `{step.get('verify_command', 'npm test')}`
 Do NOT proceed until verification passes.
 
 ### Step 4: Gap Closure (if needed)
-If VERIFICATION.md shows `status: gaps_found`, run `/gsd:plan-phase --gaps`.
+If VERIFICATION.md shows `status: gaps_found`, run `{gsd_gap}`.
 Repeat until `status: passed`.
 
 ### Step 5: Commit + Push (NO PR)
@@ -685,7 +699,7 @@ curl -X POST {mc_base}/api/tasks/{task.get('id', 'TASK_ID')}/activities \\
 `{step.get('verify_command', 'npm test')}`
 
 ## Codebase Info
-{repo_context if repo_context else "(explore the codebase as part of your GSD planning step)"}
+{repo_context if repo_context else f"(explore the codebase as part of your {gsd_name} planning step)"}
 {context_section}{knowledge_section}
 ## Constraints
 - Do NOT modify files unrelated to this step's acceptance criteria

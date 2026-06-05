@@ -323,7 +323,7 @@ Mission Control’s core API is standalone and tracker-agnostic.
 
 ### Prerequisites
 
-- Node.js 20+
+- Node.js 22+
 - PostgreSQL 17 + pgvector
 - Python 3.12+
 - Context Fabrica installed
@@ -346,6 +346,7 @@ mkdir -p ~/.mission-control
 cat >> ~/.mission-control/.env << 'EOF'
 CONTEXT_FABRICA_DSN=postgresql://$(whoami)@localhost/context_fabrica
 CONTEXT_FABRICA_SCHEMA=mission_control
+MISSION_CONTROL_GSD_BACKEND=core
 GOOGLE_GENERATIVE_AI_API_KEY=your-gemini-key
 ANTHROPIC_API_KEY=your-anthropic-key
 MISSION_CONTROL_URL=http://127.0.0.1:18790
@@ -356,6 +357,13 @@ Mission Control uses the installed `context-fabrica` package, but defaults to a
 separate Postgres schema (`mission_control`) so its Gemini 3072-dimension
 embeddings do not alter or conflict with an existing context-fabrica schema. Set
 `CONTEXT_FABRICA_SCHEMA` explicitly if you want to use a different schema.
+
+Mission Control currently uses the maintained `@opengsd/gsd-core` package for
+agent planning and verification. The `core` backend expects agents to produce
+GSD Core `.planning/` artifacts and run commands such as `/gsd:plan-phase`,
+`/gsd:execute-phase`, and `/gsd:verify-work`. `MISSION_CONTROL_GSD_BACKEND`
+defaults to `core`; `gsd-pi` will need a separate adapter because it uses `.gsd`
+state and a different command/runtime model.
 
 ### Start the service
 
