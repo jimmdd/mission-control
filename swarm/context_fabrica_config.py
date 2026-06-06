@@ -16,8 +16,11 @@ from context_fabrica.storage import PostgresPgvectorAdapter
 
 
 DEFAULT_SCHEMA = "mission_control"
+DEFAULT_EXISTING_SCHEMA = "context_fabrica"
 DEFAULT_EMBEDDING_MODEL = "gemini-embedding-001"
 DEFAULT_EMBEDDING_DIMENSIONS = 1536
+DEFAULT_EXISTING_EMBEDDER = "fastembed"
+DEFAULT_EXISTING_EMBEDDING_DIMENSIONS = 384
 GEMINI_API_BASE = "https://generativelanguage.googleapis.com/v1beta"
 
 
@@ -54,6 +57,69 @@ def context_fabrica_dsn() -> str:
 def context_fabrica_schema() -> str:
     load_mission_control_env()
     return os.environ.get("CONTEXT_FABRICA_SCHEMA", DEFAULT_SCHEMA)
+
+
+def _env_bool(name: str, default: bool) -> bool:
+    raw = os.environ.get(name)
+    if raw is None:
+        return default
+    return _coerce_bool(raw, default)
+
+
+def _coerce_bool(value: object, default: bool) -> bool:
+    if isinstance(value, bool):
+        return value
+    if value is None:
+        return default
+    return str(value).strip().lower() not in {"0", "false", "no", "off", ""}
+
+
+def include_existing_context_fabrica_schema() -> bool:
+    load_mission_control_env()
+    if os.environ.get("CONTEXT_FABRICA_INCLUDE_EXISTING") is not None:
+        return _env_bool("CONTEXT_FABRICA_INCLUDE_EXISTING", True)
+    cfg = _swarm_config()
+    knowledge_cfg = cfg.get("knowledge", {}) if isinstance(cfg.get("knowledge", {}), dict) else {}
+    return _coerce_bool(knowledge_cfg.get("include_existing"), True)
+
+
+def existing_context_fabrica_schema() -> str:
+    load_mission_control_env()
+    cfg = _swarm_config()
+    knowledge_cfg = cfg.get("knowledge", {}) if isinstance(cfg.get("knowledge", {}), dict) else {}
+    return os.environ.get("CONTEXT_FABRICA_EXISTING_SCHEMA") or knowledge_cfg.get("existing_schema") or DEFAULT_EXISTING_SCHEMA
+
+
+def existing_context_fabrica_embedding_dimensions() -> int:
+    load_mission_control_env()
+    cfg = _swarm_config()
+    knowledge_cfg = cfg.get("knowledge", {}) if isinstance(cfg.get("knowledge", {}), dict) else {}
+    raw = (
+        os.environ.get("CONTEXT_FABRICA_EXISTING_EMBEDDING_DIMENSIONS")
+        or os.environ.get("CONTEXT_FABRICA_EXISTING_EMBEDDING_DIM")
+        or knowledge_cfg.get("existing_embedding_dimensions")
+        or knowledge_cfg.get("existing_embedding_dim")
+    )
+    if not raw:
+        return DEFAULT_EXISTING_EMBEDDING_DIMENSIONS
+    try:
+        return int(raw)
+    except ValueError:
+        return DEFAULT_EXISTING_EMBEDDING_DIMENSIONS
+
+
+def existing_context_fabrica_embedder_name() -> str:
+    load_mission_control_env()
+    cfg = _swarm_config()
+    knowledge_cfg = cfg.get("knowledge", {}) if isinstance(cfg.get("knowledge", {}), dict) else {}
+    return os.environ.get("CONTEXT_FABRICA_EXISTING_EMBEDDER") or knowledge_cfg.get("existing_embedder") or DEFAULT_EXISTING_EMBEDDER
+
+
+def existing_context_fabrica_embedder_model() -> str | None:
+    load_mission_control_env()
+    cfg = _swarm_config()
+    knowledge_cfg = cfg.get("knowledge", {}) if isinstance(cfg.get("knowledge", {}), dict) else {}
+    return os.environ.get("CONTEXT_FABRICA_EXISTING_EMBED_MODEL") or knowledge_cfg.get("existing_embed_model")
 
 
 def context_fabrica_embedding_dimensions() -> int:
@@ -115,3 +181,21 @@ def make_context_fabrica_adapter(*, bootstrap: bool = False) -> PostgresPgvector
     if bootstrap:
         adapter.bootstrap()
     return adapter
+
+
+def make_existing_context_fabrica_adapter() -> PostgresPgvectorAdapter:
+    return PostgresPgvectorAdapter.from_dsn(
+        context_fabrica_dsn(),
+        schema=existing_context_fabrica_schema(),
+        embedding_dimensions=existing_context_fabrica_embedding_dimensions(),
+    )
+
+
+def make_existing_context_fabrica_embedder():
+    from context_fabrica.embedding import build_default_embedder
+
+    return build_default_embedder(
+        dimensions=existing_context_fabrica_embedding_dimensions(),
+        embedder=existing_context_fabrica_embedder_name(),
+        model_name=existing_context_fabrica_embedder_model(),
+    )

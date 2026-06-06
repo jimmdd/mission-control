@@ -270,8 +270,13 @@ def _triage_model_deep() -> str:
 
 from context_fabrica_config import (
     context_fabrica_embedding_model,
+    context_fabrica_schema,
+    existing_context_fabrica_schema,
     gemini_embedding_payload,
     gemini_embedding_url,
+    include_existing_context_fabrica_schema,
+    make_existing_context_fabrica_adapter,
+    make_existing_context_fabrica_embedder,
     make_context_fabrica_adapter,
 )
 
@@ -325,34 +330,47 @@ def recall_knowledge(repos: List[dict], query: str, top_k: int = KNOWLEDGE_MAX_R
     """
     empty = {"developer_notes": "", "skills": "", "past_learnings": "", "recalled_ids": []}
 
+    domains = set()
+    for r in repos:
+        domains.add(f"{r['project']}/{r['repo']}")
+        domains.add(r['project'])
+    domains.add("global")
+
+    all_results = []
+
     vector = _embed_query(query)
-    if not vector:
-        return empty
+    if vector:
+        try:
+            adapter = make_context_fabrica_adapter(bootstrap=True)
+            for domain in domains:
+                results = adapter.semantic_search(vector, domain=domain, top_k=top_k * 2)
+                all_results.extend((qr, context_fabrica_schema(), True) for qr in results)
+        except Exception as e:
+            logging.warning(f"Mission Control knowledge recall query failed: {e}")
 
-    # Query context-fabrica via PostgresPgvectorAdapter
-    try:
-        adapter = make_context_fabrica_adapter(bootstrap=True)
-        domains = set()
-        for r in repos:
-            domains.add(f"{r['project']}/{r['repo']}")
-            domains.add(r['project'])
-        domains.add("global")
-
-        all_results = []
-        for domain in domains:
-            results = adapter.semantic_search(vector, domain=domain, top_k=top_k * 2)
-            all_results.extend(results)
-    except Exception as e:
-        logging.warning(f"Knowledge recall query failed: {e}")
-        return empty
+    if include_existing_context_fabrica_schema() and existing_context_fabrica_schema() != context_fabrica_schema():
+        try:
+            existing_embedder = make_existing_context_fabrica_embedder()
+            existing_vector = existing_embedder.embed(query)
+            existing_adapter = make_existing_context_fabrica_adapter()
+            for domain in domains:
+                results = existing_adapter.semantic_search(existing_vector, domain=domain, top_k=top_k * 2)
+                all_results.extend((qr, existing_context_fabrica_schema(), False) for qr in results)
+        except Exception as e:
+            logging.warning(f"Existing context-fabrica recall query skipped: {e}")
 
     if not all_results:
         return empty
 
     # Transform QueryResult objects into dict format for scoring
     rows = []
-    for qr in all_results:
+    seen_records = set()
+    for qr, source_schema, feedback_enabled in all_results:
         rec = qr.record
+        dedupe_key = (source_schema, rec.record_id)
+        if dedupe_key in seen_records:
+            continue
+        seen_records.add(dedupe_key)
         rows.append({
             "id": rec.record_id,
             "text": rec.text,
@@ -361,6 +379,8 @@ def recall_knowledge(repos: List[dict], query: str, top_k: int = KNOWLEDGE_MAX_R
             "importance": round(rec.confidence * 5),
             "_distance": 1.0 - qr.semantic_score,  # convert similarity to distance
             "metadata": json.dumps(rec.metadata) if isinstance(rec.metadata, dict) else str(rec.metadata),
+            "source_schema": source_schema,
+            "feedback_enabled": feedback_enabled,
         })
 
     # Categorize and score results
@@ -417,7 +437,8 @@ def recall_knowledge(repos: List[dict], query: str, top_k: int = KNOWLEDGE_MAX_R
             break
         dev_lines.append(entry)
         dev_chars += len(entry)
-        recalled_ids.append(row.get("id", ""))
+        if row.get("feedback_enabled", True):
+            recalled_ids.append(row.get("id", ""))
 
     # Skills — full content (progressive disclosure: these are worth the tokens)
     skill_lines = []
@@ -439,7 +460,8 @@ def recall_knowledge(repos: List[dict], query: str, top_k: int = KNOWLEDGE_MAX_R
         else:
             skill_lines.append(text)
         skill_chars += len(text)
-        recalled_ids.append(row.get("id", ""))
+        if row.get("feedback_enabled", True):
+            recalled_ids.append(row.get("id", ""))
 
     # Facts — one-liners (compact)
     learn_lines = []
@@ -453,7 +475,8 @@ def recall_knowledge(repos: List[dict], query: str, top_k: int = KNOWLEDGE_MAX_R
             break
         learn_lines.append(entry)
         learn_chars += len(entry)
-        recalled_ids.append(row.get("id", ""))
+        if row.get("feedback_enabled", True):
+            recalled_ids.append(row.get("id", ""))
 
     dev_notes = "\n".join(dev_lines) if dev_lines else ""
     skills = "\n\n".join(skill_lines) if skill_lines else ""

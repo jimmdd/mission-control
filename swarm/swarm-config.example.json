@@ -47,7 +47,10 @@
   "knowledge": {
     "distill_model": "gemini-2.5-flash",
     "embedding_model": "gemini-embedding-001",
-    "embedding_dimensions": 1536
+    "embedding_dimensions": 1536,
+    "existing_schema": "context_fabrica",
+    "existing_embedder": "fastembed",
+    "existing_embedding_dimensions": 384
   },
   "planner": {
     "planning_model": "claude-sonnet-4-20250514",

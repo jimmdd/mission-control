@@ -301,9 +301,15 @@ Mission Control uses the installed `context-fabrica` package directly, but it de
 CONTEXT_FABRICA_SCHEMA=mission_control
 CONTEXT_FABRICA_EMBEDDING_MODEL=gemini-embedding-001
 CONTEXT_FABRICA_EMBEDDING_DIMENSIONS=1536
+CONTEXT_FABRICA_INCLUDE_EXISTING=true
+CONTEXT_FABRICA_EXISTING_SCHEMA=context_fabrica
+CONTEXT_FABRICA_EXISTING_EMBEDDER=fastembed
+CONTEXT_FABRICA_EXISTING_EMBEDDING_DIMENSIONS=384
 ```
 
-This avoids clobbering an existing Context Fabrica installation. Mission Control's knowledge flow defaults to Gemini 1536-dimension embeddings, which is the current balance between code-knowledge recall quality and pgvector storage/index cost. Sharing a schema with a different embedding dimension can create pgvector dimension conflicts, so use a separate schema when changing models or dimensions.
+This avoids clobbering an existing Context Fabrica installation while still letting Mission Control read from it. Mission Control writes its own knowledge to `mission_control` with Gemini 1536-dimension embeddings, then also queries the existing `context_fabrica` schema read-only with the local embedder/dimension configured above. Sharing a write schema with a different embedding dimension can create pgvector dimension conflicts, so use separate schemas when changing models or dimensions.
+
+For existing-schema read-through, install the same local embedder dependency used to create that schema's vectors. The default assumes Context Fabrica's local FastEmbed/MiniLM path.
 
 ### Knowledge sources
 
@@ -387,6 +393,10 @@ CONTEXT_FABRICA_DSN=postgresql://$(whoami)@localhost/context_fabrica
 CONTEXT_FABRICA_SCHEMA=mission_control
 CONTEXT_FABRICA_EMBEDDING_MODEL=gemini-embedding-001
 CONTEXT_FABRICA_EMBEDDING_DIMENSIONS=1536
+CONTEXT_FABRICA_INCLUDE_EXISTING=true
+CONTEXT_FABRICA_EXISTING_SCHEMA=context_fabrica
+CONTEXT_FABRICA_EXISTING_EMBEDDER=fastembed
+CONTEXT_FABRICA_EXISTING_EMBEDDING_DIMENSIONS=384
 MISSION_CONTROL_GSD_BACKEND=core
 GOOGLE_GENERATIVE_AI_API_KEY=your-gemini-key
 ANTHROPIC_API_KEY=your-anthropic-key
@@ -396,8 +406,10 @@ EOF
 
 Mission Control uses the installed `context-fabrica` package, but defaults to a
 separate Postgres schema (`mission_control`) so its Gemini embeddings do not
-alter or conflict with an existing context-fabrica schema. Set
-`CONTEXT_FABRICA_SCHEMA` explicitly if you want to use a different schema.
+alter or conflict with an existing context-fabrica schema. It also reads from
+the existing `context_fabrica` schema by default, without bootstrapping or
+writing to that schema. Set `CONTEXT_FABRICA_SCHEMA` explicitly if you want to
+use a different write schema.
 Set `CONTEXT_FABRICA_EMBEDDING_DIMENSIONS` to change the vector size, but do
 that before indexing records; an existing schema should be re-embedded after a
 dimension change.
