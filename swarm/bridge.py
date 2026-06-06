@@ -268,11 +268,16 @@ def _triage_model_deep() -> str:
     return _load_triage_config()["triage_model_deep"]
 
 
-from context_fabrica_config import make_context_fabrica_adapter
+from context_fabrica_config import (
+    context_fabrica_embedding_model,
+    gemini_embedding_payload,
+    gemini_embedding_url,
+    make_context_fabrica_adapter,
+)
 
 _triage_cfg = _load_triage_config()
-EMBEDDING_MODEL = _triage_cfg["embedding_model"]
-EMBEDDING_URL = f"https://generativelanguage.googleapis.com/v1beta/models/{EMBEDDING_MODEL}:embedContent"
+EMBEDDING_MODEL = context_fabrica_embedding_model()
+EMBEDDING_URL = gemini_embedding_url(EMBEDDING_MODEL)
 KNOWLEDGE_MAX_RESULTS = 5
 KNOWLEDGE_MAX_CHARS = 2000
 
@@ -282,10 +287,7 @@ def _embed_query(text: str) -> Optional[List[float]]:
     if not api_key:
         return None
     try:
-        payload = json.dumps({
-            "model": f"models/{EMBEDDING_MODEL}",
-            "content": {"parts": [{"text": text}]},
-        }).encode()
+        payload = json.dumps(gemini_embedding_payload(text, model=EMBEDDING_MODEL)).encode()
         req = urllib.request.Request(
             f"{EMBEDDING_URL}?key={api_key}",
             data=payload,

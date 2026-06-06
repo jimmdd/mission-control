@@ -26,8 +26,6 @@ from typing import List
 from context_fabrica.storage import PostgresPgvectorAdapter
 from context_fabrica_config import make_context_fabrica_adapter
 
-EMBEDDING_DIM = 3072
-
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s [knowledge-feedback] %(message)s",

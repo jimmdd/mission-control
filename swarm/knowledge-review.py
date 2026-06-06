@@ -15,8 +15,6 @@ from context_fabrica.models import KnowledgeRecord
 from context_fabrica.storage import PostgresPgvectorAdapter
 from context_fabrica_config import context_fabrica_dsn, make_context_fabrica_adapter
 
-EMBEDDING_DIM = 3072
-
 
 def get_dsn() -> str:
     return context_fabrica_dsn()

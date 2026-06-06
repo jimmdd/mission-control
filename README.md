@@ -299,9 +299,11 @@ Mission Control uses the installed `context-fabrica` package directly, but it de
 
 ```bash
 CONTEXT_FABRICA_SCHEMA=mission_control
+CONTEXT_FABRICA_EMBEDDING_MODEL=gemini-embedding-001
+CONTEXT_FABRICA_EMBEDDING_DIMENSIONS=1536
 ```
 
-This avoids clobbering an existing Context Fabrica installation. Mission Control's knowledge flow uses Gemini 3072-dimension embeddings, so sharing the default Context Fabrica schema with a different embedding dimension can create pgvector dimension conflicts.
+This avoids clobbering an existing Context Fabrica installation. Mission Control's knowledge flow defaults to Gemini 1536-dimension embeddings, which is the current balance between code-knowledge recall quality and pgvector storage/index cost. Sharing a schema with a different embedding dimension can create pgvector dimension conflicts, so use a separate schema when changing models or dimensions.
 
 ### Knowledge sources
 
@@ -383,6 +385,8 @@ mkdir -p ~/.mission-control
 cat >> ~/.mission-control/.env << 'EOF'
 CONTEXT_FABRICA_DSN=postgresql://$(whoami)@localhost/context_fabrica
 CONTEXT_FABRICA_SCHEMA=mission_control
+CONTEXT_FABRICA_EMBEDDING_MODEL=gemini-embedding-001
+CONTEXT_FABRICA_EMBEDDING_DIMENSIONS=1536
 MISSION_CONTROL_GSD_BACKEND=core
 GOOGLE_GENERATIVE_AI_API_KEY=your-gemini-key
 ANTHROPIC_API_KEY=your-anthropic-key
@@ -391,9 +395,12 @@ EOF
 ```
 
 Mission Control uses the installed `context-fabrica` package, but defaults to a
-separate Postgres schema (`mission_control`) so its Gemini 3072-dimension
-embeddings do not alter or conflict with an existing context-fabrica schema. Set
+separate Postgres schema (`mission_control`) so its Gemini embeddings do not
+alter or conflict with an existing context-fabrica schema. Set
 `CONTEXT_FABRICA_SCHEMA` explicitly if you want to use a different schema.
+Set `CONTEXT_FABRICA_EMBEDDING_DIMENSIONS` to change the vector size, but do
+that before indexing records; an existing schema should be re-embedded after a
+dimension change.
 
 Mission Control currently uses the maintained `@opengsd/gsd-core` package for
 agent planning and verification. The `core` backend expects agents to produce

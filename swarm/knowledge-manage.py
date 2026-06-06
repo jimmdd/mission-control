@@ -17,11 +17,15 @@ from uuid import uuid4
 
 from context_fabrica.models import KnowledgeRecord
 from context_fabrica.storage import PostgresPgvectorAdapter
-from context_fabrica_config import make_context_fabrica_adapter
+from context_fabrica_config import (
+    context_fabrica_embedding_model,
+    gemini_embedding_payload,
+    gemini_embedding_url,
+    make_context_fabrica_adapter,
+)
 
-EMBEDDING_MODEL = "gemini-embedding-001"
-EMBEDDING_DIM = 3072
-EMBEDDING_URL = "https://generativelanguage.googleapis.com/v1beta/models/gemini-embedding-001:embedContent"
+EMBEDDING_MODEL = context_fabrica_embedding_model()
+EMBEDDING_URL = gemini_embedding_url(EMBEDDING_MODEL)
 
 
 def get_gemini_key() -> str:
@@ -37,10 +41,7 @@ def get_gemini_key() -> str:
 
 
 def embed_text(text: str, api_key: str) -> List[float]:
-    payload = json.dumps({
-        "model": f"models/{EMBEDDING_MODEL}",
-        "content": {"parts": [{"text": text}]},
-    }).encode()
+    payload = json.dumps(gemini_embedding_payload(text, model=EMBEDDING_MODEL)).encode()
 
     req = urllib.request.Request(
         f"{EMBEDDING_URL}?key={api_key}",

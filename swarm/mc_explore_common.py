@@ -13,7 +13,12 @@ from uuid import uuid4
 
 from context_fabrica.models import KnowledgeRecord, Relation
 from context_fabrica.storage import PostgresPgvectorAdapter
-from context_fabrica_config import make_context_fabrica_adapter
+from context_fabrica_config import (
+    context_fabrica_embedding_model,
+    gemini_embedding_payload,
+    gemini_embedding_url,
+    make_context_fabrica_adapter,
+)
 
 # === Constants ===
 
@@ -21,9 +26,8 @@ MC_HOME = Path(os.environ.get("MC_HOME", str(Path.home() / ".mission-control")))
 SWARM_DIR = MC_HOME / "swarm"
 ENV_FILE = MC_HOME / ".env"
 GITPROJECTS = Path.home() / "GitProjects"
-EMBEDDING_MODEL = "gemini-embedding-001"
-EMBEDDING_DIM = 3072
-EMBEDDING_URL = f"https://generativelanguage.googleapis.com/v1beta/models/{EMBEDDING_MODEL}:embedContent"
+EMBEDDING_MODEL = context_fabrica_embedding_model()
+EMBEDDING_URL = gemini_embedding_url(EMBEDDING_MODEL)
 
 SKIP_DIRS = {
     "node_modules", ".git", "dist", "build", ".next", ".nuxt", "__pycache__",
@@ -81,10 +85,7 @@ def make_adapter() -> PostgresPgvectorAdapter:
 # === Gemini APIs ===
 
 def embed_text(text: str, api_key: str) -> List[float]:
-    payload = json.dumps({
-        "model": f"models/{EMBEDDING_MODEL}",
-        "content": {"parts": [{"text": text}]},
-    }).encode()
+    payload = json.dumps(gemini_embedding_payload(text, model=EMBEDDING_MODEL)).encode()
     req = urllib.request.Request(
         f"{EMBEDDING_URL}?key={api_key}",
         data=payload,

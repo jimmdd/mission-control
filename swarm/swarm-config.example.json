@@ -44,6 +44,11 @@
     "triage_model_deep": "gemini-2.5-pro",
     "embedding_model": "gemini-embedding-001"
   },
+  "knowledge": {
+    "distill_model": "gemini-2.5-flash",
+    "embedding_model": "gemini-embedding-001",
+    "embedding_dimensions": 1536
+  },
   "planner": {
     "planning_model": "claude-sonnet-4-20250514",
     "planning_provider": "anthropic",
