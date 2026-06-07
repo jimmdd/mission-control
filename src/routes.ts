@@ -1331,6 +1331,12 @@ async function handleApiRequest(
             return;
           }
 
+          if (segments.length === 3 && segments[0] === "knowledge" && segments[2] === "share" && method === "POST") {
+            const result = await runPython([reviewScript, "share", "--id", segments[1]]);
+            sendJson(res, 200, result);
+            return;
+          }
+
           if (segments.length === 3 && segments[0] === "knowledge" && segments[2] === "reject" && method === "POST") {
             const result = await runPython([reviewScript, "reject", "--id", segments[1]]);
             sendJson(res, 200, result);

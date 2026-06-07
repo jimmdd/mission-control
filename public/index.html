@@ -1620,6 +1620,12 @@
             color: var(--accent);
             border-color: rgba(0,212,255,0.2);
         }
+        .kr-btn.share {
+            background: rgba(139,92,246,0.1);
+            color: #a78bfa;
+            border-color: rgba(139,92,246,0.3);
+        }
+        .kr-btn.share:hover { background: rgba(139,92,246,0.25); }
         .kr-btn.edit:hover { background: rgba(0,212,255,0.2); }
         .kr-edit-form {
             display: none;
@@ -5164,6 +5170,10 @@
                 const pLevel = 6 - importance;
                 const timeStr = entry.timestamp ? new Date(entry.timestamp).toLocaleDateString() : '';
                 const stageClass = showActions ? ' staged' : '';
+                const canonicalActionsHtml = !showActions ? `
+                    <div class="kr-actions">
+                        <button class="kr-btn share" onclick="krShare('${entry.id}')">SHARE</button>
+                    </div>` : '';
                 const actionsHtml = showActions ? `
                     <div class="kr-actions">
                         <button class="kr-btn approve" onclick="krPromote('${entry.id}')">APPROVE</button>
@@ -5198,6 +5208,7 @@
                         </div>
                         <div class="kb-text">${escapeHtml(entry.text)}</div>
                         ${actionsHtml}
+                        ${canonicalActionsHtml}
                     </div>`;
             }).join('');
         };
@@ -5220,6 +5231,19 @@
                 await loadKrStaged();
             } catch (err) {
                 alert('Failed to reject entry');
+            }
+        };
+
+        window.krShare = async (id) => {
+            if (!confirm('Share this canonical entry to the shared Context Fabrica schema?')) return;
+            try {
+                const res = await fetch(getApiUrl(`/knowledge/${id}/share`), { method: 'POST' });
+                const data = await res.json().catch(() => ({}));
+                if (!res.ok || data.error) throw new Error(data.error || 'Failed');
+                await loadKrCanonical();
+                alert(`Shared to ${data.target_schema || 'shared Context Fabrica'}`);
+            } catch (err) {
+                alert(`Failed to share entry: ${err.message || 'Unknown error'}`);
             }
         };
 

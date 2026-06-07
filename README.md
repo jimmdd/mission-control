@@ -311,6 +311,14 @@ This avoids clobbering an existing Context Fabrica installation while still lett
 
 For existing-schema read-through, install the same local embedder dependency used to create that schema's vectors. The default assumes Context Fabrica's local FastEmbed/MiniLM path.
 
+Canonical Mission Control knowledge can also be explicitly copied into the shared Context Fabrica schema so agents using the Context Fabrica MCP directly can recall it:
+
+```bash
+./mc knowledge share <record-id>
+```
+
+The dashboard exposes the same action as **SHARE** on canonical knowledge entries. Sharing re-embeds the record with the shared schema's configured embedder and writes it to `CONTEXT_FABRICA_EXISTING_SCHEMA`.
+
 ### Knowledge sources
 
 - codebase exploration

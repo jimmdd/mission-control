@@ -784,6 +784,7 @@ Commands:
   knowledge list [--stage STAGE] [--project P] [--repo R] [--scope S] [--limit N]
   knowledge add [--interactive] --text TEXT [--project P] [--repo R] [--scope S] [--importance N] [--category C]
   knowledge promote <id>
+  knowledge share <id>
   knowledge reject <id>
   knowledge delete <id>
   knowledge update <id> [--interactive] [--text TEXT] [--domain DOMAIN]
@@ -1015,6 +1016,10 @@ async function handleKnowledge(args: ParsedArgs, jsonMode: boolean): Promise<voi
       if (!id) throw new Error("Usage: mc knowledge promote <id>");
       outputValue(await mcFetch("POST", `${API_PREFIX}/knowledge/${id}/promote`, {}), jsonMode, "result");
       return;
+    case "share":
+      if (!id) throw new Error("Usage: mc knowledge share <id>");
+      outputValue(await mcFetch("POST", `${API_PREFIX}/knowledge/${id}/share`, {}), jsonMode, "result");
+      return;
     case "reject":
       if (!id) throw new Error("Usage: mc knowledge reject <id>");
       outputValue(await mcFetch("POST", `${API_PREFIX}/knowledge/${id}/reject`, {}), jsonMode, "result");
@@ -1028,7 +1033,7 @@ async function handleKnowledge(args: ParsedArgs, jsonMode: boolean): Promise<voi
       outputValue(await mcFetch("PATCH", `${API_PREFIX}/knowledge/${id}`, await ensureKnowledgeUpdateBody(args, id)), jsonMode, "result");
       return;
     default:
-      throw new Error("Unknown knowledge command. Try: list, add, promote, reject, delete, update");
+      throw new Error("Unknown knowledge command. Try: list, add, promote, share, reject, delete, update");
   }
 }
 
