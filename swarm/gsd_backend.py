@@ -9,7 +9,7 @@ from __future__ import annotations
 import os
 
 
-SUPPORTED_BACKENDS = {"core"}
+SUPPORTED_BACKENDS = {"core", "pi"}
 DEFAULT_BACKEND = "core"
 
 
@@ -24,7 +24,12 @@ def ensure_supported_backend() -> str:
         supported = ", ".join(sorted(SUPPORTED_BACKENDS))
         raise ValueError(
             f"Unsupported MISSION_CONTROL_GSD_BACKEND={backend!r}. "
-            f"Supported backends: {supported}. gsd-pi requires a separate adapter."
+            f"Supported backends: {supported}."
+        )
+    if backend == "pi":
+        raise NotImplementedError(
+            "MISSION_CONTROL_GSD_BACKEND=pi is reserved for the gsd-pi adapter. "
+            "The adapter must parse .gsd state and Pi headless status before it can be enabled."
         )
     return backend
 

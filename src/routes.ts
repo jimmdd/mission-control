@@ -1258,6 +1258,43 @@ async function handleApiRequest(
             return;
           }
 
+          if (segments.length === 2 && segments[1] === "doctor" && method === "GET") {
+            const result = await runPython([knowledgeScript, "doctor"]);
+            sendJson(res, 200, result);
+            return;
+          }
+
+          if (segments.length === 2 && segments[1] === "recall" && method === "GET") {
+            const queryText = url.searchParams.get("query") ?? "";
+            if (!queryText.trim()) {
+              sendJson(res, 400, { error: "query is required" });
+              return;
+            }
+            const args = [knowledgeScript, "recall", "--query", queryText, "--limit", url.searchParams.get("limit") ?? "5"];
+            const project = url.searchParams.get("project") ?? "";
+            const repo = url.searchParams.get("repo") ?? "";
+            const domain = url.searchParams.get("domain") ?? "";
+            if (project) args.push("--project", project);
+            if (repo) args.push("--repo", repo);
+            if (domain) args.push("--domain", domain);
+            const result = await runPython(args);
+            sendJson(res, 200, result);
+            return;
+          }
+
+          if (segments.length === 2 && segments[1] === "reembed" && method === "POST") {
+            const body = await parseBody(req);
+            const payload = isRecord(body) ? body : {};
+            const args = [knowledgeScript, "reembed"];
+            if (typeof payload.schema === "string" && payload.schema.trim()) args.push("--schema", payload.schema);
+            if (typeof payload.dimensions === "number" && Number.isFinite(payload.dimensions)) args.push("--dimensions", String(payload.dimensions));
+            if (typeof payload.limit === "number" && Number.isFinite(payload.limit)) args.push("--limit", String(payload.limit));
+            if (payload.force === true) args.push("--force");
+            const result = await runPython(args);
+            sendJson(res, 200, result);
+            return;
+          }
+
           if (segments.length === 2 && segments[1] === "fetch-url" && method === "POST") {
             const body = await parseBody(req);
             if (!isRecord(body)) {
@@ -1445,7 +1482,7 @@ function runPython(args: string[]): Promise<Record<string, unknown>> {
   return new Promise((resolve, reject) => {
     const mcHome = process.env.MC_HOME ?? join(homedir(), ".mission-control");
     const pythonBin = process.env.MC_PYTHON_BIN ?? join(mcHome, "venv-3.12", "bin", "python3");
-    execFile(pythonBin, args, { timeout: 30000 }, (err, stdout, stderr) => {
+    execFile(pythonBin, args, { timeout: 300000 }, (err, stdout, stderr) => {
       if (err) {
         reject(new Error(stderr || err.message));
         return;

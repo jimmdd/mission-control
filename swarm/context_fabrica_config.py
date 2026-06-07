@@ -179,8 +179,47 @@ def make_context_fabrica_adapter(*, bootstrap: bool = False) -> PostgresPgvector
         embedding_dimensions=context_fabrica_embedding_dimensions(),
     )
     if bootstrap:
+        _guard_embedding_dimensions(adapter, context_fabrica_embedding_dimensions())
         adapter.bootstrap()
     return adapter
+
+
+def _guard_embedding_dimensions(adapter: PostgresPgvectorAdapter, configured_dimensions: int) -> None:
+    actual = _embedding_column_dimensions(adapter)
+    if actual is not None and actual != configured_dimensions:
+        raise RuntimeError(
+            f"Context Fabrica schema '{adapter.settings.schema}' has embedding dimension {actual}, "
+            f"but Mission Control is configured for {configured_dimensions}. "
+            "Use a different schema or re-embed the existing schema before bootstrapping."
+        )
+
+
+def _embedding_column_dimensions(adapter: PostgresPgvectorAdapter) -> int | None:
+    try:
+        with adapter.connect() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    SELECT format_type(a.atttypid, a.atttypmod)
+                    FROM pg_attribute a
+                    JOIN pg_class c ON c.oid = a.attrelid
+                    JOIN pg_namespace n ON n.oid = c.relnamespace
+                    WHERE n.nspname = %s
+                      AND c.relname = 'memory_chunks'
+                      AND a.attname = 'embedding'
+                      AND NOT a.attisdropped
+                    """,
+                    (adapter.settings.schema,),
+                )
+                row = cur.fetchone()
+        if not row:
+            return None
+        type_text = str(row[0])
+        if "(" not in type_text or ")" not in type_text:
+            return None
+        return int(type_text.split("(", 1)[1].split(")", 1)[0])
+    except Exception:
+        return None
 
 
 def make_existing_context_fabrica_adapter() -> PostgresPgvectorAdapter:

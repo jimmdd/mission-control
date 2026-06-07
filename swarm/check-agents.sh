@@ -243,9 +243,16 @@ reconcile_completed_agents_to_mc
 # Sets GSD_STATUS to "passed", "gaps_found", "missing", or "no_planning".
 validate_gsd_artifacts() {
   local worktree="$1"
+  GSD_DETAIL=""
 
   if [ "$GSD_BACKEND" != "core" ]; then
-    GSD_STATUS="unsupported_backend:$GSD_BACKEND"
+    if [ "$GSD_BACKEND" = "pi" ]; then
+      GSD_STATUS="pi_not_implemented"
+      GSD_DETAIL="MISSION_CONTROL_GSD_BACKEND=pi is reserved for the future gsd-pi adapter; .gsd parsing is not wired yet."
+    else
+      GSD_STATUS="unsupported_backend:$GSD_BACKEND"
+      GSD_DETAIL="Unsupported GSD backend '$GSD_BACKEND'."
+    fi
     return 1
   fi
 
@@ -253,6 +260,7 @@ validate_gsd_artifacts() {
 
   if [ ! -d "$planning_dir" ]; then
     GSD_STATUS="no_planning"
+    GSD_DETAIL="Missing $planning_dir directory."
     return 1
   fi
 
@@ -260,6 +268,7 @@ validate_gsd_artifacts() {
   plan_count=$(ls "$planning_dir"/phases/*/*-PLAN.md 2>/dev/null | wc -l | tr -d ' ')
   if [ "$plan_count" -eq 0 ]; then
     GSD_STATUS="missing"
+    GSD_DETAIL="No GSD plan files found under $planning_dir/phases."
     return 1
   fi
 
@@ -267,11 +276,16 @@ validate_gsd_artifacts() {
   verification_file=$(ls -t "$planning_dir"/phases/*/*-VERIFICATION.md 2>/dev/null | head -1)
   if [ -z "$verification_file" ]; then
     GSD_STATUS="missing"
+    GSD_DETAIL="No GSD verification file found under $planning_dir/phases."
     return 1
   fi
 
   local status
   status=$(grep -m1 "^status:" "$verification_file" 2>/dev/null | sed 's/status: *//')
+  GSD_DETAIL="Latest verification: $verification_file"
+  local summary
+  summary=$(grep -E "^(status|summary|result|gaps|blockers):" "$verification_file" 2>/dev/null | head -8 | tr '\n' '; ' | sed 's/; $//')
+  [ -n "$summary" ] && GSD_DETAIL="$GSD_DETAIL — $summary"
   if [ "$status" = "passed" ] || [ "$status" = "human_needed" ]; then
     GSD_STATUS="$status"
     return 0
@@ -691,7 +705,9 @@ echo "$RUNNING_IDS" | while read -r TASK_ID; do
     echo "[$TIMESTAMP] GSD INCOMPLETE: $TASK_ID — status=$GSD_STATUS (PR #$PR_NUM exists but GSD not satisfied)" >> "$LOG"
     GSD_MARKER="$SWARM_DIR/logs/.gsd-warned-${TASK_ID}"
     if [ -n "$MC_TASK_ID" ] && [ ! -f "$GSD_MARKER" ]; then
-      mc_post_activity "$MC_TASK_ID" "updated" "PR #$PR_NUM created but GSD verification $GSD_STATUS — agent may have skipped planning/verification"
+      detail_suffix=""
+      [ -n "$GSD_DETAIL" ] && detail_suffix=" — $GSD_DETAIL"
+      mc_post_activity "$MC_TASK_ID" "updated" "PR #$PR_NUM created but GSD verification $GSD_STATUS$detail_suffix"
       touch "$GSD_MARKER"
     fi
   fi

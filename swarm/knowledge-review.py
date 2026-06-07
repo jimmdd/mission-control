@@ -157,6 +157,15 @@ def cmd_share(args):
         vector = target_embedder.embed(shared_record.text)
         target_adapter.upsert_record(shared_record)
         target_adapter.replace_chunks(shared_record.record_id, [(shared_record.text, vector, 0)])
+        source_meta = source_record.metadata if isinstance(source_record.metadata, dict) else {}
+        source_tags = source_record.tags if isinstance(source_record.tags, dict) else {}
+        source_record.metadata = {
+            **source_meta,
+            "shared_to_schema": target_schema,
+            "shared_at": now.isoformat(),
+        }
+        source_record.tags = {**source_tags, "shared": True}
+        source_adapter.upsert_record(source_record)
         try:
             target_adapter.enqueue_projection(shared_record.record_id)
         except Exception:

@@ -149,6 +149,9 @@ Mission Control also ships with a local CLI.
 # create a task interactively
 ./mc tasks create --interactive
 
+# create a task with GSD-oriented prompts for acceptance criteria and verification
+./mc tasks gsd --interactive
+
 # inspect a task
 ./mc tasks get <task-id>
 ./mc tasks activities <task-id>
@@ -156,6 +159,10 @@ Mission Control also ships with a local CLI.
 # work with knowledge
 ./mc knowledge list --project myorg --repo backend-api
 ./mc knowledge add --interactive
+./mc knowledge doctor
+./mc knowledge recall --query "deploy worktree failure" --project myorg --repo backend-api
+./mc knowledge reembed --schema mission_control
+./mc knowledge share <record-id>
 
 # watch the swarm
 ./mc swarm sessions
@@ -341,8 +348,29 @@ mc-explore myorg/backend-api
 mc-explore myorg/backend-api --focus "API endpoints"
 mc-explore myorg/platform --package api
 mc-explore myorg/backend-api --dry-run
-mc-explore myorg/backend-api --trust
+  mc-explore myorg/backend-api --trust
 ```
+
+### Knowledge operations
+
+Mission Control includes operational checks for the memory layer:
+
+```bash
+# Check configured vs actual pgvector dimensions for write/read schemas
+./mc knowledge doctor
+
+# Inspect what would be recalled, including source schema and score
+./mc knowledge recall --query "auth middleware retry loop" --project myorg --repo backend-api
+
+# Rebuild Mission Control vectors after changing embedding model or dimensions
+./mc knowledge reembed --schema mission_control
+
+# Copy reviewed Mission Control knowledge into shared Context Fabrica MCP memory
+./mc knowledge share <record-id>
+```
+
+The dashboard also exposes recall diagnostics in the Knowledge Base panel and
+shows a `SHARED` badge for canonical records copied into shared Context Fabrica.
 
 ---
 

@@ -2391,6 +2391,11 @@
                         <option value="">All Repos</option>
                     </select>
                 </div>
+                <div class="knowledge-controls">
+                    <input id="kb-recall-query" class="kb-select" style="flex: 1;" placeholder="Recall diagnostics query">
+                    <button type="button" class="filter-pill" style="border: none; font-size: 10px;" onclick="runKnowledgeRecall()">RECALL</button>
+                </div>
+                <div class="knowledge-list" id="kb-recall-results" style="display:none; margin-bottom: 8px;"></div>
                 <div class="knowledge-list" id="knowledge-list">
                     <div style="color: var(--text-secondary); font-size: 12px; padding: 12px; text-align: center;">Loading knowledge base...</div>
                 </div>
@@ -4814,6 +4819,7 @@
                                 <span class="kb-badge ${sourceClass}">${sourceLabel}</span>
                                 ${entry.category ? `<span class="kb-badge category">${escapeHtml(entry.category)}</span>` : ''}
                                 <span class="kb-badge" style="background: rgba(255,255,255,0.05); border: 1px solid rgba(255,255,255,0.1);">${escapeHtml(scopeLabel)}</span>
+                                ${entry.shared ? '<span class="kb-badge" style="background: rgba(139,92,246,0.1); color: #a78bfa; border: 1px solid rgba(139,92,246,0.25);">SHARED</span>' : ''}
                             </div>
                             <div style="display: flex; align-items: center; gap: 12px;">
                                 <span class="kb-priority p${pLevel}">${pLabel}</span>
@@ -4824,6 +4830,42 @@
                     </div>
                 `;
             }).join('');
+        };
+
+        window.runKnowledgeRecall = async () => {
+            const queryInput = document.getElementById('kb-recall-query');
+            const results = document.getElementById('kb-recall-results');
+            const queryText = queryInput.value.trim();
+            if (!queryText) return;
+            results.style.display = 'block';
+            results.innerHTML = '<div style="color: var(--text-secondary); font-size: 12px; padding: 12px;">Running recall...</div>';
+            try {
+                const params = new URLSearchParams({ query: queryText, limit: '8' });
+                if (kbState.selectedProject) params.set('project', kbState.selectedProject);
+                if (kbState.selectedRepo) params.set('repo', kbState.selectedRepo);
+                const res = await fetch(getApiUrl(`/knowledge/recall?${params.toString()}`));
+                if (!res.ok) throw new Error('Recall failed');
+                const data = await res.json();
+                const rows = data.results || [];
+                if (!rows.length) {
+                    results.innerHTML = '<div style="color: var(--text-secondary); font-size: 12px; padding: 12px;">No recall matches.</div>';
+                    return;
+                }
+                results.innerHTML = rows.map(row => `
+                    <div class="kb-entry">
+                        <div class="kb-entry-header">
+                            <div class="kb-badges">
+                                <span class="kb-badge" style="background: rgba(139,92,246,0.1); color: #a78bfa; border: 1px solid rgba(139,92,246,0.25);">${escapeHtml(row.schema || 'schema')}</span>
+                                <span class="kb-badge category">${Number(row.score || 0).toFixed(3)}</span>
+                                <span class="kb-badge" style="background: rgba(255,255,255,0.05); border: 1px solid rgba(255,255,255,0.1);">${escapeHtml(row.domain || row.scope || 'global')}</span>
+                            </div>
+                        </div>
+                        <div class="kb-text">${escapeHtml(row.text || '')}</div>
+                    </div>
+                `).join('');
+            } catch (err) {
+                results.innerHTML = '<div style="color: var(--status-failed); font-size: 12px; padding: 12px;">Recall failed.</div>';
+            }
         };
 
         const updateKbSelectors = () => {
@@ -5199,6 +5241,7 @@
                                 <span class="kb-badge" style="background: rgba(245,158,11,0.1); color: #f59e0b; border: 1px solid rgba(245,158,11,0.2);">${escapeHtml(entry.stage || 'unknown')}</span>
                                 ${entry.category ? `<span class="kb-badge category">${escapeHtml(entry.category)}</span>` : ''}
                                 <span class="kb-badge" style="background: rgba(255,255,255,0.05); border: 1px solid rgba(255,255,255,0.1);">${escapeHtml(entry.domain || 'global')}</span>
+                                ${entry.shared ? '<span class="kb-badge" style="background: rgba(139,92,246,0.1); color: #a78bfa; border: 1px solid rgba(139,92,246,0.25);">SHARED</span>' : ''}
                                 <span style="font-size: 10px; color: var(--text-secondary);">${timeStr}</span>
                             </div>
                             <div style="display: flex; align-items: center; gap: 8px;">

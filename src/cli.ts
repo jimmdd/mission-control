@@ -471,9 +471,12 @@ function renderKnowledge(data: unknown): void {
     if (listKey) {
       const rows = asArray(data[listKey]).map(entry => ({
         id: entry.id,
+        schema: entry.schema ?? "",
+        score: typeof entry.score === "number" ? Number(entry.score).toFixed(3) : "",
         scope: entry.scope ?? entry.domain ?? "",
         category: entry.category ?? "",
         stage: entry.stage ?? "",
+        shared: entry.shared ?? "",
         importance: entry.importance ?? "",
         text: truncate(entry.text ?? entry.summary ?? "", 100),
       }));
@@ -650,6 +653,31 @@ async function ensureTaskCreateBody(args: ParsedArgs): Promise<Record<string, un
   return body;
 }
 
+async function ensureGsdTicketBody(args: ParsedArgs): Promise<Record<string, unknown>> {
+  const body = await ensureTaskCreateBody({
+    positionals: args.positionals,
+    flags: new Map(args.flags),
+  });
+  body.status = flag(args, "status") ?? "inbox";
+  body.task_type = flag(args, "task-type") ?? body.task_type ?? "implementation";
+
+  if (hasFlag(args, "interactive")) {
+    const verifyCommand = await ask("Verification command", "npm test");
+    const acceptance = await ask("Acceptance criteria", "");
+    const repo = await ask("Target repo", flag(args, "repo") ?? "");
+    const project = await ask("Project", flag(args, "project") ?? "");
+    const gsdNotes = [
+      body.description ? String(body.description) : "",
+      acceptance ? `\nAcceptance criteria:\n${acceptance}` : "",
+      verifyCommand ? `\nVerification command:\n${verifyCommand}` : "",
+      project || repo ? `\nTarget repo:\n${project}${project && repo ? "/" : ""}${repo}` : "",
+    ].filter(Boolean).join("\n");
+    body.description = gsdNotes;
+  }
+
+  return body;
+}
+
 async function ensureTaskUpdateBody(args: ParsedArgs, id: string): Promise<Record<string, unknown>> {
   const body: Record<string, unknown> = {
     title: flag(args, "title"),
@@ -766,6 +794,7 @@ Commands:
   tasks get <id>
   tasks create [--interactive] --title T [--description D] [--priority P] [--status S] [--workspace ID] [--agent ID] [--source SRC] [--task-type TYPE]
   tasks update <id> [--interactive] [--title T] [--description D] [--priority P] [--status S] [--agent ID] [--workspace ID] [--task-type TYPE]
+  tasks gsd [--interactive] [--title T] [--description D] [--project P] [--repo R]
   tasks activities <id>
   tasks deliverables <id>
   tasks retry <id>
@@ -785,6 +814,9 @@ Commands:
   knowledge add [--interactive] --text TEXT [--project P] [--repo R] [--scope S] [--importance N] [--category C]
   knowledge promote <id>
   knowledge share <id>
+  knowledge doctor
+  knowledge recall --query TEXT [--project P] [--repo R] [--domain D] [--limit N]
+  knowledge reembed [--schema S] [--dimensions N] [--limit N] [--force]
   knowledge reject <id>
   knowledge delete <id>
   knowledge update <id> [--interactive] [--text TEXT] [--domain DOMAIN]
@@ -808,8 +840,10 @@ Environment:
 Examples:
   mc tasks list --status inbox
   mc tasks create --interactive
+  mc tasks gsd --interactive
   mc tasks create --title "[CAP-99] Fix auth bug" --description "Handle expired sessions" --priority high
   mc knowledge add --interactive
+  mc knowledge recall --query "deploy agent worktree failure" --project myorg --repo backend-api
   mc swarm sessions
   mc swarm attach task-123
   mc swarm monitor
@@ -910,6 +944,17 @@ async function handleTasks(args: ParsedArgs, jsonMode: boolean): Promise<void> {
       outputValue(await mcFetch("POST", `${API_PREFIX}/tasks`, await ensureTaskCreateBody(args)), jsonMode, "task");
       return;
     }
+    case "gsd": {
+      const created = await mcFetch("POST", `${API_PREFIX}/tasks`, await ensureGsdTicketBody({ ...args, flags: new Map(args.flags).set("interactive", true) }));
+      outputValue(created, jsonMode, "task");
+      if (!jsonMode) {
+        const openMonitor = await askChoice("Open swarm monitor", ["yes", "no"], "no");
+        if (openMonitor === "yes") {
+          await handleSwarm({ positionals: ["monitor"], flags: new Map() }, jsonMode);
+        }
+      }
+      return;
+    }
     case "update": {
       if (!id) throw new Error("Usage: mc tasks update <id> [options]");
       outputValue(await mcFetch("PATCH", `${API_PREFIX}/tasks/${id}`, await ensureTaskUpdateBody(args, id)), jsonMode, "task");
@@ -936,7 +981,7 @@ async function handleTasks(args: ParsedArgs, jsonMode: boolean): Promise<void> {
       return;
     }
     default:
-      throw new Error("Unknown tasks command. Try: list, get, create, update, activities, deliverables, retry, done");
+      throw new Error("Unknown tasks command. Try: list, get, create, update, gsd, activities, deliverables, retry, done");
   }
 }
 
@@ -1010,6 +1055,46 @@ async function handleKnowledge(args: ParsedArgs, jsonMode: boolean): Promise<voi
     }
     case "add": {
       outputValue(await mcFetch("POST", `${API_PREFIX}/knowledge`, await ensureKnowledgeAddBody(args)), jsonMode, "result");
+      return;
+    }
+    case "doctor":
+      outputValue(await mcFetch("GET", `${API_PREFIX}/knowledge/doctor`), jsonMode, "result");
+      return;
+    case "recall": {
+      const queryText = flag(args, "query");
+      if (!queryText) throw new Error("Usage: mc knowledge recall --query TEXT [--project P] [--repo R] [--domain D]");
+      outputValue(
+        await mcFetch(
+          "GET",
+          `${API_PREFIX}/knowledge/recall${query({
+            query: queryText,
+            project: flag(args, "project"),
+            repo: flag(args, "repo"),
+            domain: flag(args, "domain"),
+            limit: flag(args, "limit"),
+          })}`,
+        ),
+        jsonMode,
+        "knowledge",
+      );
+      return;
+    }
+    case "reembed": {
+      const confirmed = hasFlag(args, "yes") || await askChoice("Re-embed knowledge chunks now", ["no", "yes"], "no");
+      if (confirmed !== true && confirmed !== "yes") {
+        console.log("Cancelled");
+        return;
+      }
+      outputValue(
+        await mcFetch("POST", `${API_PREFIX}/knowledge/reembed`, {
+          schema: flag(args, "schema"),
+          dimensions: flag(args, "dimensions") ? Number(flag(args, "dimensions")) : undefined,
+          limit: flag(args, "limit") ? Number(flag(args, "limit")) : undefined,
+          force: hasFlag(args, "force"),
+        }),
+        jsonMode,
+        "result",
+      );
       return;
     }
     case "promote":
