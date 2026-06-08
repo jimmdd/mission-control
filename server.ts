@@ -7,18 +7,25 @@ const PORT = parseInt(process.env.MC_PORT ?? "18790", 10);
 const HOST = process.env.MC_HOST ?? "127.0.0.1";
 const MC_HOME = process.env.MC_HOME ?? `${process.env.HOME}/.mission-control`;
 const DB_PATH = process.env.MC_DB_PATH ?? `${MC_HOME}/data/mc.db`;
-const READ_ACCESS_TOKEN = (process.env.MISSION_CONTROL_READ_ACCESS_TOKEN ?? "").trim();
+const ANY_ACCESS_TOKEN = [
+  process.env.MISSION_CONTROL_ACCESS_TOKEN,
+  process.env.MISSION_CONTROL_READ_ACCESS_TOKEN,
+  process.env.MISSION_CONTROL_READ_TOKEN,
+  process.env.MISSION_CONTROL_WRITE_TOKEN,
+  process.env.MISSION_CONTROL_ADMIN_TOKEN,
+  process.env.MISSION_CONTROL_WEBHOOK_SECRET,
+].some(token => (token ?? "").trim());
 const ALLOW_INSECURE_BIND = (process.env.MISSION_CONTROL_ALLOW_INSECURE_BIND ?? "").trim().toLowerCase();
 
 if (
-  !READ_ACCESS_TOKEN &&
+  !ANY_ACCESS_TOKEN &&
   HOST !== "127.0.0.1" &&
   HOST !== "localhost" &&
   HOST !== "::1" &&
   !["1", "true", "yes", "on"].includes(ALLOW_INSECURE_BIND)
 ) {
   throw new Error(
-    "Refusing to bind Mission Control to a non-local host without MISSION_CONTROL_READ_ACCESS_TOKEN. " +
+    "Refusing to bind Mission Control to a non-local host without an access token. " +
       "Set a token or MISSION_CONTROL_ALLOW_INSECURE_BIND=1 for a deliberate local-lab override.",
   );
 }

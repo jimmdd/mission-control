@@ -467,6 +467,29 @@ curl http://localhost:18790/health
 open http://localhost:18790/
 ```
 
+Mission Control binds to `127.0.0.1` by default. For normal local use, no token
+is required. If you expose it beyond localhost, set one shared token:
+
+```bash
+export MISSION_CONTROL_ACCESS_TOKEN="use-a-long-random-value"
+```
+
+Clients can pass it as `Authorization: Bearer ...` or `?token=...`. The older
+`MISSION_CONTROL_READ_ACCESS_TOKEN` name still works for compatibility.
+
+Team installs can opt into scoped tokens only when needed:
+
+```bash
+export MISSION_CONTROL_AUTH_MODE=scoped
+export MISSION_CONTROL_READ_TOKEN="read"
+export MISSION_CONTROL_WRITE_TOKEN="write"
+export MISSION_CONTROL_ADMIN_TOKEN="admin"
+export MISSION_CONTROL_WEBHOOK_SECRET="webhook"
+```
+
+Unset scoped tokens fall back to the shared token, so simple one-token installs
+stay simple.
+
 ---
 
 ## Project structure

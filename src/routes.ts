@@ -72,7 +72,50 @@ function isTruthyEnv(name: string): boolean {
 }
 
 function getReadAccessToken(): string {
-  return (process.env.MISSION_CONTROL_READ_ACCESS_TOKEN ?? "").trim();
+  return (process.env.MISSION_CONTROL_ACCESS_TOKEN ?? process.env.MISSION_CONTROL_READ_ACCESS_TOKEN ?? "").trim();
+}
+
+function getAuthMode(): "simple" | "scoped" {
+  return (process.env.MISSION_CONTROL_AUTH_MODE ?? "simple").trim().toLowerCase() === "scoped" ? "scoped" : "simple";
+}
+
+function firstToken(...names: string[]): string {
+  for (const name of names) {
+    const token = (process.env[name] ?? "").trim();
+    if (token) return token;
+  }
+  return "";
+}
+
+function requiredAccessToken(url: URL, method: string): string {
+  const defaultToken = getReadAccessToken();
+  if (getAuthMode() !== "scoped") return defaultToken;
+
+  const routePath = resolveApiRoutePath(url.pathname);
+  const segments = routePath?.split("/").filter(Boolean) ?? [];
+  if (segments[0] === "webhooks") {
+    return firstToken("MISSION_CONTROL_WEBHOOK_SECRET", "MISSION_CONTROL_WRITE_TOKEN") || defaultToken;
+  }
+  if (method === "GET" || method === "HEAD" || method === "OPTIONS") {
+    return firstToken("MISSION_CONTROL_READ_TOKEN") || defaultToken;
+  }
+  if (method === "DELETE") {
+    return firstToken("MISSION_CONTROL_ADMIN_TOKEN", "MISSION_CONTROL_WRITE_TOKEN") || defaultToken;
+  }
+  return firstToken("MISSION_CONTROL_WRITE_TOKEN") || defaultToken;
+}
+
+function hasAnyAccessToken(): boolean {
+  return Boolean(
+    firstToken(
+      "MISSION_CONTROL_ACCESS_TOKEN",
+      "MISSION_CONTROL_READ_ACCESS_TOKEN",
+      "MISSION_CONTROL_READ_TOKEN",
+      "MISSION_CONTROL_WRITE_TOKEN",
+      "MISSION_CONTROL_ADMIN_TOKEN",
+      "MISSION_CONTROL_WEBHOOK_SECRET",
+    ),
+  );
 }
 
 function extractProvidedToken(req: IncomingMessage, url: URL): string {
@@ -84,8 +127,8 @@ function extractProvidedToken(req: IncomingMessage, url: URL): string {
   return typeof queryToken === "string" ? queryToken.trim() : "";
 }
 
-function isReadAuthorized(req: IncomingMessage, url: URL): boolean {
-  const required = getReadAccessToken();
+function isAuthorized(req: IncomingMessage, url: URL): boolean {
+  const required = requiredAccessToken(url, req.method ?? "GET");
   if (!required) return true;
   const provided = extractProvidedToken(req, url);
   const requiredBuffer = Buffer.from(required);
@@ -333,7 +376,7 @@ export function createHandler(db: MissionControlDB, logger?: McLogger): (req: In
     const url = new URL(req.url ?? "/", "http://localhost");
     const pathname = url.pathname;
 
-    if (!isReadAuthorized(req, url)) {
+    if (!isAuthorized(req, url)) {
       res.statusCode = 401;
       res.setHeader("Content-Type", "text/plain; charset=utf-8");
       res.end("Unauthorized");
@@ -389,7 +432,8 @@ async function handleApiRequest(
     if (segments[0] === "meta" && segments.length === 1 && method === "GET") {
       sendJson(res, 200, {
         readOnly,
-        tokenRequired: Boolean(getReadAccessToken()),
+        authMode: getAuthMode(),
+        tokenRequired: hasAnyAccessToken(),
       });
       return;
     }
