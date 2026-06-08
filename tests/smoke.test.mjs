@@ -53,3 +53,20 @@ test("agent loop verifies planner acceptance criteria and handles review feedbac
   assert.match(bridge, /def _max_step_retries/);
   assert.doesNotMatch(bridge, /MAX_STEP_RETRIES = 2/);
 });
+
+test("server defaults are local and reject unauthenticated public binds", () => {
+  const server = read("server.ts");
+  assert.match(server, /const HOST = process\.env\.MC_HOST \?\? "127\.0\.0\.1"/);
+  assert.match(server, /MISSION_CONTROL_READ_ACCESS_TOKEN/);
+  assert.match(server, /MISSION_CONTROL_ALLOW_INSECURE_BIND/);
+  assert.match(server, /Refusing to bind Mission Control to a non-local host/);
+});
+
+test("routes cap request size and terminate unknown routes", () => {
+  const routes = read("src/routes.ts");
+  assert.match(routes, /MAX_JSON_BODY_BYTES/);
+  assert.match(routes, /Request body too large/);
+  assert.match(routes, /timingSafeEqual/);
+  assert.match(routes, /res\.statusCode = 404/);
+  assert.match(routes, /res\.end\("Not found"\)/);
+});

@@ -3,6 +3,7 @@ import { join, dirname } from "node:path";
 import { homedir, cpus, totalmem, freemem, loadavg } from "node:os";
 import { fileURLToPath } from "node:url";
 import { execFile, spawn } from "node:child_process";
+import { timingSafeEqual } from "node:crypto";
 import type { IncomingMessage, ServerResponse } from "node:http";
 import type {
   CreateActivityInput,
@@ -24,14 +25,27 @@ export interface McLogger {
 }
 
 const consoleLogger: McLogger = { info: console.log, error: console.error };
+const MAX_JSON_BODY_BYTES = Number.parseInt(process.env.MISSION_CONTROL_MAX_BODY_BYTES ?? "1048576", 10);
 
 export async function parseBody(req: IncomingMessage): Promise<unknown> {
   return new Promise((resolve, reject) => {
     let body = "";
+    let bytes = 0;
+    let rejected = false;
     req.on("data", (chunk: unknown) => {
-      body += String(chunk);
+      if (rejected) return;
+      const text = String(chunk);
+      bytes += Buffer.byteLength(text);
+      if (bytes > MAX_JSON_BODY_BYTES) {
+        rejected = true;
+        req.pause();
+        reject(new Error("Request body too large"));
+        return;
+      }
+      body += text;
     });
     req.on("end", () => {
+      if (rejected) return;
       try {
         if (!body.trim()) {
           resolve({});
@@ -74,7 +88,9 @@ function isReadAuthorized(req: IncomingMessage, url: URL): boolean {
   const required = getReadAccessToken();
   if (!required) return true;
   const provided = extractProvidedToken(req, url);
-  return provided === required;
+  const requiredBuffer = Buffer.from(required);
+  const providedBuffer = Buffer.from(provided);
+  return requiredBuffer.length === providedBuffer.length && timingSafeEqual(requiredBuffer, providedBuffer);
 }
 
 function requireStringField(body: Record<string, unknown>, field: string): string | null {
@@ -344,6 +360,10 @@ export function createHandler(db: MissionControlDB, logger?: McLogger): (req: In
       await handleApiRequest(req, res, url, db, log);
       return;
     }
+
+    res.statusCode = 404;
+    res.setHeader("Content-Type", "text/plain; charset=utf-8");
+    res.end("Not found");
   };
 }
 
@@ -1408,6 +1428,10 @@ async function handleApiRequest(
         const message = error instanceof Error ? error.message : "Internal server error";
         if (message === "Malformed JSON body") {
           sendJson(res, 400, { error: message });
+          return;
+        }
+        if (message === "Request body too large") {
+          sendJson(res, 413, { error: message });
           return;
         }
         logger.error(`mission-control routes error: ${message}`);

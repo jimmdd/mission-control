@@ -4,8 +4,24 @@ import { createHandler } from "./src/routes.js";
 
 // Config
 const PORT = parseInt(process.env.MC_PORT ?? "18790", 10);
+const HOST = process.env.MC_HOST ?? "127.0.0.1";
 const MC_HOME = process.env.MC_HOME ?? `${process.env.HOME}/.mission-control`;
 const DB_PATH = process.env.MC_DB_PATH ?? `${MC_HOME}/data/mc.db`;
+const READ_ACCESS_TOKEN = (process.env.MISSION_CONTROL_READ_ACCESS_TOKEN ?? "").trim();
+const ALLOW_INSECURE_BIND = (process.env.MISSION_CONTROL_ALLOW_INSECURE_BIND ?? "").trim().toLowerCase();
+
+if (
+  !READ_ACCESS_TOKEN &&
+  HOST !== "127.0.0.1" &&
+  HOST !== "localhost" &&
+  HOST !== "::1" &&
+  !["1", "true", "yes", "on"].includes(ALLOW_INSECURE_BIND)
+) {
+  throw new Error(
+    "Refusing to bind Mission Control to a non-local host without MISSION_CONTROL_READ_ACCESS_TOKEN. " +
+      "Set a token or MISSION_CONTROL_ALLOW_INSECURE_BIND=1 for a deliberate local-lab override.",
+  );
+}
 
 // Init DB
 const db = new MissionControlDB(DB_PATH);
@@ -40,7 +56,6 @@ const server = createServer(async (req, res) => {
   }
 });
 
-const HOST = process.env.MC_HOST ?? "0.0.0.0";
 server.listen(PORT, HOST, () => {
   console.log(`[mc] Mission Control listening on http://${HOST}:${PORT} (PID ${process.pid})`);
   console.log(`[mc] home directory: ${MC_HOME}`);
