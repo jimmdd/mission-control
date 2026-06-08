@@ -23,6 +23,7 @@ from context_fabrica_config import (
     context_fabrica_embedding_model,
     context_fabrica_schema,
     existing_context_fabrica_embedding_dimensions,
+    existing_context_fabrica_embedder_name,
     existing_context_fabrica_schema,
     include_existing_context_fabrica_schema,
     make_existing_context_fabrica_adapter,
@@ -126,6 +127,17 @@ def _reset_embedding_column(adapter: PostgresPgvectorAdapter, dimensions: int) -
             cur.execute(f"DROP INDEX IF EXISTS {schema}.idx_{schema}_chunks_embedding")
             cur.execute(f"DELETE FROM {schema}.memory_chunks")
             cur.execute(f"ALTER TABLE {schema}.memory_chunks ALTER COLUMN embedding TYPE vector({dimensions})")
+        conn.commit()
+
+
+def _replace_all_chunks(adapter: PostgresPgvectorAdapter, chunks: list[tuple[str, str, list[float], int]]) -> None:
+    with adapter.connect() as conn:
+        adapter._ensure_vector_registered(conn)
+        with conn.cursor() as cur:
+            cur.execute(f"DELETE FROM {adapter.settings.schema}.memory_chunks")
+            stmt = adapter.replace_chunks_statement()
+            for record_id, chunk_text, embedding, chunk_index in chunks:
+                cur.execute(stmt, (record_id, chunk_text, embedding, chunk_index))
         conn.commit()
 
 
@@ -260,11 +272,25 @@ def cmd_list(args):
 
 def cmd_doctor(args):
     primary = make_context_fabrica_adapter(bootstrap=False)
-    statuses = [_schema_status(primary, context_fabrica_embedding_dimensions(), writable=True)]
+    primary_status = _schema_status(primary, context_fabrica_embedding_dimensions(), writable=True)
+    primary_status["embedding_model"] = context_fabrica_embedding_model()
+    primary_status["gemini_api_key"] = bool(get_gemini_key())
+    statuses = [primary_status]
     if include_existing_context_fabrica_schema() and existing_context_fabrica_schema() != context_fabrica_schema():
         existing = make_existing_context_fabrica_adapter()
-        statuses.append(_schema_status(existing, existing_context_fabrica_embedding_dimensions(), writable=False))
-    ok = all(status["matches"] is not False for status in statuses)
+        existing_status = _schema_status(existing, existing_context_fabrica_embedding_dimensions(), writable=False)
+        existing_status["embedder"] = existing_context_fabrica_embedder_name()
+        try:
+            embedder = make_existing_context_fabrica_embedder()
+            existing_status["embedder_ready"] = True
+            existing_status["embedder_dimensions"] = int(getattr(embedder, "dimensions", 0))
+        except Exception as e:
+            existing_status["embedder_ready"] = False
+            existing_status["embedder_error"] = str(e)
+        statuses.append(existing_status)
+    ok = all(status["matches"] is not False for status in statuses) and all(
+        status.get("embedder_ready", True) is not False for status in statuses
+    )
     print(json.dumps({"ok": ok, "schemas": statuses}))
 
 
@@ -284,20 +310,20 @@ def cmd_reembed(args):
         sys.exit(1)
 
     adapter = _configured_adapter(schema, dimensions, bootstrap=False)
+    records = adapter.list_records(limit=args.limit or 100000)
+    rebuilt_chunks: list[tuple[str, str, list[float], int]] = []
+    for rec in records:
+        vector = embed_text(rec.text or "", api_key)
+        rebuilt_chunks.append((rec.record_id, rec.text or "", vector, 0))
+
     actual = _embedding_column_dimension(adapter)
     if actual is not None and actual != dimensions:
         _reset_embedding_column(adapter, dimensions)
     adapter.bootstrap()
-
-    records = adapter.list_records(limit=args.limit or 100000)
-    count = 0
-    for rec in records:
-        vector = embed_text(rec.text or "", api_key)
-        adapter.replace_chunks(rec.record_id, [(rec.text or "", vector, 0)])
-        count += 1
+    _replace_all_chunks(adapter, rebuilt_chunks)
 
     print(json.dumps({
-        "reembedded": count,
+        "reembedded": len(rebuilt_chunks),
         "schema": schema,
         "embedding_model": EMBEDDING_MODEL,
         "embedding_dimensions": dimensions,

@@ -948,6 +948,13 @@ async function handleTasks(args: ParsedArgs, jsonMode: boolean): Promise<void> {
       const created = await mcFetch("POST", `${API_PREFIX}/tasks`, await ensureGsdTicketBody({ ...args, flags: new Map(args.flags).set("interactive", true) }));
       outputValue(created, jsonMode, "task");
       if (!jsonMode) {
+        const createdId = isRecord(created) && typeof created.id === "string" ? created.id : "";
+        if (createdId) {
+          const dispatchNow = await askChoice("Dispatch through GSD workflow now", ["yes", "no"], "yes");
+          if (dispatchNow === "yes") {
+            outputValue(await mcFetch("POST", `${API_PREFIX}/tasks/${createdId}/retry`, {}), jsonMode, "result");
+          }
+        }
         const openMonitor = await askChoice("Open swarm monitor", ["yes", "no"], "no");
         if (openMonitor === "yes") {
           await handleSwarm({ positionals: ["monitor"], flags: new Map() }, jsonMode);
