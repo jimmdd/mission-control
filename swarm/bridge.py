@@ -1467,6 +1467,18 @@ def _dispatch_next_steps(task: dict, plan: dict, repos: List[dict]):
             logging.error(f"  Failed to spawn agent for step {step_num}")
 
 
+def _step_verification_criteria(step: dict) -> list:
+    criteria = step.get("acceptance_criteria", step.get("done_when", []))
+    return criteria if isinstance(criteria, list) else []
+
+
+def _max_step_retries() -> int:
+    try:
+        return int(get_planner_config().get("max_step_retries", 2))
+    except Exception:
+        return 2
+
+
 def process_in_progress_plans():
     """Check in-progress planned tasks and dispatch next steps when previous ones complete.
 
@@ -1521,8 +1533,11 @@ def process_in_progress_plans():
                     None,
                 )
 
-                # Verify step completion via MiniMax (free)
-                if step_def and agent_output and step_def.get("done_when"):
+                criteria = _step_verification_criteria(step_def) if step_def else []
+                max_step_retries = _max_step_retries()
+
+                # Verify step completion via configured verification model.
+                if step_def and agent_output and criteria:
                     verification = verify_step_completion(step_def, agent_output)
                     if verification.get("passed"):
                         update_step_progress(task_id, int(step_key), {
@@ -1541,7 +1556,7 @@ def process_in_progress_plans():
                             r["criterion"] for r in verification.get("results", [])
                             if not r.get("met")
                         ]
-                        if retry_count < MAX_STEP_RETRIES:
+                        if retry_count < max_step_retries:
                             update_step_progress(task_id, int(step_key), {
                                 "status": "pending",
                                 "retry_count": retry_count + 1,
@@ -1549,17 +1564,17 @@ def process_in_progress_plans():
                                 "agent_id": None,
                             })
                             mc_log_activity(task_id, "step_retry",
-                                            f"Step {step_key} failed verification — retrying ({retry_count + 1}/{MAX_STEP_RETRIES}): {'; '.join(failed_criteria[:2])}")
+                                            f"Step {step_key} failed verification — retrying ({retry_count + 1}/{max_step_retries}): {'; '.join(failed_criteria[:2])}")
                             logging.info(f"  Step {step_key} failed verification for {task_id[:8]} — retry {retry_count + 1}")
                             newly_completed = True  # triggers re-dispatch below
                         else:
                             update_step_progress(task_id, int(step_key), {
                                 "status": "failed",
                                 "completed_at": datetime.now(timezone.utc).isoformat(),
-                                "outcome": f"Failed after {MAX_STEP_RETRIES} retries: {'; '.join(failed_criteria[:3])}",
+                                "outcome": f"Failed after {max_step_retries} retries: {'; '.join(failed_criteria[:3])}",
                             })
                             mc_log_activity(task_id, "step_failed",
-                                            f"Step {step_key} failed after {MAX_STEP_RETRIES} retries: {'; '.join(failed_criteria[:2])}")
+                                            f"Step {step_key} failed after {max_step_retries} retries: {'; '.join(failed_criteria[:2])}")
                             logging.warning(f"  Step {step_key} exhausted retries for {task_id[:8]}")
                             newly_completed = True
                 else:
@@ -1710,9 +1725,6 @@ def _load_active_tasks() -> list:
         return json.loads(registry_file.read_text())
     except Exception:
         return []
-
-
-MAX_STEP_RETRIES = 2
 
 
 def _is_agent_running(agent_label: str, registry: list) -> bool:
@@ -2425,6 +2437,7 @@ def run_once():
 
     process_planning_tasks()
     process_in_progress_plans()
+    process_review_tasks()
     process_human_escalations()
     # External review/ticket integrations should react to Mission Control state externally.
 

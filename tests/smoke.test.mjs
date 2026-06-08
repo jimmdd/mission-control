@@ -43,3 +43,13 @@ test("GSD Pi backend is explicit stub until adapter is implemented", () => {
   assert.match(backend, /SUPPORTED_BACKENDS = \{"core", "pi"\}/);
   assert.match(backend, /reserved for the gsd-pi adapter/);
 });
+
+test("agent loop verifies planner acceptance criteria and handles review feedback", () => {
+  const bridge = read("swarm/bridge.py");
+  assert.match(bridge, /def _step_verification_criteria/);
+  assert.match(bridge, /step\.get\("acceptance_criteria", step\.get\("done_when", \[\]\)\)/);
+  assert.match(bridge, /if step_def and agent_output and criteria:/);
+  assert.match(bridge, /process_review_tasks\(\)/);
+  assert.match(bridge, /def _max_step_retries/);
+  assert.doesNotMatch(bridge, /MAX_STEP_RETRIES = 2/);
+});
