@@ -2,10 +2,27 @@
 """Service health checker for Mission Control."""
 
 import json
+import os
+import shutil
 import subprocess
 import urllib.request
 import time
 from datetime import datetime, timezone
+from pathlib import Path
+
+
+MC_HOME = Path(os.environ.get("MC_HOME", str(Path.home() / ".mission-control")))
+
+
+def load_env():
+    env_file = MC_HOME / ".env"
+    if not env_file.exists():
+        return
+    for line in env_file.read_text().splitlines():
+        line = line.strip()
+        if line and not line.startswith("#") and "=" in line:
+            key, _, value = line.partition("=")
+            os.environ.setdefault(key.strip(), value.strip())
 
 
 def check_http_service(name, url, timeout=5):
@@ -107,6 +124,51 @@ def check_postgresql():
     return result
 
 
+def check_command(name, command):
+    result = {"name": name, "status": "down", "pid": None, "uptime": None, "last_check": now_iso(), "details": ""}
+    binary = shutil.which(command)
+    if binary:
+        result["status"] = "up"
+        result["details"] = binary
+    else:
+        result["details"] = f"{command} not found in PATH"
+    return result
+
+
+def check_env(name, *keys):
+    result = {"name": name, "status": "down", "pid": None, "uptime": None, "last_check": now_iso(), "details": ""}
+    present = [key for key in keys if os.environ.get(key)]
+    if present:
+        result["status"] = "up"
+        result["details"] = "set: " + ", ".join(present)
+    else:
+        result["details"] = "missing: " + ", ".join(keys)
+    return result
+
+
+def check_knowledge_doctor():
+    result = {"name": "Knowledge Doctor", "status": "down", "pid": None, "uptime": None, "last_check": now_iso(), "details": ""}
+    script = MC_HOME / "swarm" / "knowledge-manage.py"
+    python_bin = Path(os.environ.get("MC_PYTHON_BIN", str(MC_HOME / "venv-3.12" / "bin" / "python3")))
+    if not script.exists():
+        result["details"] = f"{script} not found"
+        return result
+    try:
+        out = subprocess.run(
+            [str(python_bin), str(script), "doctor"],
+            capture_output=True, text=True, timeout=20
+        )
+        if out.returncode != 0:
+            result["details"] = (out.stderr or out.stdout or "doctor failed")[:200]
+            return result
+        data = json.loads(out.stdout)
+        result["status"] = "up" if data.get("ok") else "down"
+        result["details"] = json.dumps(data)[:500]
+    except Exception as e:
+        result["details"] = str(e)[:200]
+    return result
+
+
 def get_process_uptime(pid):
     """Get uptime of a process by PID using ps."""
     try:
@@ -126,6 +188,7 @@ def now_iso():
 
 
 def main():
+    load_env()
     services = []
 
     # 1. Mission Control
@@ -142,6 +205,20 @@ def main():
 
     # 6. PostgreSQL
     services.append(check_postgresql())
+
+    # Local runtime dependencies
+    for name, command in [
+        ("tmux", "tmux"),
+        ("git", "git"),
+        ("GitHub CLI", "gh"),
+        ("Node", "node"),
+        ("npm", "npm"),
+    ]:
+        services.append(check_command(name, command))
+
+    services.append(check_env("Gemini API Key", "GOOGLE_GENERATIVE_AI_API_KEY"))
+    services.append(check_env("Planner API Key", "ANTHROPIC_API_KEY", "GOOGLE_GENERATIVE_AI_API_KEY"))
+    services.append(check_knowledge_doctor())
 
     # Determine overall status
     statuses = [s["status"] for s in services]

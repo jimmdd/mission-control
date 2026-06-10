@@ -74,3 +74,36 @@ test("routes cap request size and terminate unknown routes", () => {
   assert.match(routes, /res\.statusCode = 404/);
   assert.match(routes, /res\.end\("Not found"\)/);
 });
+
+test("bridge uses durable task leases for inbox dispatch", () => {
+  const db = read("src/db.ts");
+  const routes = read("src/routes.ts");
+  const bridge = read("swarm/bridge.py");
+
+  assert.match(db, /processing_owner TEXT/);
+  assert.match(db, /processing_expires_at TEXT/);
+  assert.match(db, /claimNextInboxTask/);
+  assert.match(db, /releaseTaskLease/);
+  assert.match(routes, /segments\[1\] === "claim"/);
+  assert.match(routes, /segments\[2\] === "lease"/);
+  assert.match(bridge, /\/api\/tasks\/claim/);
+  assert.match(bridge, /release_task_lease\(task\["id"\]\)/);
+});
+
+test("critical destructive actions write audit events", () => {
+  const routes = read("src/routes.ts");
+  assert.match(routes, /type: "task_deleted"/);
+  assert.match(routes, /type: "agent_deleted"/);
+  assert.match(routes, /type: "workspace_deleted"/);
+  assert.match(routes, /type: "knowledge_deleted"/);
+});
+
+test("service health checks runtime dependencies and knowledge readiness", () => {
+  const health = read("health/service-health.py");
+  assert.match(health, /def check_command/);
+  assert.match(health, /def check_knowledge_doctor/);
+  assert.match(health, /GOOGLE_GENERATIVE_AI_API_KEY/);
+  assert.match(health, /ANTHROPIC_API_KEY/);
+  assert.match(health, /"tmux"/);
+  assert.match(health, /"GitHub CLI"/);
+});

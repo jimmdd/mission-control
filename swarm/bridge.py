@@ -18,6 +18,7 @@ import logging
 import os
 import subprocess
 import shlex
+import socket
 import sys
 import time
 import urllib.error
@@ -173,9 +174,18 @@ def load_env():
 def mc_request(method: str, path: str, body: Optional[dict] = None):
     url = f"{MC_BASE_URL}{path}"
     payload = json.dumps(body).encode() if body else None
+    headers = {"Content-Type": "application/json"} if payload else {}
+    token = (
+        os.environ.get("MISSION_CONTROL_ACCESS_TOKEN")
+        or os.environ.get("MISSION_CONTROL_WRITE_TOKEN")
+        or os.environ.get("MISSION_CONTROL_READ_ACCESS_TOKEN")
+        or ""
+    ).strip()
+    if token:
+        headers["Authorization"] = f"Bearer {token}"
     req = urllib.request.Request(
         url, data=payload, method=method,
-        headers={"Content-Type": "application/json"} if payload else {},
+        headers=headers,
     )
     with urllib.request.urlopen(req, timeout=15) as resp:
         return json.loads(resp.read())
@@ -199,6 +209,17 @@ def mc_add_deliverable(task_id: str, dtype: str, title: str, path: str = "", des
     if description:
         body["description"] = description
     mc_request("POST", f"/api/tasks/{task_id}/deliverables", body)
+
+
+def bridge_owner() -> str:
+    return os.environ.get("MISSION_CONTROL_BRIDGE_OWNER", f"{socket.gethostname()}:{os.getpid()}")
+
+
+def bridge_lease_seconds() -> int:
+    try:
+        return max(30, min(int(os.environ.get("MISSION_CONTROL_BRIDGE_LEASE_SECONDS", "900")), 3600))
+    except ValueError:
+        return 900
 
 
 _GSD_ARTIFACTS = [
@@ -1130,12 +1151,23 @@ def fetch_tasks_by_status(status: str) -> List[dict]:
 
 
 def fetch_next_task() -> Optional[dict]:
-    tasks = fetch_tasks_by_status("inbox")
-    if not tasks:
+    try:
+        result = mc_request("POST", "/api/tasks/claim", {
+            "owner": bridge_owner(),
+            "lease_seconds": bridge_lease_seconds(),
+        })
+        task = result.get("task") if isinstance(result, dict) else None
+        return task if task else None
+    except Exception as e:
+        logging.error(f"Failed to claim next inbox task: {e}")
         return None
-    priority_order = {"urgent": 0, "high": 1, "normal": 2, "low": 3}
-    tasks.sort(key=lambda t: (priority_order.get(t.get("priority", "normal"), 2), t.get("created_at", "")))
-    return tasks[0]
+
+
+def release_task_lease(task_id: str):
+    try:
+        mc_request("DELETE", f"/api/tasks/{task_id}/lease", {"owner": bridge_owner()})
+    except Exception as e:
+        logging.warning(f"Failed to release bridge lease for {task_id[:8]}: {e}")
 
 
 def fetch_task_activities(task_id: str) -> List[dict]:
@@ -2432,6 +2464,8 @@ def run_once():
                 mc_log_activity(task["id"], "failed", f"Bridge error: {e}")
             except Exception:
                 pass
+        finally:
+            release_task_lease(task["id"])
     else:
         logging.info("No inbox tasks to process")
 

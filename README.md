@@ -182,6 +182,19 @@ Environment:
 MISSION_CONTROL_URL=http://127.0.0.1:18790
 ```
 
+The bridge claims inbox work through a durable task lease so multiple bridge
+processes do not dispatch the same task. The default lease is 15 minutes and
+can be tuned with:
+
+```bash
+MISSION_CONTROL_BRIDGE_OWNER=bridge-host-a
+MISSION_CONTROL_BRIDGE_LEASE_SECONDS=900
+```
+
+`./mc services health` reports service liveness plus local runtime readiness
+for tools such as `tmux`, `git`, `gh`, Node/npm, model keys, PostgreSQL, and
+context-fabrica knowledge diagnostics.
+
 ---
 
 ## Model and agent configuration

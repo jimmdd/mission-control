@@ -61,6 +61,8 @@ export interface TaskRecord {
   source: string;
   task_type: string;
   triage_state: string | null;
+  processing_owner: string | null;
+  processing_expires_at: string | null;
   created_at: string;
   updated_at: string;
 }
@@ -155,6 +157,8 @@ export interface UpdateTaskInput {
   source?: string;
   task_type?: TaskType;
   triage_state?: string | null;
+  processing_owner?: string | null;
+  processing_expires_at?: string | null;
 }
 
 export interface CreateAgentInput {
@@ -280,6 +284,8 @@ CREATE TABLE IF NOT EXISTS tasks (
   source TEXT DEFAULT 'manual',
   task_type TEXT DEFAULT 'implementation' CHECK (task_type IN ('implementation', 'investigation', 'research')),
   triage_state TEXT,
+  processing_owner TEXT,
+  processing_expires_at TEXT,
   created_at TEXT DEFAULT (datetime('now')),
   updated_at TEXT DEFAULT (datetime('now'))
 );
@@ -330,6 +336,7 @@ CREATE TABLE IF NOT EXISTS agent_sessions (
 CREATE INDEX IF NOT EXISTS idx_tasks_status ON tasks(status);
 CREATE INDEX IF NOT EXISTS idx_tasks_assigned ON tasks(assigned_agent_id);
 CREATE INDEX IF NOT EXISTS idx_tasks_workspace ON tasks(workspace_id);
+CREATE INDEX IF NOT EXISTS idx_tasks_processing ON tasks(status, processing_expires_at);
 CREATE INDEX IF NOT EXISTS idx_agents_workspace ON agents(workspace_id);
 CREATE INDEX IF NOT EXISTS idx_events_created ON events(created_at DESC);
 CREATE INDEX IF NOT EXISTS idx_agents_status ON agents(status);
@@ -364,6 +371,7 @@ export class MissionControlDB {
     this.migrateTaskStatus();
     this.migrateLinearColumns();
     this.migrateTaskType();
+    this.migrateTaskLease();
   }
 
   private normalizePagination(limit?: number, offset?: number): { limit: number; offset: number } {
@@ -381,6 +389,21 @@ export class MissionControlDB {
     values.push(new Date().toISOString());
 
     return { sql: updates.join(", "), values };
+  }
+
+  private taskColumnExists(column: string): boolean {
+    const rows = this.db.prepare("PRAGMA table_info(tasks)").all() as Array<{ name: string }>;
+    return rows.some((row) => row.name === column);
+  }
+
+  private migrateTaskLease(): void {
+    if (!this.taskColumnExists("processing_owner")) {
+      this.db.exec("ALTER TABLE tasks ADD COLUMN processing_owner TEXT");
+    }
+    if (!this.taskColumnExists("processing_expires_at")) {
+      this.db.exec("ALTER TABLE tasks ADD COLUMN processing_expires_at TEXT");
+    }
+    this.db.exec("CREATE INDEX IF NOT EXISTS idx_tasks_processing ON tasks(status, processing_expires_at)");
   }
 
   private migrateLinearColumns(): void {
@@ -568,8 +591,8 @@ export class MissionControlDB {
           `INSERT INTO tasks (
             id, title, description, status, priority, assigned_agent_id, created_by_agent_id,
             workspace_id, due_date, parent_task_id, external_id, external_url,
-            source, task_type, triage_state, created_at, updated_at
-          ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+            source, task_type, triage_state, processing_owner, processing_expires_at, created_at, updated_at
+          ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
         )
         .run(
           id,
@@ -587,6 +610,8 @@ export class MissionControlDB {
           data.source ?? "manual",
           data.task_type ?? "implementation",
           data.triage_state ?? null,
+          null,
+          null,
           now,
           now
         );
@@ -618,6 +643,8 @@ export class MissionControlDB {
       source: data.source,
       task_type: data.task_type,
       triage_state: data.triage_state,
+      processing_owner: data.processing_owner,
+      processing_expires_at: data.processing_expires_at,
     };
 
     const hasUpdates = Object.values(fields).some((value) => value !== undefined);
@@ -628,6 +655,53 @@ export class MissionControlDB {
     const { sql, values } = this.buildDynamicUpdate(fields);
     this.db.prepare(`UPDATE tasks SET ${sql} WHERE id = ?`).run(...values, id);
     return this.getTask(id);
+  }
+
+  claimNextInboxTask(owner: string, leaseSeconds = 900): TaskRecord | undefined {
+    const leaseMs = Math.max(leaseSeconds, 30) * 1000;
+    const now = new Date();
+    const nowIso = now.toISOString();
+    const expiresIso = new Date(now.getTime() + leaseMs).toISOString();
+    const priorityRank = "CASE priority WHEN 'urgent' THEN 0 WHEN 'high' THEN 1 WHEN 'normal' THEN 2 ELSE 3 END";
+
+    return this.db.transaction(() => {
+      const candidate = this.db
+        .prepare(
+          `SELECT id FROM tasks
+           WHERE status = 'inbox'
+             AND (processing_owner IS NULL OR processing_expires_at IS NULL OR processing_expires_at <= ?)
+           ORDER BY ${priorityRank}, created_at ASC
+           LIMIT 1`
+        )
+        .get(nowIso) as { id: string } | undefined;
+
+      if (!candidate) return undefined;
+
+      const result = this.db
+        .prepare(
+          `UPDATE tasks
+           SET processing_owner = ?, processing_expires_at = ?, updated_at = ?
+           WHERE id = ?
+             AND status = 'inbox'
+             AND (processing_owner IS NULL OR processing_expires_at IS NULL OR processing_expires_at <= ?)`
+        )
+        .run(owner, expiresIso, nowIso, candidate.id, nowIso);
+
+      if (result.changes !== 1) return undefined;
+      return this.getTask(candidate.id);
+    })();
+  }
+
+  releaseTaskLease(id: string, owner: string): boolean {
+    const now = new Date().toISOString();
+    const result = this.db
+      .prepare(
+        `UPDATE tasks
+         SET processing_owner = NULL, processing_expires_at = NULL, updated_at = ?
+         WHERE id = ? AND processing_owner = ?`
+      )
+      .run(now, id, owner);
+    return result.changes > 0;
   }
 
   deleteTask(id: string): boolean {

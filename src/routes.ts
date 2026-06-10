@@ -444,6 +444,33 @@ async function handleApiRequest(
     }
 
     if (segments[0] === "tasks") {
+      if (segments.length === 2 && segments[1] === "claim" && method === "POST") {
+        const body = await parseBody(req);
+        const owner = isRecord(body) && typeof body.owner === "string" ? body.owner.trim() : "";
+        const leaseSeconds =
+          isRecord(body) && typeof body.lease_seconds === "number" && Number.isFinite(body.lease_seconds)
+            ? Math.max(30, Math.min(Math.floor(body.lease_seconds), 3600))
+            : 900;
+        if (!owner) {
+          sendJson(res, 400, { error: "owner is required" });
+          return;
+        }
+
+        const task = db.claimNextInboxTask(owner, leaseSeconds);
+        if (!task) {
+          sendJson(res, 200, { task: null });
+          return;
+        }
+
+        db.createActivity({
+          task_id: task.id,
+          activity_type: "lease_claimed",
+          message: `Bridge lease claimed by ${owner} until ${task.processing_expires_at}`,
+        });
+        sendJson(res, 200, { task });
+        return;
+      }
+
       if (segments.length === 1 && method === "GET") {
         const limitParam = url.searchParams.get("limit");
         const offsetParam = url.searchParams.get("offset");
@@ -505,6 +532,8 @@ async function handleApiRequest(
                 body.external_url = body.linear_issue_url;
                 delete body.linear_issue_url;
               }
+              delete body.processing_owner;
+              delete body.processing_expires_at;
 
               const needsTriageCheck = typeof body.triage_state === "string";
               const needsPriorityCheck = typeof body.priority === "string" && ["urgent", "high"].includes(body.priority);
@@ -536,11 +565,38 @@ async function handleApiRequest(
             }
 
             if (segments.length === 2 && method === "DELETE") {
+              const task = db.getTask(taskId);
               const deleted = db.deleteTask(taskId);
               if (!deleted) {
                 sendJson(res, 404, { error: "Task not found" });
                 return;
               }
+              db.createEvent({
+                type: "task_deleted",
+                message: `Task deleted: ${taskId}${task ? ` (${task.title})` : ""}`,
+                metadata: JSON.stringify({ task_id: taskId, title: task?.title ?? null }),
+              });
+              sendJson(res, 200, { success: true });
+              return;
+            }
+
+            if (segments.length === 3 && segments[2] === "lease" && method === "DELETE") {
+              const body = await parseBody(req);
+              const owner = isRecord(body) && typeof body.owner === "string" ? body.owner.trim() : "";
+              if (!owner) {
+                sendJson(res, 400, { error: "owner is required" });
+                return;
+              }
+              const released = db.releaseTaskLease(taskId, owner);
+              if (!released) {
+                sendJson(res, 409, { error: "Task lease was not held by this owner" });
+                return;
+              }
+              db.createActivity({
+                task_id: taskId,
+                activity_type: "lease_released",
+                message: `Bridge lease released by ${owner}`,
+              });
               sendJson(res, 200, { success: true });
               return;
             }
@@ -817,11 +873,17 @@ async function handleApiRequest(
             }
 
             if (method === "DELETE") {
+              const agent = db.getAgent(agentId);
               const deleted = db.deleteAgent(agentId);
               if (!deleted) {
                 sendJson(res, 404, { error: "Agent not found" });
                 return;
               }
+              db.createEvent({
+                type: "agent_deleted",
+                message: `Agent deleted: ${agentId}${agent ? ` (${agent.name})` : ""}`,
+                metadata: JSON.stringify({ agent_id: agentId, name: agent?.name ?? null }),
+              });
               sendJson(res, 200, { success: true });
               return;
             }
@@ -881,11 +943,17 @@ async function handleApiRequest(
                 sendJson(res, 400, { error: "Cannot delete default workspace" });
                 return;
               }
+              const workspace = db.getWorkspace(workspaceId);
               const deleted = db.deleteWorkspace(workspaceId);
               if (!deleted) {
                 sendJson(res, 404, { error: "Workspace not found" });
                 return;
               }
+              db.createEvent({
+                type: "workspace_deleted",
+                message: `Workspace deleted: ${workspaceId}${workspace ? ` (${workspace.name})` : ""}`,
+                metadata: JSON.stringify({ workspace_id: workspaceId, name: workspace?.name ?? null }),
+              });
               sendJson(res, 200, { success: true });
               return;
             }
@@ -1419,6 +1487,11 @@ async function handleApiRequest(
             const entryId = segments[1];
             const args = [knowledgeScript, "delete", "--id", entryId];
             const result = await runPython(args);
+            db.createEvent({
+              type: "knowledge_deleted",
+              message: `Knowledge entry deleted: ${entryId}`,
+              metadata: JSON.stringify({ entry_id: entryId }),
+            });
             sendJson(res, 200, result);
             return;
           }
