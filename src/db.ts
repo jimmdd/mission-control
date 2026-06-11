@@ -246,8 +246,8 @@ CREATE TABLE IF NOT EXISTS workspaces (
   slug TEXT NOT NULL UNIQUE,
   description TEXT,
   icon TEXT DEFAULT '📁',
-  created_at TEXT DEFAULT (datetime('now')),
-  updated_at TEXT DEFAULT (datetime('now'))
+  created_at TEXT DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
+  updated_at TEXT DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))
 );
 
 CREATE TABLE IF NOT EXISTS agents (
@@ -264,8 +264,8 @@ CREATE TABLE IF NOT EXISTS agents (
   agents_md TEXT,
   model TEXT,
   source TEXT DEFAULT 'local',
-  created_at TEXT DEFAULT (datetime('now')),
-  updated_at TEXT DEFAULT (datetime('now'))
+  created_at TEXT DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
+  updated_at TEXT DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))
 );
 
 CREATE TABLE IF NOT EXISTS tasks (
@@ -286,8 +286,8 @@ CREATE TABLE IF NOT EXISTS tasks (
   triage_state TEXT,
   processing_owner TEXT,
   processing_expires_at TEXT,
-  created_at TEXT DEFAULT (datetime('now')),
-  updated_at TEXT DEFAULT (datetime('now'))
+  created_at TEXT DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
+  updated_at TEXT DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))
 );
 
 CREATE TABLE IF NOT EXISTS events (
@@ -297,7 +297,7 @@ CREATE TABLE IF NOT EXISTS events (
   task_id TEXT REFERENCES tasks(id) ON DELETE CASCADE,
   message TEXT NOT NULL,
   metadata TEXT,
-  created_at TEXT DEFAULT (datetime('now'))
+  created_at TEXT DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))
 );
 
 CREATE TABLE IF NOT EXISTS task_activities (
@@ -307,7 +307,7 @@ CREATE TABLE IF NOT EXISTS task_activities (
   activity_type TEXT NOT NULL,
   message TEXT NOT NULL,
   metadata TEXT,
-  created_at TEXT DEFAULT (datetime('now'))
+  created_at TEXT DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))
 );
 
 CREATE TABLE IF NOT EXISTS task_deliverables (
@@ -317,7 +317,7 @@ CREATE TABLE IF NOT EXISTS task_deliverables (
   title TEXT NOT NULL,
   path TEXT,
   description TEXT,
-  created_at TEXT DEFAULT (datetime('now'))
+  created_at TEXT DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))
 );
 
 CREATE TABLE IF NOT EXISTS agent_sessions (
@@ -329,8 +329,8 @@ CREATE TABLE IF NOT EXISTS agent_sessions (
   session_type TEXT DEFAULT 'persistent',
   task_id TEXT REFERENCES tasks(id) ON DELETE CASCADE,
   ended_at TEXT,
-  created_at TEXT DEFAULT (datetime('now')),
-  updated_at TEXT DEFAULT (datetime('now'))
+  created_at TEXT DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
+  updated_at TEXT DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))
 );
 
 CREATE INDEX IF NOT EXISTS idx_tasks_status ON tasks(status);
@@ -372,6 +372,39 @@ export class MissionControlDB {
     this.migrateLinearColumns();
     this.migrateTaskType();
     this.migrateTaskLease();
+    this.migrateTimestampFormat();
+  }
+
+  private migrateTimestampFormat(): void {
+    // Normalize legacy space-separated SQLite timestamps ("YYYY-MM-DD HH:MM:SS")
+    // to ISO-8601 ("YYYY-MM-DDTHH:MM:SSZ") so historical rows sort and compare
+    // consistently with values written by new Date().toISOString(). Without this,
+    // `since`-based event/board polling silently mis-orders the two formats.
+    // Idempotent: only rows still in the legacy format match the LIKE pattern,
+    // and the NOT LIKE '%T%' guard prevents touching ISO values.
+    const targets: Array<{ table: string; columns: string[] }> = [
+      { table: "workspaces", columns: ["created_at", "updated_at"] },
+      { table: "agents", columns: ["created_at", "updated_at"] },
+      { table: "tasks", columns: ["created_at", "updated_at"] },
+      { table: "events", columns: ["created_at"] },
+      { table: "task_activities", columns: ["created_at"] },
+      { table: "task_deliverables", columns: ["created_at"] },
+      { table: "agent_sessions", columns: ["created_at", "updated_at", "ended_at"] },
+    ];
+    const legacyLike = "____-__-__ __:__:__%";
+    const migrate = this.db.transaction(() => {
+      for (const { table, columns } of targets) {
+        for (const col of columns) {
+          this.db
+            .prepare(
+              `UPDATE ${table} SET ${col} = replace(${col}, ' ', 'T') || 'Z'
+               WHERE ${col} LIKE ? AND ${col} NOT LIKE '%T%'`,
+            )
+            .run(legacyLike);
+        }
+      }
+    });
+    migrate();
   }
 
   private normalizePagination(limit?: number, offset?: number): { limit: number; offset: number } {
@@ -430,8 +463,8 @@ export class MissionControlDB {
         external_url TEXT,
         source TEXT DEFAULT 'manual',
         triage_state TEXT,
-        created_at TEXT DEFAULT (datetime('now')),
-        updated_at TEXT DEFAULT (datetime('now'))
+        created_at TEXT DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
+        updated_at TEXT DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))
       );
       INSERT INTO tasks_v2(id, title, description, status, priority,
         assigned_agent_id, created_by_agent_id, workspace_id, due_date,
@@ -479,8 +512,8 @@ export class MissionControlDB {
         source TEXT DEFAULT 'manual',
         task_type TEXT DEFAULT 'implementation' CHECK (task_type IN ('implementation', 'investigation', 'research')),
         triage_state TEXT,
-        created_at TEXT DEFAULT (datetime('now')),
-        updated_at TEXT DEFAULT (datetime('now'))
+        created_at TEXT DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
+        updated_at TEXT DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))
       );
       INSERT INTO tasks_task_type_migrated(
         id, title, description, status, priority, assigned_agent_id, created_by_agent_id,
@@ -523,8 +556,8 @@ export class MissionControlDB {
         external_url TEXT,
         source TEXT DEFAULT 'manual',
         triage_state TEXT,
-        created_at TEXT DEFAULT (datetime('now')),
-        updated_at TEXT DEFAULT (datetime('now'))
+        created_at TEXT DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
+        updated_at TEXT DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))
       );
       INSERT INTO tasks_migrated(id, title, description, status, priority,
         assigned_agent_id, created_by_agent_id, workspace_id, due_date,
@@ -579,6 +612,20 @@ export class MissionControlDB {
     return this.db.prepare("SELECT * FROM tasks WHERE id = ?").get(id) as
       | TaskRecord
       | undefined;
+  }
+
+  countTasks(): number {
+    const row = this.db.prepare("SELECT COUNT(*) AS n FROM tasks").get() as { n: number };
+    return row.n;
+  }
+
+  getStatusCounts(): Record<string, number> {
+    const rows = this.db
+      .prepare("SELECT status, COUNT(*) AS n FROM tasks GROUP BY status")
+      .all() as Array<{ status: string; n: number }>;
+    const counts: Record<string, number> = {};
+    for (const row of rows) counts[row.status] = row.n;
+    return counts;
   }
 
   createTask(data: CreateTaskInput): TaskRecord {
@@ -920,8 +967,8 @@ export class MissionControlDB {
     const id = randomUUID();
     this.db
       .prepare(
-        `INSERT INTO task_activities (id, task_id, agent_id, activity_type, message, metadata)
-         VALUES (?, ?, ?, ?, ?, ?)`
+        `INSERT INTO task_activities (id, task_id, agent_id, activity_type, message, metadata, created_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?)`
       )
       .run(
         id,
@@ -929,7 +976,8 @@ export class MissionControlDB {
         data.agent_id ?? null,
         data.activity_type,
         data.message,
-        data.metadata ?? null
+        data.metadata ?? null,
+        new Date().toISOString()
       );
 
     return this.db
@@ -950,8 +998,8 @@ export class MissionControlDB {
     const id = randomUUID();
     this.db
       .prepare(
-        `INSERT INTO task_deliverables (id, task_id, deliverable_type, title, path, description)
-         VALUES (?, ?, ?, ?, ?, ?)`
+        `INSERT INTO task_deliverables (id, task_id, deliverable_type, title, path, description, created_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?)`
       )
       .run(
         id,
@@ -959,7 +1007,8 @@ export class MissionControlDB {
         data.deliverable_type,
         data.title,
         data.path ?? null,
-        data.description ?? null
+        data.description ?? null,
+        new Date().toISOString()
       );
 
     return this.db
@@ -985,8 +1034,8 @@ export class MissionControlDB {
     const id = randomUUID();
     this.db
       .prepare(
-        `INSERT INTO events (id, type, agent_id, task_id, message, metadata)
-         VALUES (?, ?, ?, ?, ?, ?)`
+        `INSERT INTO events (id, type, agent_id, task_id, message, metadata, created_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?)`
       )
       .run(
         id,
@@ -994,7 +1043,8 @@ export class MissionControlDB {
         data.agent_id ?? null,
         data.task_id ?? null,
         data.message,
-        data.metadata ?? null
+        data.metadata ?? null,
+        new Date().toISOString()
       );
 
     return this.db.prepare("SELECT * FROM events WHERE id = ?").get(id) as EventRecord;

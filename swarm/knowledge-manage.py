@@ -53,9 +53,9 @@ def embed_text(text: str, api_key: str) -> List[float]:
     payload = json.dumps(gemini_embedding_payload(text, model=EMBEDDING_MODEL)).encode()
 
     req = urllib.request.Request(
-        f"{EMBEDDING_URL}?key={api_key}",
+        EMBEDDING_URL,
         data=payload,
-        headers={"Content-Type": "application/json"},
+        headers={"Content-Type": "application/json", "x-goog-api-key": api_key},
         method="POST",
     )
 

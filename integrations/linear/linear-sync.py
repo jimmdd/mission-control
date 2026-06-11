@@ -433,13 +433,13 @@ def _resolve_thread_parent(comment: dict) -> Optional[str]:
 
 
 def _call_gemini(prompt: str, api_key: str, model: str = GEMINI_FLASH) -> Optional[str]:
-    url = f"{GEMINI_API_BASE}/models/{model}:generateContent?key={api_key}"
+    url = f"{GEMINI_API_BASE}/models/{model}:generateContent"
     timeout = 120 if model == GEMINI_PRO else 60
     payload = json.dumps({
         "contents": [{"parts": [{"text": prompt}]}],
         "generationConfig": {"temperature": 0.3, "maxOutputTokens": 2048},
     }).encode()
-    req = urllib.request.Request(url, data=payload, headers={"Content-Type": "application/json"}, method="POST")
+    req = urllib.request.Request(url, data=payload, headers={"Content-Type": "application/json", "x-goog-api-key": api_key}, method="POST")
     try:
         with urllib.request.urlopen(req, timeout=timeout) as resp:
             data = json.loads(resp.read())
@@ -616,9 +616,9 @@ def _distill_research(question: str, findings: str, repo_path: str) -> None:
             "content": {"parts": [{"text": text}]},
         }).encode()
         embed_req = urllib.request.Request(
-            f"{EMBEDDING_URL}?key={api_key}",
+            EMBEDDING_URL,
             data=embed_payload,
-            headers={"Content-Type": "application/json"},
+            headers={"Content-Type": "application/json", "x-goog-api-key": api_key},
             method="POST",
         )
         with urllib.request.urlopen(embed_req, timeout=15) as resp:
@@ -775,8 +775,8 @@ def _gather_librarian_context(question: str) -> str:
                 "content": {"parts": [{"text": question}]},
             }).encode()
             embed_req = urllib.request.Request(
-                f"{EMBEDDING_URL}?key={api_key}",
-                data=embed_payload, headers={"Content-Type": "application/json"}, method="POST",
+                EMBEDDING_URL,
+                data=embed_payload, headers={"Content-Type": "application/json", "x-goog-api-key": api_key}, method="POST",
             )
             with urllib.request.urlopen(embed_req, timeout=15) as resp:
                 vector = json.loads(resp.read())["embedding"]["values"]

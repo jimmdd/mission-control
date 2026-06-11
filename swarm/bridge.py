@@ -315,9 +315,9 @@ def _embed_query(text: str) -> Optional[List[float]]:
     try:
         payload = json.dumps(gemini_embedding_payload(text, model=EMBEDDING_MODEL)).encode()
         req = urllib.request.Request(
-            f"{EMBEDDING_URL}?key={api_key}",
+            EMBEDDING_URL,
             data=payload,
-            headers={"Content-Type": "application/json"},
+            headers={"Content-Type": "application/json", "x-goog-api-key": api_key},
             method="POST",
         )
         with urllib.request.urlopen(req, timeout=15) as resp:
@@ -524,13 +524,17 @@ def call_gemini(prompt: str, max_tokens: int = 2048, model: Optional[str] = None
 
     url = (
         "https://generativelanguage.googleapis.com/v1beta/"
-        f"models/{model}:generateContent?key={api_key}"
+        f"models/{model}:generateContent"
     )
     payload = json.dumps({
         "contents": [{"parts": [{"text": prompt}]}],
         "generationConfig": {"temperature": 0.2, "maxOutputTokens": max_tokens},
     }).encode()
-    req = urllib.request.Request(url, data=payload, headers={"Content-Type": "application/json"})
+    req = urllib.request.Request(
+        url,
+        data=payload,
+        headers={"Content-Type": "application/json", "x-goog-api-key": api_key},
+    )
 
     try:
         with urllib.request.urlopen(req, timeout=120) as resp:

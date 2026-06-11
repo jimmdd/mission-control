@@ -897,17 +897,36 @@ async function handleSwarm(args: ParsedArgs, jsonMode: boolean): Promise<void> {
         await execFileText("tmux", ["kill-session", "-t", SWARM_MONITOR_SESSION], 10000).catch(() => undefined);
       }
 
-      const boardLoop = `while true; do clear; echo 'Mission Control Swarm Monitor'; echo; '${SWARM_STATUS_SCRIPT}' || true; sleep 3; done`;
-      await execFileText("tmux", ["new-session", "-d", "-s", SWARM_MONITOR_SESSION, "-n", "board", "bash", "-lc", boardLoop], 10000);
+      // Loop bodies are STATIC strings; dynamic values (status script path,
+      // session id, task id, description) are passed via tmux `-e KEY=VALUE`
+      // and expanded as data by the session shell. Nothing untrusted is
+      // interpolated into a shell command line, so a malicious task description
+      // (e.g. synced from an external tracker) cannot inject commands.
+      const boardLoop = `while true; do clear; echo 'Mission Control Swarm Monitor'; echo; "$MC_STATUS_SCRIPT" || true; sleep 3; done`;
+      await execFileText(
+        "tmux",
+        ["new-session", "-d", "-s", SWARM_MONITOR_SESSION, "-n", "board", "-e", `MC_STATUS_SCRIPT=${SWARM_STATUS_SCRIPT}`, boardLoop],
+        10000,
+      );
 
       for (const entry of entries) {
         const session = String(entry.tmuxSession);
         const windowName = truncate(entry.id ?? session, 18).replace(/\s+/g, "-");
         const tmuxExists = await ensureTmuxSessionExists(session);
         const command = tmuxExists
-          ? `while true; do clear; echo 'Agent session: ${session}'; echo 'Task: ${String(entry.id ?? "")}'; echo 'Description: ${String(entry.description ?? "")}'; echo; tmux capture-pane -pt '${session}' -S -200 2>/dev/null || echo 'Unable to capture pane'; sleep 2; done`
-          : `while true; do clear; echo 'Agent session missing: ${session}'; echo 'Task: ${String(entry.id ?? "")}'; sleep 5; done`;
-        await execFileText("tmux", ["new-window", "-t", SWARM_MONITOR_SESSION, "-n", windowName, "bash", "-lc", command], 10000).catch(() => undefined);
+          ? `while true; do clear; echo "Agent session: $MC_SESSION"; echo "Task: $MC_TASK_ID"; echo "Description: $MC_DESC"; echo; tmux capture-pane -pt "$MC_SESSION" -S -200 2>/dev/null || echo 'Unable to capture pane'; sleep 2; done`
+          : `while true; do clear; echo "Agent session missing: $MC_SESSION"; echo "Task: $MC_TASK_ID"; sleep 5; done`;
+        await execFileText(
+          "tmux",
+          [
+            "new-window", "-t", SWARM_MONITOR_SESSION, "-n", windowName,
+            "-e", `MC_SESSION=${session}`,
+            "-e", `MC_TASK_ID=${String(entry.id ?? "")}`,
+            "-e", `MC_DESC=${String(entry.description ?? "")}`,
+            command,
+          ],
+          10000,
+        ).catch(() => undefined);
       }
 
       await runInteractive("tmux", ["attach-session", "-t", SWARM_MONITOR_SESSION]);

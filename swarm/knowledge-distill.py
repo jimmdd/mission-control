@@ -95,9 +95,9 @@ def embed_text(text: str, api_key: str) -> List[float]:
     payload = json.dumps(gemini_embedding_payload(text, model=EMBEDDING_MODEL)).encode()
 
     req = urllib.request.Request(
-        f"{EMBEDDING_URL}?key={api_key}",
+        EMBEDDING_URL,
         data=payload,
-        headers={"Content-Type": "application/json"},
+        headers={"Content-Type": "application/json", "x-goog-api-key": api_key},
         method="POST",
     )
 
@@ -110,7 +110,7 @@ def embed_text(text: str, api_key: str) -> List[float]:
 
 def call_gemini(prompt: str, api_key: str) -> str:
     model = _load_distill_model()
-    url = f"{GEMINI_API_BASE}/models/{model}:generateContent?key={api_key}"
+    url = f"{GEMINI_API_BASE}/models/{model}:generateContent"
     payload = json.dumps({
         "contents": [{"parts": [{"text": prompt}]}],
         "generationConfig": {"temperature": 0.2, "maxOutputTokens": 4096},
@@ -118,7 +118,7 @@ def call_gemini(prompt: str, api_key: str) -> str:
 
     req = urllib.request.Request(
         url, data=payload,
-        headers={"Content-Type": "application/json"},
+        headers={"Content-Type": "application/json", "x-goog-api-key": api_key},
         method="POST",
     )
 

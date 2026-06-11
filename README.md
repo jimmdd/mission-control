@@ -453,6 +453,14 @@ MISSION_CONTROL_URL=http://127.0.0.1:18790
 EOF
 ```
 
+The knowledge and health endpoints shell out to the Python scripts under
+`swarm/` and `health/`. By default the server runs the copies shipped in this
+repo using `python3` on your `PATH`, so a plain `pip install context-fabrica`
+into that interpreter is enough — no separate copy into `~/.mission-control` is
+required. If you prefer an isolated interpreter, set `MC_PYTHON_BIN` (or place a
+venv at `~/.mission-control/venv-3.12`, which is auto-detected). Set `MC_HOME`
+only if you keep runtime scripts outside the checkout.
+
 Mission Control uses the installed `context-fabrica` package, but defaults to a
 separate Postgres schema (`mission_control`) so its Gemini embeddings do not
 alter or conflict with an existing context-fabrica schema. It also reads from
@@ -489,6 +497,30 @@ export MISSION_CONTROL_ACCESS_TOKEN="use-a-long-random-value"
 
 Clients can pass it as `Authorization: Bearer ...` or `?token=...`. The older
 `MISSION_CONTROL_READ_ACCESS_TOKEN` name still works for compatibility.
+
+### Built-in protections
+
+Even with no token, the default localhost deployment is hardened against the
+common ways a browser can be tricked into reaching a local service:
+
+- **DNS-rebinding protection** — requests are only served when the `Host`
+  header is an allowlisted name (`127.0.0.1`, `localhost`, `::1`, plus
+  `MC_HOST`). A malicious site that rebinds its DNS to `127.0.0.1` still sends
+  its own hostname and is rejected.
+- **CSRF protection** — state-changing requests (`POST`/`PATCH`/`PUT`/`DELETE`)
+  from a cross-site browser context are blocked via `Sec-Fetch-Site`/`Origin`
+  checks. Same-origin dashboard calls and non-browser clients (CLI, bridge,
+  curl) are unaffected.
+- **SSRF protection** — the knowledge `fetch-url` endpoint resolves the target
+  host and refuses loopback/private/link-local addresses, including
+  integer-encoded IP literals and redirects that point back inside the network.
+
+If you expose Mission Control under a custom hostname (e.g. behind a reverse
+proxy), add it to the Host allowlist:
+
+```bash
+export MISSION_CONTROL_ALLOWED_HOSTS="mc.internal.example.com"
+```
 
 Team installs can opt into scoped tokens only when needed:
 

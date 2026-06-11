@@ -4,6 +4,7 @@ import { homedir, cpus, totalmem, freemem, loadavg } from "node:os";
 import { fileURLToPath } from "node:url";
 import { execFile, spawn } from "node:child_process";
 import { timingSafeEqual } from "node:crypto";
+import { lookup } from "node:dns/promises";
 import type { IncomingMessage, ServerResponse } from "node:http";
 import type {
   CreateActivityInput,
@@ -26,6 +27,31 @@ export interface McLogger {
 
 const consoleLogger: McLogger = { info: console.log, error: console.error };
 const MAX_JSON_BODY_BYTES = Number.parseInt(process.env.MISSION_CONTROL_MAX_BODY_BYTES ?? "1048576", 10);
+
+// Resolve a runtime helper script (swarm/*.py, health/*.py). Prefer the copy
+// shipped in this repo so a fresh `git clone` works without first copying files
+// into $MC_HOME; fall back to $MC_HOME for installs that keep runtime files
+// separate from the source checkout.
+function resolveRuntimePath(...segments: string[]): string {
+  const repoRoot = join(dirname(fileURLToPath(import.meta.url)), "..");
+  const repoPath = join(repoRoot, ...segments);
+  if (existsSync(repoPath)) return repoPath;
+  const mcHome = process.env.MC_HOME ?? join(homedir(), ".mission-control");
+  return join(mcHome, ...segments);
+}
+
+// Resolve the Python interpreter that runs the knowledge/health scripts. Prefer
+// an explicit override, then the conventional Mission Control venv, then a
+// plain `python3` on PATH so a documented `pip install context-fabrica` setup
+// works without a venv.
+function resolvePythonBin(): string {
+  const override = (process.env.MC_PYTHON_BIN ?? "").trim();
+  if (override) return override;
+  const mcHome = process.env.MC_HOME ?? join(homedir(), ".mission-control");
+  const venvPython = join(mcHome, "venv-3.12", "bin", "python3");
+  if (existsSync(venvPython)) return venvPython;
+  return "python3";
+}
 
 export async function parseBody(req: IncomingMessage): Promise<unknown> {
   return new Promise((resolve, reject) => {
@@ -136,6 +162,69 @@ function isAuthorized(req: IncomingMessage, url: URL): boolean {
   return requiredBuffer.length === providedBuffer.length && timingSafeEqual(requiredBuffer, providedBuffer);
 }
 
+function getAllowedHosts(): Set<string> {
+  const hosts = new Set<string>(["127.0.0.1", "localhost", "::1", "[::1]"]);
+  const mcHost = (process.env.MC_HOST ?? "").trim().toLowerCase();
+  if (mcHost) hosts.add(mcHost);
+  const extra = process.env.MISSION_CONTROL_ALLOWED_HOSTS ?? "";
+  for (const host of extra.split(",").map(value => value.trim().toLowerCase()).filter(Boolean)) {
+    hosts.add(host);
+  }
+  return hosts;
+}
+
+function hostnameFromHostHeader(hostHeader: string): string | null {
+  try {
+    return new URL(`http://${hostHeader}`).hostname.toLowerCase();
+  } catch {
+    return null;
+  }
+}
+
+// Anti DNS-rebinding. A malicious site that rebinds its DNS to 127.0.0.1 still
+// sends its own name in the Host header, so requiring an allowlisted Host blocks
+// the browser from reaching a local Mission Control instance. Clients that omit
+// Host (some non-browser tooling) are allowed; remote deployments add their
+// public hostname via MISSION_CONTROL_ALLOWED_HOSTS.
+function isHostAllowed(req: IncomingMessage): boolean {
+  const hostHeader = req.headers.host;
+  if (!hostHeader) return true;
+  const allowed = getAllowedHosts();
+  if (allowed.has(hostHeader.toLowerCase())) return true;
+  const hostname = hostnameFromHostHeader(hostHeader);
+  if (!hostname) return false;
+  const bare = hostname.replace(/^\[|\]$/g, "");
+  return allowed.has(hostname) || allowed.has(bare) || allowed.has(`[${bare}]`);
+}
+
+// Anti-CSRF for state-changing requests. Browsers attach Sec-Fetch-Site (and
+// Origin) to fetch/XHR: same-origin dashboard calls are allowed and cross-site
+// calls are blocked. Non-browser clients (CLI, bridge, curl) send neither header
+// and are allowed — when a token is configured they still must present it.
+function isCsrfSafe(req: IncomingMessage, method: string): boolean {
+  if (method === "GET" || method === "HEAD" || method === "OPTIONS") return true;
+
+  const secFetchSite = req.headers["sec-fetch-site"];
+  if (typeof secFetchSite === "string" && secFetchSite) {
+    return secFetchSite === "same-origin" || secFetchSite === "same-site";
+  }
+
+  const origin = req.headers.origin;
+  if (typeof origin === "string" && origin) {
+    let originHost: string | null = null;
+    try {
+      originHost = new URL(origin).hostname.toLowerCase();
+    } catch {
+      return false;
+    }
+    const allowed = getAllowedHosts();
+    const bare = originHost.replace(/^\[|\]$/g, "");
+    return allowed.has(originHost) || allowed.has(bare) || allowed.has(`[${bare}]`);
+  }
+
+  return true;
+}
+
 function requireStringField(body: Record<string, unknown>, field: string): string | null {
   const val = body[field];
   return typeof val === "string" && val.trim() ? val : null;
@@ -156,39 +245,94 @@ function parseIsoMs(value: unknown): number | null {
   return Number.isFinite(ms) ? ms : null;
 }
 
-function isUrlSafe(urlStr: string): { safe: boolean; reason?: string } {
+function isPrivateIpv4(address: string): boolean {
+  const parts = address.split(".").map(Number);
+  if (parts.length !== 4 || parts.some(n => !Number.isInteger(n) || n < 0 || n > 255)) {
+    return true; // Malformed → treat as unsafe.
+  }
+  const [a, b] = parts;
+  if (a === 0 || a === 10 || a === 127) return true;
+  if (a === 169 && b === 254) return true; // link-local
+  if (a === 172 && b >= 16 && b <= 31) return true; // private
+  if (a === 192 && b === 168) return true; // private
+  if (a === 100 && b >= 64 && b <= 127) return true; // CGNAT
+  if (a >= 224) return true; // multicast / reserved
+  return false;
+}
+
+function isPrivateIpv6(address: string): boolean {
+  const addr = address.toLowerCase().split("%")[0].replace(/^\[|\]$/g, "");
+  if (addr === "::1" || addr === "::") return true;
+  if (addr.startsWith("fe80")) return true; // link-local
+  if (addr.startsWith("fc") || addr.startsWith("fd")) return true; // unique local
+  const mapped = addr.match(/::ffff:(\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3})$/);
+  if (mapped) return isPrivateIpv4(mapped[1]);
+  return false;
+}
+
+function isPrivateAddress(family: number, address: string): boolean {
+  return family === 6 ? isPrivateIpv6(address) : isPrivateIpv4(address);
+}
+
+// SSRF guard. Validates scheme, rejects embedded credentials, and — crucially —
+// resolves the hostname and rejects if ANY resolved IP is loopback/private/
+// link-local. DNS resolution catches both integer-encoded IP literals (e.g.
+// http://2130706433/ == 127.0.0.1) and DNS-rebinding names that point inward.
+async function assertPublicUrl(urlStr: string): Promise<URL> {
   let parsed: URL;
   try {
     parsed = new URL(urlStr);
   } catch {
-    return { safe: false, reason: "Invalid URL" };
+    throw new Error("Invalid URL");
   }
-
   if (!["http:", "https:"].includes(parsed.protocol)) {
-    return { safe: false, reason: "Only http and https URLs are allowed" };
+    throw new Error("Only http and https URLs are allowed");
+  }
+  if (parsed.username || parsed.password) {
+    throw new Error("URLs with embedded credentials are not allowed");
+  }
+  const bareHost = parsed.hostname.toLowerCase().replace(/^\[|\]$/g, "");
+  if (bareHost === "localhost" || bareHost.endsWith(".local") || bareHost.endsWith(".internal")) {
+    throw new Error("Local/internal hosts are not allowed");
   }
 
-  const host = parsed.hostname.toLowerCase();
-  if (
-    host === "localhost" ||
-    host === "127.0.0.1" ||
-    host === "0.0.0.0" ||
-    host === "[::1]" ||
-    host === "::1" ||
-    host.endsWith(".local")
-  ) {
-    return { safe: false, reason: "Local/private hosts are not allowed" };
+  let addresses: Array<{ address: string; family: number }>;
+  try {
+    addresses = await lookup(bareHost, { all: true });
+  } catch {
+    throw new Error("Could not resolve host");
   }
-
-  const ipParts = host.split(".").map(Number);
-  if (ipParts.length === 4 && ipParts.every(n => !isNaN(n))) {
-    if (ipParts[0] === 10) return { safe: false, reason: "Private IP range blocked" };
-    if (ipParts[0] === 172 && ipParts[1] >= 16 && ipParts[1] <= 31) return { safe: false, reason: "Private IP range blocked" };
-    if (ipParts[0] === 192 && ipParts[1] === 168) return { safe: false, reason: "Private IP range blocked" };
-    if (ipParts[0] === 169 && ipParts[1] === 254) return { safe: false, reason: "Link-local IP range blocked" };
+  if (addresses.length === 0) {
+    throw new Error("Could not resolve host");
   }
+  for (const { family, address } of addresses) {
+    if (isPrivateAddress(family, address)) {
+      throw new Error("URL resolves to a private or loopback address");
+    }
+  }
+  return parsed;
+}
 
-  return { safe: true };
+// Fetch a public URL, following redirects manually and re-validating every hop
+// so a public URL cannot redirect into the private network.
+async function fetchPublicUrl(initialUrl: string, maxRedirects = 4): Promise<Response> {
+  let current = initialUrl;
+  for (let hop = 0; hop <= maxRedirects; hop += 1) {
+    await assertPublicUrl(current);
+    const resp = await fetch(current, {
+      headers: { "User-Agent": "Mozilla/5.0 (compatible; MissionControl/1.0)" },
+      signal: AbortSignal.timeout(15000),
+      redirect: "manual",
+    });
+    if (resp.status >= 300 && resp.status < 400) {
+      const location = resp.headers.get("location");
+      if (!location) return resp;
+      current = new URL(location, current).toString();
+      continue;
+    }
+    return resp;
+  }
+  throw new Error("Too many redirects");
 }
 
 function sanitizeConfig(config: Record<string, unknown>): Record<string, unknown> {
@@ -252,8 +396,13 @@ function resolveApiRoutePath(pathname: string): string | null {
 async function getSwarmAgentStatusMap(
   logger: McLogger
 ): Promise<Record<string, Record<string, unknown>>> {
-    const mcHome = process.env.MC_HOME ?? join(homedir(), ".mission-control");
-    const registryPath = join(mcHome, "swarm", "active-tasks.json");
+  const mcHome = process.env.MC_HOME ?? join(homedir(), ".mission-control");
+  const registryPath = join(mcHome, "swarm", "active-tasks.json");
+  // No swarm runtime yet (fresh install) — return an empty map instead of
+  // throwing, so the dashboard board and agent-status endpoints work out of box.
+  if (!existsSync(registryPath)) {
+    return {};
+  }
   const raw = readFileSync(registryPath, "utf-8");
   const entries = JSON.parse(raw) as Array<Record<string, unknown>>;
 
@@ -306,20 +455,6 @@ async function getSwarmAgentStatusMap(
   }
 
   return byTask;
-}
-
-interface TriageQuestion {
-  question?: string;
-  q?: string;
-  answer?: string;
-  answered?: boolean;
-  options?: string[];
-  linear_comment_id?: string;
-}
-
-interface TriageState {
-  questions?: TriageQuestion[];
-  status?: string;
 }
 
 function getDashboardHtml(): string | null {
@@ -375,6 +510,23 @@ export function createHandler(db: MissionControlDB, logger?: McLogger): (req: In
   return async (req: IncomingMessage, res: ServerResponse): Promise<void> => {
     const url = new URL(req.url ?? "/", "http://localhost");
     const pathname = url.pathname;
+    const method = req.method ?? "GET";
+
+    // Anti DNS-rebinding: reject requests whose Host header is not allowlisted.
+    if (!isHostAllowed(req)) {
+      res.statusCode = 403;
+      res.setHeader("Content-Type", "text/plain; charset=utf-8");
+      res.end("Forbidden: host not allowed");
+      return;
+    }
+
+    // Anti-CSRF: block cross-site state-changing browser requests.
+    if (!isCsrfSafe(req, method)) {
+      res.statusCode = 403;
+      res.setHeader("Content-Type", "text/plain; charset=utf-8");
+      res.end("Forbidden: cross-site request blocked");
+      return;
+    }
 
     if (!isAuthorized(req, url)) {
       res.statusCode = 401;
@@ -1115,7 +1267,12 @@ async function handleApiRequest(
             const since = url.searchParams.get("since") ?? undefined;
             const liveMode = url.searchParams.get("live") === "true";
 
-            const allTasks = db.listTasks({});
+            // Counts come from unbounded SQL aggregates so the summary stays
+            // correct regardless of table size. The working set used for the
+            // task list/pagination is bounded (max 1000) for response size.
+            const totalTasks = db.countTasks();
+            const statusCounts = db.getStatusCounts();
+            const allTasks = db.listTasks({ limit: 1000 });
             const sortedTasks = [...allTasks].sort((a, b) =>
               String(b.updated_at ?? "").localeCompare(String(a.updated_at ?? ""))
             );
@@ -1139,12 +1296,6 @@ async function handleApiRequest(
                   })
                   .slice(0, limit)
               : sortedTasks.slice(offset, offset + limit);
-
-            const statusCounts = allTasks.reduce<Record<string, number>>((acc, task) => {
-              const key = task.status;
-              acc[key] = (acc[key] ?? 0) + 1;
-              return acc;
-            }, {});
 
             const heartbeatThresholdMs = Number.parseInt(
               url.searchParams.get("heartbeatThresholdMs") ?? "300000",
@@ -1202,7 +1353,7 @@ async function handleApiRequest(
 
             sendJson(res, 200, {
               summary: {
-                totalTasks: allTasks.length,
+                totalTasks,
                 statusCounts,
                 runningSwarmAgents: heartbeatStats.runningAgents,
                 staleHeartbeat: heartbeatStats.staleHeartbeat,
@@ -1335,8 +1486,7 @@ async function handleApiRequest(
         }
 
         if (segments[0] === "knowledge") {
-          const mcHome = process.env.MC_HOME ?? join(homedir(), ".mission-control");
-          const knowledgeScript = join(mcHome, "swarm", "knowledge-manage.py");
+          const knowledgeScript = resolveRuntimePath("swarm", "knowledge-manage.py");
 
           if (segments.length === 1 && method === "POST") {
             const body = await parseBody(req);
@@ -1368,7 +1518,7 @@ async function handleApiRequest(
 
             // If stage filter requested, use review script for stage-aware listing
             if (stage) {
-              const reviewScript = join(mcHome, "swarm", "knowledge-review.py");
+              const reviewScript = resolveRuntimePath("swarm", "knowledge-review.py");
               const result = await runPython([reviewScript, "list", "--stage", stage, "--limit", limit]);
               sendJson(res, 200, result);
               return;
@@ -1441,9 +1591,10 @@ async function handleApiRequest(
             }
 
             const targetUrl = urlField.startsWith("http") ? urlField : `https://${urlField}`;
-            const safety = isUrlSafe(targetUrl);
-            if (!safety.safe) {
-              sendJson(res, 400, { error: safety.reason ?? "Unsafe URL" });
+            try {
+              await assertPublicUrl(targetUrl);
+            } catch (err) {
+              sendJson(res, 400, { error: err instanceof Error ? err.message : "Unsafe URL" });
               return;
             }
 
@@ -1461,11 +1612,7 @@ async function handleApiRequest(
             }
 
             try {
-              const resp = await fetch(targetUrl, {
-                headers: { "User-Agent": "Mozilla/5.0 (compatible; MissionControl/1.0)" },
-                signal: AbortSignal.timeout(15000),
-                redirect: "follow",
-              });
+              const resp = await fetchPublicUrl(targetUrl);
 
               if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
               const html = await resp.text();
@@ -1497,7 +1644,7 @@ async function handleApiRequest(
           }
 
           // Knowledge review endpoints (shell out to knowledge-review.py)
-          const reviewScript = join(mcHome, "swarm", "knowledge-review.py");
+          const reviewScript = resolveRuntimePath("swarm", "knowledge-review.py");
 
           if (segments.length === 3 && segments[0] === "knowledge" && segments[2] === "promote" && method === "POST") {
             const result = await runPython([reviewScript, "promote", "--id", segments[1]]);
@@ -1533,8 +1680,7 @@ async function handleApiRequest(
         }
 
         if (segments[0] === "services" && segments[1] === "health" && segments.length === 2 && method === "GET") {
-          const mcHome = process.env.MC_HOME ?? join(homedir(), ".mission-control");
-          const healthScript = join(mcHome, "health", "service-health.py");
+          const healthScript = resolveRuntimePath("health", "service-health.py");
           const result = await runPython([healthScript]);
           sendJson(res, 200, result);
           return;
@@ -1621,8 +1767,7 @@ function runClaude(prompt: string, timeout = 120000): Promise<string> {
 
 function runPython(args: string[]): Promise<Record<string, unknown>> {
   return new Promise((resolve, reject) => {
-    const mcHome = process.env.MC_HOME ?? join(homedir(), ".mission-control");
-    const pythonBin = process.env.MC_PYTHON_BIN ?? join(mcHome, "venv-3.12", "bin", "python3");
+    const pythonBin = resolvePythonBin();
     execFile(pythonBin, args, { timeout: 300000 }, (err, stdout, stderr) => {
       if (err) {
         reject(new Error(stderr || err.message));

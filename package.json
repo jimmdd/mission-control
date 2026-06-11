@@ -13,6 +13,9 @@
   },
   "author": "jimmdd",
   "license": "MIT",
+  "engines": {
+    "node": ">=22"
+  },
   "keywords": [
     "mission-control",
     "task-management",

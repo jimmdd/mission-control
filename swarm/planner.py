@@ -190,9 +190,9 @@ def _call_gemini(prompt: str, model: str = "", system: str = "", max_tokens: int
 
     payload = json.dumps(body).encode()
     req = urllib.request.Request(
-        f"{GEMINI_API_URL}/models/{model}:generateContent?key={api_key}",
+        f"{GEMINI_API_URL}/models/{model}:generateContent",
         data=payload,
-        headers={"Content-Type": "application/json"},
+        headers={"Content-Type": "application/json", "x-goog-api-key": api_key},
     )
 
     try:

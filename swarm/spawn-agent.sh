@@ -187,30 +187,40 @@ case "$AGENT_LAUNCHER" in
     ;;
 esac
 
-# Build env var string for tmux session
-# tmux send-keys doesn't inherit our env, so we export explicitly
-ENV_EXPORTS=""
-[ -n "${MAX_BUDGET_USD:-}" ]    && ENV_EXPORTS+="export MAX_BUDGET_USD='$MAX_BUDGET_USD'; "
-[ -n "${MAX_TURNS:-}" ]         && ENV_EXPORTS+="export MAX_TURNS='$MAX_TURNS'; "
-[ -n "${FALLBACK_MODEL:-}" ]    && ENV_EXPORTS+="export FALLBACK_MODEL='$FALLBACK_MODEL'; "
-[ -n "${AGENTS_JSON:-}" ]       && ENV_EXPORTS+="export AGENTS_JSON='$AGENTS_JSON'; "
-[ -n "${MAX_AGENT_RETRIES:-}" ] && ENV_EXPORTS+="export MAX_AGENT_RETRIES='$MAX_AGENT_RETRIES'; "
-[ -n "$AGENT_PROFILE" ]         && ENV_EXPORTS+="export AGENT_PROFILE='$AGENT_PROFILE'; "
-[ -n "$AGENT_MODEL" ]           && ENV_EXPORTS+="export AGENT_MODEL='$AGENT_MODEL'; "
-[ -n "$AGENT_PROVIDER" ]        && ENV_EXPORTS+="export AGENT_PROVIDER='$AGENT_PROVIDER'; "
-[ -n "$AGENT_THINKING" ]        && ENV_EXPORTS+="export AGENT_THINKING='$AGENT_THINKING'; "
-[ -n "$AGENT_FALLBACK_MODEL" ]  && ENV_EXPORTS+="export AGENT_FALLBACK_MODEL='$AGENT_FALLBACK_MODEL'; "
-[ -n "$AGENT_EFFORT" ]          && ENV_EXPORTS+="export AGENT_EFFORT='$AGENT_EFFORT'; "
+# Build env vars for the tmux session as discrete `-e KEY=VALUE` arguments.
+# These are passed as argv elements (not interpolated into a shell command
+# string), so values may contain quotes, spaces, or shell metacharacters
+# without breaking out — and secrets never appear on a process command line.
+TMUX_ENV_ARGS=()
+add_session_env() { [ -n "${2:-}" ] && TMUX_ENV_ARGS+=( -e "$1=$2" ); }
+add_session_env MAX_BUDGET_USD     "${MAX_BUDGET_USD:-}"
+add_session_env MAX_TURNS          "${MAX_TURNS:-}"
+add_session_env FALLBACK_MODEL     "${FALLBACK_MODEL:-}"
+add_session_env AGENTS_JSON        "${AGENTS_JSON:-}"
+add_session_env MAX_AGENT_RETRIES  "${MAX_AGENT_RETRIES:-}"
+add_session_env AGENT_PROFILE      "${AGENT_PROFILE:-}"
+add_session_env AGENT_MODEL        "${AGENT_MODEL:-}"
+add_session_env AGENT_PROVIDER     "${AGENT_PROVIDER:-}"
+add_session_env AGENT_THINKING     "${AGENT_THINKING:-}"
+add_session_env AGENT_FALLBACK_MODEL "${AGENT_FALLBACK_MODEL:-}"
+add_session_env AGENT_EFFORT       "${AGENT_EFFORT:-}"
 while IFS= read -r entry; do
   [ -z "$entry" ] && continue
   key=$(echo "$entry" | jq -r '.key')
   value=$(echo "$entry" | jq -r '.value')
-  ENV_EXPORTS+="export ${key}='${value//\'/\'\\\'\'}'; "
+  [ -z "$key" ] || [ "$key" = "null" ] && continue
+  TMUX_ENV_ARGS+=( -e "$key=$value" )
 done < <(echo "$AGENT_ENV_JSON" | jq -c 'to_entries[]?')
 
-# Spawn tmux session with env vars forwarded
-tmux new-session -d -s "$TMUX_SESSION" -c "$WORKTREE_PATH" \
-  "bash -c '${ENV_EXPORTS}exec $LAUNCHER $TASK_ID'"
+# Pass the launcher path and task id through the session environment too, so
+# the command string below is fully static — nothing dynamic is interpolated
+# into a shell command line.
+TMUX_ENV_ARGS+=( -e "MC_LAUNCHER=$LAUNCHER" -e "MC_TASK_ARG=$TASK_ID" )
+
+# Spawn tmux session. The command is a fixed literal; MC_LAUNCHER and
+# MC_TASK_ARG are resolved from the session env (set via -e above).
+tmux new-session -d -s "$TMUX_SESSION" -c "$WORKTREE_PATH" "${TMUX_ENV_ARGS[@]}" \
+  'exec "$MC_LAUNCHER" "$MC_TASK_ARG"'
 
 # Register task
 BUDGET_DISPLAY="${MAX_BUDGET_USD:-unlimited}"
