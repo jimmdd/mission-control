@@ -559,6 +559,20 @@ stay simple.
 
 ---
 
+## Development
+
+```bash
+npm install          # first time (rebuilds the native better-sqlite3 binding)
+npm run build        # typecheck (tsc --noEmit)
+npm test             # behavioral test suite (node --test)
+```
+
+If `npm test` fails to load `better-sqlite3` with a `NODE_MODULE_VERSION`
+mismatch after switching Node versions, run `npm rebuild better-sqlite3`.
+GitHub Actions runs build + tests on every push and pull request.
+
+---
+
 ## Project structure
 
 ```text
@@ -569,7 +583,10 @@ mission-control/
 ├── src/
 │   ├── cli.ts
 │   ├── db.ts
-│   └── routes.ts
+│   ├── routes.ts
+│   ├── events.ts        # in-process event bus (SSE)
+│   └── reaper.ts        # agent liveness detection
+├── tests/
 ├── health/
 ├── swarm/
 │   ├── gsd_backend.py
@@ -590,6 +607,7 @@ mission-control/
 - dashboard
 - CLI
 - local swarm orchestration
+- structured agent progress, delegation, and a reactive event stream
 - Context Fabrica integration
 - GSD Core backend adapter
 - task artifact harvesting and knowledge distillation
