@@ -1268,6 +1268,19 @@ export class MissionControlDB {
       .all(parentId) as TaskRecord[];
   }
 
+  getChildCountsByParent(): Record<string, { total: number; open: number }> {
+    const rows = this.db
+      .prepare("SELECT parent_task_id AS pid, status FROM tasks WHERE parent_task_id IS NOT NULL")
+      .all() as Array<{ pid: string; status: string }>;
+    const map: Record<string, { total: number; open: number }> = {};
+    for (const row of rows) {
+      const entry = map[row.pid] ?? (map[row.pid] = { total: 0, open: 0 });
+      entry.total += 1;
+      if (row.status !== "review" && row.status !== "done") entry.open += 1;
+    }
+    return map;
+  }
+
   clearBlockingActivities(taskId: string): void {
     this.db.prepare(
       `DELETE FROM task_activities WHERE task_id = ? AND (

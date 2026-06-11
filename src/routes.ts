@@ -403,6 +403,39 @@ function sanitizeProgressInput(body: Record<string, unknown>): UpsertProgressInp
   return out;
 }
 
+const TERMINAL_TASK_STATUSES = new Set(["review", "done"]);
+
+// When a delegated child task reaches a terminal state, record the result on its
+// parent and — if the parent was paused waiting on its children — resume the
+// parent once every child is terminal. This lets a stuck agent spin up a
+// specialist subtask and have the result flow back automatically.
+function rollUpDelegation(db: MissionControlDB, childId: string): void {
+  const child = db.getTask(childId);
+  if (!child || !child.parent_task_id) return;
+  if (!TERMINAL_TASK_STATUSES.has(child.status)) return;
+  const parent = db.getTask(child.parent_task_id);
+  if (!parent) return;
+
+  db.createActivity({
+    task_id: parent.id,
+    activity_type: "subtask_completed",
+    message: `Delegated subtask "${child.title}" reached ${child.status}.`,
+    metadata: JSON.stringify({ child_task_id: child.id, child_status: child.status }),
+  });
+
+  const siblings = db.listChildTasks(parent.id);
+  const allTerminal = siblings.every((sibling) => TERMINAL_TASK_STATUSES.has(sibling.status));
+  if (allTerminal && parent.status === "on_hold") {
+    db.updateTask(parent.id, { status: "inbox" });
+    db.upsertProgress(parent.id, { state: "running", blocked_reason: null });
+    db.createActivity({
+      task_id: parent.id,
+      activity_type: "status_changed",
+      message: "All delegated subtasks complete — resuming parent task.",
+    });
+  }
+}
+
 const API_PREFIX = "/api";
 
 function resolveApiRoutePath(pathname: string): string | null {
@@ -731,6 +764,10 @@ async function handleApiRequest(
                 });
               }
 
+              if (typeof body.status === "string" && TERMINAL_TASK_STATUSES.has(body.status)) {
+                rollUpDelegation(db, taskId);
+              }
+
               sendJson(res, 200, task);
               return;
             }
@@ -817,6 +854,8 @@ async function handleApiRequest(
                   ? `Task marked done in Mission Control. Reason: ${reason}`
                   : "Task marked done in Mission Control.",
               });
+
+              rollUpDelegation(db, taskId);
 
               sendJson(res, 200, { success: true, task: updated });
               return;
@@ -1004,6 +1043,66 @@ async function handleApiRequest(
                 sendJson(res, 200, progress);
                 return;
               }
+            }
+
+            if (segments.length === 3 && segments[2] === "children" && method === "GET") {
+              const children = db.listChildTasks(taskId);
+              const progressMap = db.getProgressMap();
+              sendJson(res, 200, children.map((child) => ({ ...child, progress: progressMap[child.id] ?? null })));
+              return;
+            }
+
+            if (segments.length === 3 && segments[2] === "delegate" && method === "POST") {
+              const parent = db.getTask(taskId);
+              if (!parent) {
+                sendJson(res, 404, { error: "Task not found" });
+                return;
+              }
+              const body = await parseBody(req);
+              if (!isRecord(body) || typeof body.title !== "string" || !body.title.trim()) {
+                sendJson(res, 400, { error: "Subtask title is required" });
+                return;
+              }
+              const childType =
+                typeof body.task_type === "string" && ["implementation", "investigation", "research"].includes(body.task_type)
+                  ? (body.task_type as "implementation" | "investigation" | "research")
+                  : "investigation";
+              const reason = typeof body.reason === "string" ? body.reason.trim() : "";
+
+              const child = db.createTask({
+                title: body.title.trim(),
+                description: typeof body.description === "string" ? body.description : undefined,
+                status: "inbox",
+                priority: parent.priority,
+                workspace_id: parent.workspace_id,
+                parent_task_id: parent.id,
+                task_type: childType,
+                source: "delegation",
+              });
+
+              db.createActivity({
+                task_id: parent.id,
+                activity_type: "delegated",
+                message: reason ? `Delegated subtask "${child.title}": ${reason}` : `Delegated subtask "${child.title}".`,
+                metadata: JSON.stringify({ child_task_id: child.id }),
+              });
+
+              const wait = body.wait === true;
+              if (wait) {
+                db.updateTask(parent.id, { status: "on_hold" });
+                db.upsertProgress(parent.id, {
+                  state: "waiting",
+                  blocked_reason: `Waiting on delegated subtask: ${child.title}`,
+                });
+                db.createActivity({
+                  task_id: parent.id,
+                  activity_type: "status_changed",
+                  message: `Paused — waiting on delegated subtask "${child.title}".`,
+                });
+              }
+
+              sendJson(res, 201, { child, parent_waiting: wait });
+              return;
             }
           }
         }
@@ -1205,6 +1304,10 @@ async function handleApiRequest(
               db.updateTask(task.id, { status: newStatus });
             }
 
+            if (TERMINAL_TASK_STATUSES.has(newStatus)) {
+              rollUpDelegation(db, task.id);
+            }
+
             db.createEvent({
               type: "task_completed",
               task_id: task.id,
@@ -1381,10 +1484,12 @@ async function handleApiRequest(
             );
 
             const progressMap = db.getProgressMap();
+            const childCounts = db.getChildCountsByParent();
             const tasks = pagedTasks.map((task) => ({
               ...task,
               swarm: swarmStatus[task.id] ?? null,
               progress: progressMap[task.id] ?? null,
+              subtasks: childCounts[task.id] ?? null,
               recent_activity: db.listActivities(task.id, 3, 0),
             }));
             const blockedAgents = Object.values(progressMap).filter(
