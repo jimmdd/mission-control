@@ -3627,6 +3627,20 @@
                     ? (task.priority === 'urgent' ? 'priority-urgent' : task.priority === 'high' ? 'priority-high' : '')
                     : '';
 
+                // Structured live progress (phase / step / blocked reason).
+                let progressBadgeHtml = '';
+                const prog = task.progress;
+                if (prog && !isDone) {
+                    if (prog.state === 'blocked' || prog.state === 'waiting') {
+                        const reason = escapeHtml(prog.blocked_reason || (prog.state === 'waiting' ? 'waiting on subtask' : 'blocked'));
+                        progressBadgeHtml = `<div class="badge" title="${reason}" style="background: rgba(239,68,68,0.16); color:#ef4444; font-size:9px; padding:1px 6px;">${prog.state.toUpperCase()}</div>`;
+                    } else if (prog.phase || prog.step_label) {
+                        const stepTxt = (prog.step_index && prog.step_total) ? ` ${prog.step_index}/${prog.step_total}` : '';
+                        const tip = escapeHtml(prog.step_label || prog.phase || '');
+                        progressBadgeHtml = `<div class="badge" title="${tip}" style="background: rgba(0,224,199,0.12); color:#00e0c7; font-size:9px; padding:1px 6px;">${escapeHtml((prog.phase || 'running').toUpperCase())}${stepTxt}</div>`;
+                    }
+                }
+
                 return `
                     <div class="task-card ${isExpanded} ${isDone ? 'task-done' : ''} ${priorityClass}" id="card-${task.id}" style="--card-status-color: ${statusColor}">
                         <div class="card-header" onclick="${isExpandable ? `toggleChildren(event, '${task.id}')` : `handleTaskClick(event, '${task.id}')`}">
@@ -3638,6 +3652,7 @@
                             </div>
                             <div class="card-subtitle">
                                 <div class="badge badge-status ${task.status}">${task.status.replace('_', ' ')}</div>
+                                ${progressBadgeHtml}
                                 ${task.task_type === 'investigation'
                                     ? '<div class="badge" style="background: rgba(147, 130, 255, 0.15); color: #9382ff; font-size: 9px; padding: 1px 6px;">INVESTIGATION</div>'
                                     : task.task_type === 'research'
@@ -5453,6 +5468,28 @@
                     fetchChildActivities();
                 }
             }, 30000);
+
+            // Reactive updates via server-sent events. Coalesces bursts into a
+            // single refresh; the polls above remain as a fallback if SSE drops.
+            try {
+                let sseRefreshTimer = null;
+                const scheduleSseRefresh = () => {
+                    if (sseRefreshTimer) return;
+                    sseRefreshTimer = setTimeout(() => {
+                        sseRefreshTimer = null;
+                        fetchBoard({ live: true });
+                        fetchLastEvent();
+                        if (state.isDrawerOpen && state.selectedTaskId) {
+                            fetchTaskDetails(state.selectedTaskId);
+                        }
+                    }, 400);
+                };
+                const es = new EventSource(getApiUrl('/stream'));
+                es.onmessage = () => scheduleSseRefresh();
+                // EventSource auto-reconnects on error; polling covers any gap.
+            } catch (e) {
+                /* EventSource unsupported — rely on polling */
+            }
         };
 
         // Start

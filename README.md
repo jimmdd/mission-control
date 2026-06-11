@@ -408,8 +408,30 @@ All standalone endpoints are served under:
 - `services/health`
 - `knowledge`
 - `repos`
+- `stream` (server-sent events)
 
 Mission Control’s core API is standalone and tracker-agnostic.
+
+### Live coordination
+
+Beyond the task lifecycle, Mission Control surfaces what agents are doing in
+real time and lets them coordinate:
+
+- **Structured progress** — agents/bridge report `state`, `phase`, current
+  step, and a `blocked_reason` via `PUT /api/tasks/:id/progress`. The board
+  shows this per task (and a `blockedAgents` count) instead of only a heartbeat.
+- **Agent-to-agent delegation** — a blocked or specializing agent can spin up a
+  focused subtask with `POST /api/tasks/:id/delegate` (`{ "wait": true }` pauses
+  the parent until children finish, then auto-resumes it). `GET
+  /api/tasks/:id/children` lists subtasks with their progress.
+- **Reactive event stream** — `GET /api/stream` is a server-sent-events feed of
+  progress, delegation, completion, and agent-liveness events, so the dashboard
+  updates without polling.
+- **Liveness detection** — a built-in reaper flags dead (tmux gone) or stalled
+  (no heartbeat) agents within seconds, marking the task blocked and emitting an
+  event, rather than waiting for the monitor cron. Tunable via
+  `MISSION_CONTROL_REAPER_INTERVAL_MS` / `MISSION_CONTROL_STALE_HEARTBEAT_MS`,
+  or disable with `MISSION_CONTROL_DISABLE_REAPER=1`.
 
 ---
 

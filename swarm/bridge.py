@@ -202,6 +202,32 @@ def mc_log_activity(task_id: str, activity_type: str, message: str, agent_id: Op
     mc_request("POST", f"/api/tasks/{task_id}/activities", body)
 
 
+def mc_set_progress(task_id: str, state: str = "", phase: str = "", step_label: str = "",
+                    step_index: Optional[int] = None, step_total: Optional[int] = None,
+                    blocked_reason: str = ""):
+    """Best-effort structured progress report. Never raises into the bridge loop —
+    progress is telemetry, not control flow."""
+    body: dict = {}
+    if state:
+        body["state"] = state
+    if phase:
+        body["phase"] = phase
+    if step_label:
+        body["step_label"] = step_label
+    if step_index is not None:
+        body["step_index"] = step_index
+    if step_total is not None:
+        body["step_total"] = step_total
+    if blocked_reason:
+        body["blocked_reason"] = blocked_reason
+    if not body:
+        return
+    try:
+        mc_request("PUT", f"/api/tasks/{task_id}/progress", body)
+    except Exception as e:
+        logging.debug(f"progress update failed for {task_id[:8]}: {e}")
+
+
 def mc_add_deliverable(task_id: str, dtype: str, title: str, path: str = "", description: str = ""):
     body = {"deliverable_type": dtype, "title": title}
     if path:
@@ -989,6 +1015,28 @@ curl -X POST {MC_BASE_URL}/api/tasks/{task['id']}/activities \\
 ```
 Mission Control will pause this task and wait for a human response before resuming.
 
+### Reporting Progress (encouraged)
+Keep the Mission Control board accurate by reporting structured progress as you work:
+```bash
+curl -X PUT {MC_BASE_URL}/api/tasks/{task['id']}/progress \\
+  -H "Content-Type: application/json" \\
+  -d '{{"state": "running", "phase": "execute", "step_label": "WHAT_YOU_ARE_DOING_NOW"}}'
+```
+If you get stuck, set `"state": "blocked"` with a short `"blocked_reason"` so it shows on the board.
+
+### Delegating a Subtask
+If you are blocked on something OUTSIDE this task's scope — a separate repo, or an
+unknown failure that first needs investigation — delegate a focused subtask instead
+of guessing. Mission Control dispatches it as its own agent and feeds the result back:
+```bash
+curl -X POST {MC_BASE_URL}/api/tasks/{task['id']}/delegate \\
+  -H "Content-Type: application/json" \\
+  -d '{{"title": "SHORT_TITLE", "description": "WHAT_THE_SUBTASK_SHOULD_FIND_OR_DO", "task_type": "investigation", "reason": "WHY", "wait": true}}'
+```
+With `"wait": true` this task pauses until the subtask finishes; the subtask's result
+appears in this task's activity history when it resumes. Use delegation for genuinely
+separable work — not to avoid the core task.
+
 ## Constraints
 - Do NOT modify unrelated files
 - Do NOT add new dependencies without justification
@@ -1497,6 +1545,12 @@ def _dispatch_next_steps(task: dict, plan: dict, repos: List[dict]):
                 task_id, "step_dispatched",
                 f"Step {step_num}/{plan.get('total_steps', '?')}: {step['title']} → {agent_type} agent ({category})"
             )
+            try:
+                _step_total = int(plan.get("total_steps") or 0) or None
+            except (TypeError, ValueError):
+                _step_total = None
+            mc_set_progress(task_id, state="running", phase="execute",
+                            step_label=step.get("title", ""), step_index=step_num, step_total=_step_total)
             logging.info(f"  Dispatched step {step_num}: {step['title']} → {agent_type} ({category})")
         else:
             update_step_progress(task_id, step_num, {"status": "failed", "outcome": "Spawn failed"})
@@ -2445,6 +2499,8 @@ def process_human_escalations():
         mc_update_task(task_id, {"status": "planning"})
         mc_log_activity(task_id, "updated",
                         f"Escalated to human: {escalation_msg}")
+        mc_set_progress(task_id, state="blocked", phase="escalation",
+                        blocked_reason=escalation_msg[:500])
 
         questions = [{
             "id": "agent_escalation",
