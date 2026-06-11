@@ -36,6 +36,12 @@ def _atomic_write_json(path: Path, data: Any) -> None:
         os.close(dir_fd)
 
 
+# Bound the append-only event log so it cannot grow without limit. Callers hold
+# the registry lock when appending, so the trim rewrite below is race-free.
+EVENTS_MAX_BYTES = 5 * 1024 * 1024
+EVENTS_KEEP_LINES = 5000
+
+
 def _append_event(events_file: Path, event: Dict[str, Any]) -> None:
     events_file.parent.mkdir(parents=True, exist_ok=True)
     event["at"] = datetime.now(timezone.utc).isoformat()
@@ -43,6 +49,17 @@ def _append_event(events_file: Path, event: Dict[str, Any]) -> None:
         f.write(json.dumps(event) + "\n")
         f.flush()
         os.fsync(f.fileno())
+
+    # When the log exceeds the size cap, keep only the newest lines. Failures
+    # here must never break event recording, so they are swallowed.
+    try:
+        if events_file.stat().st_size > EVENTS_MAX_BYTES:
+            lines = events_file.read_text().splitlines()[-EVENTS_KEEP_LINES:]
+            tmp = events_file.with_suffix(events_file.suffix + ".tmp")
+            tmp.write_text("\n".join(lines) + "\n")
+            os.replace(tmp, events_file)
+    except Exception:
+        pass
 
 
 def _with_lock(lock_file: Path):

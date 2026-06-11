@@ -2479,15 +2479,35 @@ def run_once():
     process_human_escalations()
     # External review/ticket integrations should react to Mission Control state externally.
 
+    # Signal whether an inbox task was claimed this cycle so the daemon can drain
+    # a backlog promptly instead of waiting a full poll interval per task.
+    return task is not None
+
 
 def run_daemon(interval: int = 60):
-    logging.info(f"Bridge daemon started (polling every {interval}s)")
+    logging.info(f"Bridge daemon started (base poll {interval}s)")
+    busy_interval = min(5, interval)
+    max_backoff = max(interval * 10, 600)
+    consecutive_failures = 0
+
     while True:
+        did_work = False
         try:
-            run_once()
+            did_work = run_once()
+            consecutive_failures = 0
         except Exception as e:
-            logging.error(f"Bridge error: {e}")
-        time.sleep(interval)
+            consecutive_failures += 1
+            logging.error(f"Bridge error (failure #{consecutive_failures}): {e}")
+
+        if consecutive_failures:
+            # Exponential backoff so a down Mission Control API is not hammered.
+            delay = min(interval * (2 ** (consecutive_failures - 1)), max_backoff)
+        elif did_work:
+            # Keep draining while there is a backlog to dispatch.
+            delay = busy_interval
+        else:
+            delay = interval
+        time.sleep(delay)
 
 
 if __name__ == "__main__":
