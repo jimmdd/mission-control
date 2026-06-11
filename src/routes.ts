@@ -6,6 +6,8 @@ import { execFile, spawn } from "node:child_process";
 import { timingSafeEqual } from "node:crypto";
 import { lookup } from "node:dns/promises";
 import type { IncomingMessage, ServerResponse } from "node:http";
+import { McEventBus } from "./events.js";
+import type { McEvent } from "./events.js";
 import type {
   AgentProgressState,
   CreateActivityInput,
@@ -409,7 +411,7 @@ const TERMINAL_TASK_STATUSES = new Set(["review", "done"]);
 // parent and — if the parent was paused waiting on its children — resume the
 // parent once every child is terminal. This lets a stuck agent spin up a
 // specialist subtask and have the result flow back automatically.
-function rollUpDelegation(db: MissionControlDB, childId: string): void {
+function rollUpDelegation(db: MissionControlDB, childId: string, events?: McEventBus): void {
   const child = db.getTask(childId);
   if (!child || !child.parent_task_id) return;
   if (!TERMINAL_TASK_STATUSES.has(child.status)) return;
@@ -422,6 +424,7 @@ function rollUpDelegation(db: MissionControlDB, childId: string): void {
     message: `Delegated subtask "${child.title}" reached ${child.status}.`,
     metadata: JSON.stringify({ child_task_id: child.id, child_status: child.status }),
   });
+  events?.emit("subtask_completed", { parentId: parent.id, childTaskId: child.id, childStatus: child.status });
 
   const siblings = db.listChildTasks(parent.id);
   const allTerminal = siblings.every((sibling) => TERMINAL_TASK_STATUSES.has(sibling.status));
@@ -433,6 +436,7 @@ function rollUpDelegation(db: MissionControlDB, childId: string): void {
       activity_type: "status_changed",
       message: "All delegated subtasks complete — resuming parent task.",
     });
+    events?.emit("parent_resumed", { parentId: parent.id });
   }
 }
 
@@ -445,7 +449,7 @@ function resolveApiRoutePath(pathname: string): string | null {
   return null;
 }
 
-async function getSwarmAgentStatusMap(
+export async function getSwarmAgentStatusMap(
   logger: McLogger
 ): Promise<Record<string, Record<string, unknown>>> {
   const mcHome = process.env.MC_HOME ?? join(homedir(), ".mission-control");
@@ -557,7 +561,44 @@ function serveSpace(res: ServerResponse): void {
   res.end(html);
 }
 
-export function createHandler(db: MissionControlDB, logger?: McLogger): (req: IncomingMessage, res: ServerResponse) => Promise<void> {
+function handleEventStream(req: IncomingMessage, res: ServerResponse, events: McEventBus): void {
+  res.writeHead(200, {
+    "Content-Type": "text/event-stream; charset=utf-8",
+    "Cache-Control": "no-cache, no-transform",
+    Connection: "keep-alive",
+    "X-Accel-Buffering": "no",
+  });
+  res.write("event: ready\ndata: {}\n\n");
+
+  const unsubscribe = events.subscribe((event: McEvent) => {
+    try {
+      res.write(`data: ${JSON.stringify(event)}\n\n`);
+    } catch {
+      // client gone; cleanup runs on close
+    }
+  });
+  const keepalive = setInterval(() => {
+    try {
+      res.write(": ping\n\n");
+    } catch {
+      // ignore
+    }
+  }, 25_000);
+  if (typeof keepalive.unref === "function") keepalive.unref();
+
+  const cleanup = () => {
+    clearInterval(keepalive);
+    unsubscribe();
+  };
+  req.on("close", cleanup);
+  res.on("close", cleanup);
+}
+
+export function createHandler(
+  db: MissionControlDB,
+  logger?: McLogger,
+  events: McEventBus = new McEventBus(),
+): (req: IncomingMessage, res: ServerResponse) => Promise<void> {
   const log = logger ?? consoleLogger;
   return async (req: IncomingMessage, res: ServerResponse): Promise<void> => {
     const url = new URL(req.url ?? "/", "http://localhost");
@@ -602,9 +643,15 @@ export function createHandler(db: MissionControlDB, logger?: McLogger): (req: In
       return;
     }
 
+    // Server-sent events stream for reactive dashboard updates.
+    if (pathname === "/api/stream" && method === "GET") {
+      handleEventStream(req, res, events);
+      return;
+    }
+
     // API routes
     if (resolveApiRoutePath(pathname) !== null) {
-      await handleApiRequest(req, res, url, db, log);
+      await handleApiRequest(req, res, url, db, log, events);
       return;
     }
 
@@ -620,6 +667,7 @@ async function handleApiRequest(
   url: URL,
   db: MissionControlDB,
   logger: McLogger,
+  events: McEventBus,
 ): Promise<void> {
   try {
     const pathname = url.pathname;
@@ -765,7 +813,7 @@ async function handleApiRequest(
               }
 
               if (typeof body.status === "string" && TERMINAL_TASK_STATUSES.has(body.status)) {
-                rollUpDelegation(db, taskId);
+                rollUpDelegation(db, taskId, events);
               }
 
               sendJson(res, 200, task);
@@ -855,7 +903,7 @@ async function handleApiRequest(
                   : "Task marked done in Mission Control.",
               });
 
-              rollUpDelegation(db, taskId);
+              rollUpDelegation(db, taskId, events);
 
               sendJson(res, 200, { success: true, task: updated });
               return;
@@ -1040,6 +1088,12 @@ async function handleApiRequest(
                   return;
                 }
                 const progress = db.upsertProgress(taskId, sanitizeProgressInput(body));
+                events.emit("progress", {
+                  taskId,
+                  state: progress.state,
+                  phase: progress.phase,
+                  blockedReason: progress.blocked_reason,
+                });
                 sendJson(res, 200, progress);
                 return;
               }
@@ -1101,6 +1155,7 @@ async function handleApiRequest(
                 });
               }
 
+              events.emit("delegated", { parentId: parent.id, childTaskId: child.id, wait });
               sendJson(res, 201, { child, parent_waiting: wait });
               return;
             }
@@ -1305,8 +1360,9 @@ async function handleApiRequest(
             }
 
             if (TERMINAL_TASK_STATUSES.has(newStatus)) {
-              rollUpDelegation(db, task.id);
+              rollUpDelegation(db, task.id, events);
             }
+            events.emit("task_completed", { taskId: task.id, status: newStatus });
 
             db.createEvent({
               type: "task_completed",

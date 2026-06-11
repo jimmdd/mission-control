@@ -1,6 +1,8 @@
 import { createServer } from "node:http";
 import { MissionControlDB } from "./src/db.js";
-import { createHandler } from "./src/routes.js";
+import { createHandler, getSwarmAgentStatusMap } from "./src/routes.js";
+import { McEventBus } from "./src/events.js";
+import { startLivenessReaper } from "./src/reaper.js";
 
 // Config
 const PORT = parseInt(process.env.MC_PORT ?? "18790", 10);
@@ -36,8 +38,26 @@ db.initSchema();
 db.seedDefaults();
 console.log(`[mc] database initialized: ${DB_PATH}`);
 
+// Event bus for reactive (SSE) updates, shared by the HTTP handler and the
+// liveness reaper.
+const events = new McEventBus();
+const logger = { info: console.log, error: console.error };
+
 // Create handler from routes
-const handler = createHandler(db);
+const handler = createHandler(db, logger, events);
+
+// Detect dead/stalled agents promptly and surface them as events + activities,
+// rather than waiting for the periodic monitor cron.
+const REAPER_DISABLED = ["1", "true", "yes", "on"].includes(
+  (process.env.MISSION_CONTROL_DISABLE_REAPER ?? "").trim().toLowerCase(),
+);
+const stopReaper = REAPER_DISABLED
+  ? () => {}
+  : startLivenessReaper(db, events, {
+      getStatusMap: () => getSwarmAgentStatusMap(logger),
+      intervalMs: Number.parseInt(process.env.MISSION_CONTROL_REAPER_INTERVAL_MS ?? "30000", 10),
+      staleHeartbeatMs: Number.parseInt(process.env.MISSION_CONTROL_STALE_HEARTBEAT_MS ?? "300000", 10),
+    });
 
 const server = createServer(async (req, res) => {
   // Health endpoint
@@ -72,6 +92,7 @@ server.listen(PORT, HOST, () => {
 // Graceful shutdown
 function shutdown(signal: string) {
   console.log(`[mc] ${signal} received, shutting down`);
+  stopReaper();
   server.close(() => {
     db.close();
     console.log("[mc] stopped");
