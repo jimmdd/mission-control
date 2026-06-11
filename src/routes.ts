@@ -7,6 +7,7 @@ import { timingSafeEqual } from "node:crypto";
 import { lookup } from "node:dns/promises";
 import type { IncomingMessage, ServerResponse } from "node:http";
 import type {
+  AgentProgressState,
   CreateActivityInput,
   CreateAgentInput,
   CreateDeliverableInput,
@@ -18,6 +19,7 @@ import type {
   UpdateAgentInput,
   UpdateTaskInput,
   UpdateWorkspaceInput,
+  UpsertProgressInput,
 } from "./db.js";
 
 export interface McLogger {
@@ -384,6 +386,23 @@ function sanitizeConfig(config: Record<string, unknown>): Record<string, unknown
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
 }
+
+const PROGRESS_STATES = ["running", "blocked", "waiting", "delegating", "done"] as const;
+
+function sanitizeProgressInput(body: Record<string, unknown>): UpsertProgressInput {
+  const out: UpsertProgressInput = {};
+  if (typeof body.state === "string" && (PROGRESS_STATES as readonly string[]).includes(body.state)) {
+    out.state = body.state as AgentProgressState;
+  }
+  if (typeof body.phase === "string") out.phase = body.phase;
+  if (typeof body.step_label === "string") out.step_label = body.step_label;
+  if (typeof body.step_index === "number" && Number.isFinite(body.step_index)) out.step_index = Math.floor(body.step_index);
+  if (typeof body.step_total === "number" && Number.isFinite(body.step_total)) out.step_total = Math.floor(body.step_total);
+  if (typeof body.blocked_reason === "string") out.blocked_reason = body.blocked_reason.slice(0, 2000);
+  if (typeof body.detail === "string") out.detail = body.detail.slice(0, 2000);
+  return out;
+}
+
 const API_PREFIX = "/api";
 
 function resolveApiRoutePath(pathname: string): string | null {
@@ -964,6 +983,28 @@ async function handleApiRequest(
                 return;
               }
             }
+
+            if (segments.length === 3 && segments[2] === "progress") {
+              if (method === "GET") {
+                sendJson(res, 200, db.getProgress(taskId));
+                return;
+              }
+              if (method === "PUT" || method === "POST" || method === "PATCH") {
+                const task = db.getTask(taskId);
+                if (!task) {
+                  sendJson(res, 404, { error: "Task not found" });
+                  return;
+                }
+                const body = await parseBody(req);
+                if (!isRecord(body)) {
+                  sendJson(res, 400, { error: "Invalid request body" });
+                  return;
+                }
+                const progress = db.upsertProgress(taskId, sanitizeProgressInput(body));
+                sendJson(res, 200, progress);
+                return;
+              }
+            }
           }
         }
 
@@ -1339,11 +1380,16 @@ async function handleApiRequest(
               { runningAgents: 0, staleHeartbeat: 0, missingHeartbeat: 0 }
             );
 
+            const progressMap = db.getProgressMap();
             const tasks = pagedTasks.map((task) => ({
               ...task,
               swarm: swarmStatus[task.id] ?? null,
+              progress: progressMap[task.id] ?? null,
               recent_activity: db.listActivities(task.id, 3, 0),
             }));
+            const blockedAgents = Object.values(progressMap).filter(
+              (p) => p.state === "blocked" || p.state === "waiting",
+            ).length;
 
             const recentEvents = db.listEvents(Math.min(limit, 200), since, 0);
             const nextCursor =
@@ -1358,6 +1404,7 @@ async function handleApiRequest(
                 runningSwarmAgents: heartbeatStats.runningAgents,
                 staleHeartbeat: heartbeatStats.staleHeartbeat,
                 missingHeartbeat: heartbeatStats.missingHeartbeat,
+                blockedAgents,
                 heartbeatThresholdMs,
                 liveMode,
                 cursorMode: liveMode ? "since" : "offset",

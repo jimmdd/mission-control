@@ -239,6 +239,30 @@ export interface CreateSessionInput {
   ended_at?: string;
 }
 
+export type AgentProgressState = "running" | "blocked" | "waiting" | "delegating" | "done";
+
+export interface AgentProgressRecord {
+  task_id: string;
+  state: AgentProgressState;
+  phase: string | null;
+  step_label: string | null;
+  step_index: number | null;
+  step_total: number | null;
+  blocked_reason: string | null;
+  detail: string | null;
+  updated_at: string;
+}
+
+export interface UpsertProgressInput {
+  state?: AgentProgressState;
+  phase?: string | null;
+  step_label?: string | null;
+  step_index?: number | null;
+  step_total?: number | null;
+  blocked_reason?: string | null;
+  detail?: string | null;
+}
+
 const SCHEMA_SQL = `
 CREATE TABLE IF NOT EXISTS workspaces (
   id TEXT PRIMARY KEY,
@@ -343,6 +367,18 @@ CREATE INDEX IF NOT EXISTS idx_agents_status ON agents(status);
 CREATE INDEX IF NOT EXISTS idx_activities_task ON task_activities(task_id, created_at DESC);
 CREATE INDEX IF NOT EXISTS idx_deliverables_task ON task_deliverables(task_id);
 CREATE INDEX IF NOT EXISTS idx_agent_sessions_task ON agent_sessions(task_id);
+CREATE TABLE IF NOT EXISTS agent_progress (
+  task_id TEXT PRIMARY KEY REFERENCES tasks(id) ON DELETE CASCADE,
+  state TEXT NOT NULL DEFAULT 'running' CHECK (state IN ('running', 'blocked', 'waiting', 'delegating', 'done')),
+  phase TEXT,
+  step_label TEXT,
+  step_index INTEGER,
+  step_total INTEGER,
+  blocked_reason TEXT,
+  detail TEXT,
+  updated_at TEXT DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))
+);
+
 CREATE INDEX IF NOT EXISTS idx_tasks_parent ON tasks(parent_task_id);
 CREATE UNIQUE INDEX IF NOT EXISTS idx_tasks_external_id ON tasks(external_id);
 `;
@@ -1164,6 +1200,72 @@ export class MissionControlDB {
     return this.db
       .prepare("SELECT * FROM agent_sessions WHERE id = ?")
       .get(id) as SessionRecord;
+  }
+
+  upsertProgress(taskId: string, data: UpsertProgressInput): AgentProgressRecord {
+    const now = new Date().toISOString();
+    const existing = this.getProgress(taskId);
+    const merged = {
+      state: data.state ?? existing?.state ?? "running",
+      phase: data.phase !== undefined ? data.phase : existing?.phase ?? null,
+      step_label: data.step_label !== undefined ? data.step_label : existing?.step_label ?? null,
+      step_index: data.step_index !== undefined ? data.step_index : existing?.step_index ?? null,
+      step_total: data.step_total !== undefined ? data.step_total : existing?.step_total ?? null,
+      blocked_reason: data.blocked_reason !== undefined ? data.blocked_reason : existing?.blocked_reason ?? null,
+      detail: data.detail !== undefined ? data.detail : existing?.detail ?? null,
+    };
+
+    this.db
+      .prepare(
+        `INSERT INTO agent_progress (task_id, state, phase, step_label, step_index, step_total, blocked_reason, detail, updated_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+         ON CONFLICT(task_id) DO UPDATE SET
+           state = excluded.state,
+           phase = excluded.phase,
+           step_label = excluded.step_label,
+           step_index = excluded.step_index,
+           step_total = excluded.step_total,
+           blocked_reason = excluded.blocked_reason,
+           detail = excluded.detail,
+           updated_at = excluded.updated_at`,
+      )
+      .run(
+        taskId,
+        merged.state,
+        merged.phase,
+        merged.step_label,
+        merged.step_index,
+        merged.step_total,
+        merged.blocked_reason,
+        merged.detail,
+        now,
+      );
+
+    return this.getProgress(taskId) as AgentProgressRecord;
+  }
+
+  getProgress(taskId: string): AgentProgressRecord | null {
+    const row = this.db.prepare("SELECT * FROM agent_progress WHERE task_id = ?").get(taskId) as
+      | AgentProgressRecord
+      | undefined;
+    return row ?? null;
+  }
+
+  getProgressMap(): Record<string, AgentProgressRecord> {
+    const rows = this.db.prepare("SELECT * FROM agent_progress").all() as AgentProgressRecord[];
+    const byTask: Record<string, AgentProgressRecord> = {};
+    for (const row of rows) byTask[row.task_id] = row;
+    return byTask;
+  }
+
+  clearProgress(taskId: string): void {
+    this.db.prepare("DELETE FROM agent_progress WHERE task_id = ?").run(taskId);
+  }
+
+  listChildTasks(parentId: string): TaskRecord[] {
+    return this.db
+      .prepare("SELECT * FROM tasks WHERE parent_task_id = ? ORDER BY created_at ASC")
+      .all(parentId) as TaskRecord[];
   }
 
   clearBlockingActivities(taskId: string): void {
