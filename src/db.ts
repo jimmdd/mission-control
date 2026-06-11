@@ -263,6 +263,28 @@ export interface UpsertProgressInput {
   detail?: string | null;
 }
 
+export type CheckpointKind = "approval" | "question" | "choice";
+export type CheckpointStatus = "pending" | "approved" | "rejected" | "answered" | "cancelled";
+
+export interface CheckpointRecord {
+  id: string;
+  task_id: string;
+  kind: CheckpointKind;
+  prompt: string;
+  options: string | null;
+  status: CheckpointStatus;
+  response: string | null;
+  created_at: string;
+  resolved_at: string | null;
+}
+
+export interface CreateCheckpointInput {
+  task_id: string;
+  kind?: CheckpointKind;
+  prompt: string;
+  options?: string;
+}
+
 const SCHEMA_SQL = `
 CREATE TABLE IF NOT EXISTS workspaces (
   id TEXT PRIMARY KEY,
@@ -379,6 +401,20 @@ CREATE TABLE IF NOT EXISTS agent_progress (
   updated_at TEXT DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))
 );
 
+CREATE TABLE IF NOT EXISTS task_checkpoints (
+  id TEXT PRIMARY KEY,
+  task_id TEXT NOT NULL REFERENCES tasks(id) ON DELETE CASCADE,
+  kind TEXT NOT NULL DEFAULT 'approval' CHECK (kind IN ('approval', 'question', 'choice')),
+  prompt TEXT NOT NULL,
+  options TEXT,
+  status TEXT NOT NULL DEFAULT 'pending' CHECK (status IN ('pending', 'approved', 'rejected', 'answered', 'cancelled')),
+  response TEXT,
+  created_at TEXT DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
+  resolved_at TEXT
+);
+
+CREATE INDEX IF NOT EXISTS idx_checkpoints_task ON task_checkpoints(task_id, created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_checkpoints_status ON task_checkpoints(status);
 CREATE INDEX IF NOT EXISTS idx_tasks_parent ON tasks(parent_task_id);
 CREATE UNIQUE INDEX IF NOT EXISTS idx_tasks_external_id ON tasks(external_id);
 `;
@@ -1278,6 +1314,63 @@ export class MissionControlDB {
       entry.total += 1;
       if (row.status !== "review" && row.status !== "done") entry.open += 1;
     }
+    return map;
+  }
+
+  createCheckpoint(data: CreateCheckpointInput): CheckpointRecord {
+    const id = randomUUID();
+    const now = new Date().toISOString();
+    this.db
+      .prepare(
+        `INSERT INTO task_checkpoints (id, task_id, kind, prompt, options, status, created_at)
+         VALUES (?, ?, ?, ?, ?, 'pending', ?)`,
+      )
+      .run(id, data.task_id, data.kind ?? "approval", data.prompt, data.options ?? null, now);
+    return this.getCheckpoint(id) as CheckpointRecord;
+  }
+
+  getCheckpoint(id: string): CheckpointRecord | undefined {
+    return this.db.prepare("SELECT * FROM task_checkpoints WHERE id = ?").get(id) as CheckpointRecord | undefined;
+  }
+
+  listCheckpoints(taskId: string): CheckpointRecord[] {
+    return this.db
+      .prepare("SELECT * FROM task_checkpoints WHERE task_id = ? ORDER BY created_at DESC")
+      .all(taskId) as CheckpointRecord[];
+  }
+
+  listPendingCheckpoints(): CheckpointRecord[] {
+    return this.db
+      .prepare("SELECT * FROM task_checkpoints WHERE status = 'pending' ORDER BY created_at ASC")
+      .all() as CheckpointRecord[];
+  }
+
+  // Resolve only if still pending, so two resolvers cannot both "win".
+  resolveCheckpoint(id: string, status: CheckpointStatus, response?: string | null): CheckpointRecord | undefined {
+    const now = new Date().toISOString();
+    const result = this.db
+      .prepare(
+        `UPDATE task_checkpoints SET status = ?, response = ?, resolved_at = ?
+         WHERE id = ? AND status = 'pending'`,
+      )
+      .run(status, response ?? null, now, id);
+    if (result.changes !== 1) return undefined;
+    return this.getCheckpoint(id);
+  }
+
+  countPendingCheckpoints(taskId: string): number {
+    const row = this.db
+      .prepare("SELECT COUNT(*) AS n FROM task_checkpoints WHERE task_id = ? AND status = 'pending'")
+      .get(taskId) as { n: number };
+    return row.n;
+  }
+
+  getPendingCheckpointCounts(): Record<string, number> {
+    const rows = this.db
+      .prepare("SELECT task_id AS tid, COUNT(*) AS n FROM task_checkpoints WHERE status = 'pending' GROUP BY task_id")
+      .all() as Array<{ tid: string; n: number }>;
+    const map: Record<string, number> = {};
+    for (const row of rows) map[row.tid] = row.n;
     return map;
   }
 

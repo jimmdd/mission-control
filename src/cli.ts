@@ -36,6 +36,7 @@ type RenderKind =
   | "repos"
   | "config"
   | "swarm-sessions"
+  | "checkpoints"
   | "result";
 
 type SwarmRegistryEntry = Record<string, unknown> & {
@@ -527,6 +528,19 @@ function renderSwarmSessions(data: unknown): void {
   console.log(`Active registry entries: ${rows.length}`);
 }
 
+function renderCheckpoints(data: unknown): void {
+  const rows = asArray(data).map(cp => ({
+    id: cp.id,
+    task: typeof cp.task_id === "string" ? cp.task_id.slice(0, 8) : "",
+    kind: cp.kind ?? "",
+    status: cp.status ?? "",
+    prompt: truncate(cp.prompt ?? "", 70),
+    created: cp.created_at ?? "",
+  }));
+  console.table(rows);
+  console.log(`Pending checkpoints: ${rows.length}`);
+}
+
 function renderResult(data: unknown): void {
   if (isRecord(data) && typeof data.success === "boolean") {
     console.log(data.success ? "Success" : "Failed");
@@ -588,6 +602,9 @@ function outputValue(data: unknown, jsonMode: boolean, kind: RenderKind = "defau
       return;
     case "swarm-sessions":
       renderSwarmSessions(data);
+      return;
+    case "checkpoints":
+      renderCheckpoints(data);
       return;
     case "result":
       renderResult(data);
@@ -820,6 +837,9 @@ Commands:
   knowledge reject <id>
   knowledge delete <id>
   knowledge update <id> [--interactive] [--text TEXT] [--domain DOMAIN]
+
+  checkpoints [list]
+  checkpoints resolve <id> --decision approve|reject|answer [--response TEXT]
 
   services health
   board [--limit N] [--offset N] [--since ISO] [--live true]
@@ -1148,6 +1168,28 @@ async function handleKnowledge(args: ParsedArgs, jsonMode: boolean): Promise<voi
   }
 }
 
+async function handleCheckpoints(args: ParsedArgs, jsonMode: boolean): Promise<void> {
+  const [action, id] = args.positionals;
+  switch (action ?? "list") {
+    case "list":
+      outputValue(await mcFetch("GET", `${API_PREFIX}/checkpoints?status=pending`), jsonMode, "checkpoints");
+      return;
+    case "resolve": {
+      if (!id) throw new Error("Usage: mc checkpoints resolve <id> --decision approve|reject|answer [--response TEXT]");
+      const decision = flag(args, "decision");
+      if (!decision) throw new Error("--decision is required (approve|reject|answer)");
+      outputValue(
+        await mcFetch("POST", `${API_PREFIX}/checkpoints/${id}/resolve`, { decision, response: flag(args, "response") }),
+        jsonMode,
+        "result",
+      );
+      return;
+    }
+    default:
+      throw new Error("Unknown checkpoints command. Try: list, resolve");
+  }
+}
+
 async function run(): Promise<void> {
   const args = parseArgs(process.argv.slice(2));
   const jsonMode = hasFlag(args, "json");
@@ -1206,6 +1248,9 @@ async function run(): Promise<void> {
       return;
     case "swarm":
       await handleSwarm(subArgs, jsonMode);
+      return;
+    case "checkpoints":
+      await handleCheckpoints(subArgs, jsonMode);
       return;
     default:
       throw new Error(`Unknown command: ${command}`);

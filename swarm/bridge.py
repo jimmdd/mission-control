@@ -1037,6 +1037,19 @@ With `"wait": true` this task pauses until the subtask finishes; the subtask's r
 appears in this task's activity history when it resumes. Use delegation for genuinely
 separable work — not to avoid the core task.
 
+### Requesting Approval / a Decision (checkpoint)
+Before doing something risky or ambiguous (a destructive action, a design choice
+with real trade-offs, anything you'd want a human to sign off on), raise a
+checkpoint and STOP. The human is notified, and this task pauses until they decide:
+```bash
+curl -X POST {MC_BASE_URL}/api/tasks/{task['id']}/checkpoints \\
+  -H "Content-Type: application/json" \\
+  -d '{{"kind": "approval", "prompt": "THE_DECISION_OR_ACTION_TO_APPROVE"}}'
+```
+The task resumes automatically once the human resolves it; their decision
+(approved / rejected / answer) appears in this task's activity history. Read it on
+resume and proceed accordingly — if rejected, do NOT take the action.
+
 ## Constraints
 - Do NOT modify unrelated files
 - Do NOT add new dependencies without justification

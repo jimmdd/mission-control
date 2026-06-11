@@ -172,6 +172,10 @@ Mission Control also ships with a local CLI.
 # operational views
 ./mc services health
 ./mc board --json
+
+# approve/resolve checkpoints an agent is waiting on
+./mc checkpoints
+./mc checkpoints resolve <checkpoint-id> --decision approve
 ```
 
 The CLI talks to the same standalone API as the dashboard.
@@ -408,6 +412,7 @@ All standalone endpoints are served under:
 - `services/health`
 - `knowledge`
 - `repos`
+- `checkpoints`
 - `stream` (server-sent events)
 
 Mission Control’s core API is standalone and tracker-agnostic.
@@ -432,6 +437,16 @@ real time and lets them coordinate:
   event, rather than waiting for the monitor cron. Tunable via
   `MISSION_CONTROL_REAPER_INTERVAL_MS` / `MISSION_CONTROL_STALE_HEARTBEAT_MS`,
   or disable with `MISSION_CONTROL_DISABLE_REAPER=1`.
+- **Approval checkpoints** — before a risky or ambiguous action an agent can
+  raise a checkpoint (`POST /api/tasks/:id/checkpoints`). The task pauses, the
+  human is notified, and it resumes automatically once resolved. Resolve from
+  the CLI (`./mc checkpoints`, `./mc checkpoints resolve <id> --decision
+  approve|reject|answer`) or `POST /api/checkpoints/:id/resolve`. The board
+  reports `awaitingApproval` and per-task pending counts.
+- **Push notifications** — escalations (`needs_human`), approval requests, and
+  dead/stalled agents are pushed to a local `~/.mission-control/swarm/notify.sh`
+  hook (if present) and/or a webhook (`MISSION_CONTROL_NOTIFY_WEBHOOK`), so you
+  don't have to watch the board. Rate-limited per event/task.
 
 ---
 

@@ -1165,6 +1165,114 @@ async function handleApiRequest(
               sendJson(res, 201, { child, parent_waiting: wait });
               return;
             }
+
+            if (segments.length === 3 && segments[2] === "checkpoints") {
+              if (method === "GET") {
+                sendJson(res, 200, db.listCheckpoints(taskId));
+                return;
+              }
+              if (method === "POST") {
+                const task = db.getTask(taskId);
+                if (!task) {
+                  sendJson(res, 404, { error: "Task not found" });
+                  return;
+                }
+                const body = await parseBody(req);
+                if (!isRecord(body) || typeof body.prompt !== "string" || !body.prompt.trim()) {
+                  sendJson(res, 400, { error: "Checkpoint prompt is required" });
+                  return;
+                }
+                const kind =
+                  typeof body.kind === "string" && ["approval", "question", "choice"].includes(body.kind)
+                    ? (body.kind as "approval" | "question" | "choice")
+                    : "approval";
+                const options = Array.isArray(body.options) ? JSON.stringify(body.options) : undefined;
+
+                const checkpoint = db.createCheckpoint({ task_id: taskId, kind, prompt: body.prompt.trim(), options });
+
+                const pause = body.pause !== false; // default: pause the task
+                if (pause) {
+                  db.updateTask(taskId, { status: "on_hold" });
+                  db.upsertProgress(taskId, { state: "waiting", blocked_reason: body.prompt.trim().slice(0, 500) });
+                }
+                db.createActivity({
+                  task_id: taskId,
+                  activity_type: "checkpoint_raised",
+                  message: `Awaiting human ${kind}: ${body.prompt.trim()}`,
+                  metadata: JSON.stringify({ checkpoint_id: checkpoint.id }),
+                });
+                events.emit("awaiting_approval", { taskId, checkpointId: checkpoint.id, prompt: body.prompt.trim(), kind });
+
+                sendJson(res, 201, { checkpoint, paused: pause });
+                return;
+              }
+            }
+          }
+        }
+
+        if (segments[0] === "checkpoints") {
+          if (segments.length === 1 && method === "GET") {
+            // The "what needs me" inbox: pending checkpoints across all tasks.
+            sendJson(res, 200, db.listPendingCheckpoints());
+            return;
+          }
+
+          if (segments.length === 3 && segments[2] === "resolve" && method === "POST") {
+            const checkpointId = segments[1];
+            const existing = db.getCheckpoint(checkpointId);
+            if (!existing) {
+              sendJson(res, 404, { error: "Checkpoint not found" });
+              return;
+            }
+            const body = await parseBody(req);
+            const decisionRaw = isRecord(body) && typeof body.decision === "string" ? body.decision.toLowerCase() : "";
+            const decisionMap: Record<string, "approved" | "rejected" | "answered"> = {
+              approve: "approved",
+              approved: "approved",
+              reject: "rejected",
+              rejected: "rejected",
+              answer: "answered",
+              answered: "answered",
+              choose: "answered",
+            };
+            const newStatus = decisionMap[decisionRaw];
+            if (!newStatus) {
+              sendJson(res, 400, { error: "decision must be one of: approve, reject, answer" });
+              return;
+            }
+            const response = isRecord(body) && typeof body.response === "string" ? body.response : undefined;
+
+            const resolved = db.resolveCheckpoint(checkpointId, newStatus, response);
+            if (!resolved) {
+              sendJson(res, 409, { error: "Checkpoint is already resolved" });
+              return;
+            }
+
+            const taskId = resolved.task_id;
+            db.createActivity({
+              task_id: taskId,
+              activity_type: "checkpoint_resolved",
+              message: response
+                ? `Checkpoint ${newStatus}: ${response}`
+                : `Checkpoint ${newStatus}.`,
+              metadata: JSON.stringify({ checkpoint_id: checkpointId, decision: newStatus }),
+            });
+
+            // Resume the task once nothing else is blocking it on a human.
+            const task = db.getTask(taskId);
+            if (task && task.status === "on_hold" && db.countPendingCheckpoints(taskId) === 0) {
+              db.updateTask(taskId, { status: "inbox" });
+              db.upsertProgress(taskId, { state: "running", blocked_reason: null });
+              db.createActivity({
+                task_id: taskId,
+                activity_type: "status_changed",
+                message: "Checkpoint resolved — resuming task.",
+              });
+            }
+            events.emit("checkpoint_resolved", { taskId, checkpointId, decision: newStatus });
+
+            sendJson(res, 200, { checkpoint: resolved });
+            return;
           }
         }
 
@@ -1547,16 +1655,19 @@ async function handleApiRequest(
 
             const progressMap = db.getProgressMap();
             const childCounts = db.getChildCountsByParent();
+            const checkpointCounts = db.getPendingCheckpointCounts();
             const tasks = pagedTasks.map((task) => ({
               ...task,
               swarm: swarmStatus[task.id] ?? null,
               progress: progressMap[task.id] ?? null,
               subtasks: childCounts[task.id] ?? null,
+              pending_checkpoints: checkpointCounts[task.id] ?? 0,
               recent_activity: db.listActivities(task.id, 3, 0),
             }));
             const blockedAgents = Object.values(progressMap).filter(
               (p) => p.state === "blocked" || p.state === "waiting",
             ).length;
+            const awaitingApproval = Object.values(checkpointCounts).reduce((a, b) => a + b, 0);
 
             const recentEvents = db.listEvents(Math.min(limit, 200), since, 0);
             const nextCursor =
@@ -1572,6 +1683,7 @@ async function handleApiRequest(
                 staleHeartbeat: heartbeatStats.staleHeartbeat,
                 missingHeartbeat: heartbeatStats.missingHeartbeat,
                 blockedAgents,
+                awaitingApproval,
                 heartbeatThresholdMs,
                 liveMode,
                 cursorMode: liveMode ? "since" : "offset",
