@@ -3,6 +3,7 @@ import { MissionControlDB } from "./src/db.js";
 import { createHandler, getSwarmAgentStatusMap } from "./src/routes.js";
 import { McEventBus } from "./src/events.js";
 import { startLivenessReaper } from "./src/reaper.js";
+import { startNotifier } from "./src/notifier.js";
 
 // Config
 const PORT = parseInt(process.env.MC_PORT ?? "18790", 10);
@@ -59,6 +60,14 @@ const stopReaper = REAPER_DISABLED
       staleHeartbeatMs: Number.parseInt(process.env.MISSION_CONTROL_STALE_HEARTBEAT_MS ?? "300000", 10),
     });
 
+// Push notifications for events that need a human (escalations, approval gates,
+// dead/stalled agents) via an optional notify.sh hook and/or a webhook.
+const stopNotifier = startNotifier(events, {
+  notifyScript: `${MC_HOME}/swarm/notify.sh`,
+  webhookUrl: (process.env.MISSION_CONTROL_NOTIFY_WEBHOOK ?? "").trim() || undefined,
+  logger,
+});
+
 const server = createServer(async (req, res) => {
   // Health endpoint
   if (req.url === "/health") {
@@ -93,6 +102,7 @@ server.listen(PORT, HOST, () => {
 function shutdown(signal: string) {
   console.log(`[mc] ${signal} received, shutting down`);
   stopReaper();
+  stopNotifier();
   server.close(() => {
     db.close();
     console.log("[mc] stopped");

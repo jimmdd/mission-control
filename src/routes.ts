@@ -1008,6 +1008,12 @@ async function handleApiRequest(
                 };
                 const activity = db.createActivity(input);
 
+                // Surface agent escalations as a push notification, not just a
+                // board entry the human has to go look at.
+                if (input.activity_type === "needs_human") {
+                  events.emit("needs_human", { taskId, message: input.message });
+                }
+
                 sendJson(res, 201, activity);
                 return;
               }
