@@ -2012,6 +2012,13 @@ async function handleApiRequest(
           return;
         }
 
+        if (segments[0] === "connections" && segments.length === 1 && method === "GET") {
+          // Readiness probe: agent runtime auth + connected sources.
+          const result = await runPython([resolveRuntimePath("swarm", "connections.py")]);
+          sendJson(res, 200, result);
+          return;
+        }
+
         sendJson(res, 404, { error: "Not found" });
       } catch (error) {
         const message = error instanceof Error ? error.message : "Internal server error";
@@ -2089,6 +2096,10 @@ function runClaude(prompt: string, timeout = 120000): Promise<string> {
       resolve(stdout.trim());
     });
   });
+}
+
+export async function getConnectionsReport(): Promise<Record<string, unknown>> {
+  return runPython([resolveRuntimePath("swarm", "connections.py")]);
 }
 
 function runPython(args: string[]): Promise<Record<string, unknown>> {

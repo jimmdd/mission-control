@@ -1,6 +1,6 @@
 import { createServer } from "node:http";
 import { MissionControlDB } from "./src/db.js";
-import { createHandler, getSwarmAgentStatusMap } from "./src/routes.js";
+import { createHandler, getSwarmAgentStatusMap, getConnectionsReport } from "./src/routes.js";
 import { McEventBus } from "./src/events.js";
 import { startLivenessReaper } from "./src/reaper.js";
 import { startNotifier } from "./src/notifier.js";
@@ -96,6 +96,25 @@ server.listen(PORT, HOST, () => {
   console.log(`[mc] Mission Control listening on http://${HOST}:${PORT} (PID ${process.pid})`);
   console.log(`[mc] home directory: ${MC_HOME}`);
   console.log(`[mc] log file: ${MC_HOME}/logs/mc.log`);
+
+  // Probe agent runtimes + sources on start and log a one-line readiness
+  // summary, so you can see what's set up without doing anything.
+  if (!["1", "true", "yes", "on"].includes((process.env.MISSION_CONTROL_SKIP_READINESS ?? "").trim().toLowerCase())) {
+    getConnectionsReport()
+      .then((report) => {
+        const runtimes = Array.isArray(report.runtimes) ? (report.runtimes as Array<Record<string, unknown>>) : [];
+        const sources = Array.isArray(report.sources) ? (report.sources as Array<Record<string, unknown>>) : [];
+        const rt = runtimes.map((r) => `${r.name} ${r.authenticated ? "✓" : "✗"}`).join(", ");
+        const ready = runtimes.filter((r) => r.installed && r.authenticated).length;
+        const connected = sources.filter((s) => s.status === "connected").length;
+        console.log(`[mc] readiness: runtimes ${ready}/${runtimes.length} (${rt}) · sources ${connected}/${sources.length} connected`);
+        const needs = sources.filter((s) => s.status !== "connected").map((s) => s.name);
+        if (needs.length) console.log(`[mc] not connected: ${needs.join(", ")} — run \`mc connections\` for details`);
+      })
+      .catch(() => {
+        console.log("[mc] readiness check skipped (connections probe unavailable)");
+      });
+  }
 });
 
 // Graceful shutdown

@@ -37,6 +37,7 @@ type RenderKind =
   | "config"
   | "swarm-sessions"
   | "checkpoints"
+  | "connections"
   | "result";
 
 type SwarmRegistryEntry = Record<string, unknown> & {
@@ -528,6 +529,39 @@ function renderSwarmSessions(data: unknown): void {
   console.log(`Active registry entries: ${rows.length}`);
 }
 
+function renderConnections(data: unknown): void {
+  if (!isRecord(data)) {
+    console.log(JSON.stringify(data, null, 2));
+    return;
+  }
+  console.log("Runtimes:");
+  console.table(
+    asArray(data.runtimes).map(r => ({
+      runtime: r.name,
+      installed: r.installed ? "yes" : "no",
+      auth: r.authenticated ? "✓" : "✗",
+      detail: truncate(r.detail ?? "", 52),
+      fix: truncate(r.fix ?? "", 40),
+    })),
+  );
+  console.log("\nSources:");
+  console.table(
+    asArray(data.sources).map(s => ({
+      source: s.name,
+      kind: s.kind ?? "",
+      status: s.status ?? "",
+      detail: truncate(s.detail ?? "", 36),
+      fix: truncate(s.fix ?? "", 40),
+    })),
+  );
+  if (isRecord(data.summary)) {
+    const sm = data.summary;
+    console.log(
+      `\nRuntimes ready: ${sm.runtimesReady}/${sm.runtimesTotal}   Sources connected: ${sm.sourcesConnected}/${sm.sourcesTotal}`,
+    );
+  }
+}
+
 function renderCheckpoints(data: unknown): void {
   const rows = asArray(data).map(cp => ({
     id: cp.id,
@@ -605,6 +639,9 @@ function outputValue(data: unknown, jsonMode: boolean, kind: RenderKind = "defau
       return;
     case "checkpoints":
       renderCheckpoints(data);
+      return;
+    case "connections":
+      renderConnections(data);
       return;
     case "result":
       renderResult(data);
@@ -840,6 +877,8 @@ Commands:
 
   checkpoints [list]
   checkpoints resolve <id> --decision approve|reject|answer [--response TEXT]
+
+  connections                  # agent runtime auth + connected sources
 
   services health
   board [--limit N] [--offset N] [--since ISO] [--live true]
@@ -1251,6 +1290,9 @@ async function run(): Promise<void> {
       return;
     case "checkpoints":
       await handleCheckpoints(subArgs, jsonMode);
+      return;
+    case "connections":
+      outputValue(await mcFetch("GET", `${API_PREFIX}/connections`), jsonMode, "connections");
       return;
     default:
       throw new Error(`Unknown command: ${command}`);

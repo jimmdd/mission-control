@@ -525,6 +525,30 @@ curl http://localhost:18790/health
 open http://localhost:18790/
 ```
 
+### Connections & readiness
+
+On start, Mission Control probes your agent runtimes and sources and logs a
+one-line readiness summary — you don't configure anything to see what's ready:
+
+```text
+[mc] readiness: runtimes 2/3 (claude ✓, codex ✓, pi ✗) · sources 2/5 connected
+[mc] not connected: Google Drive, Linear — run `mc connections` for details
+```
+
+It detects:
+
+- **Runtimes** — whether `claude`, `codex`, and `pi` are installed and
+  authenticated (via each CLI's own login state, e.g. `claude auth status` /
+  `~/.claude.json`, `~/.codex/auth.json`).
+- **Sources** — connected MCP servers (Notion, Google Drive, etc.) read straight
+  from `claude mcp list`, plus API-key/CLI integrations (Linear, GitHub).
+
+See the full picture any time with `./mc connections` or `GET /api/connections`.
+Connecting a source is done where it lives — log in with the runtime CLI
+(`claude auth login`), add an MCP server (`claude mcp add …`), or set an API key
+(`LINEAR_API_KEY`) — and Mission Control reflects it. Set
+`MISSION_CONTROL_SKIP_READINESS=1` to skip the startup probe.
+
 Mission Control binds to `127.0.0.1` by default. For normal local use, no token
 is required. If you expose it beyond localhost, set one shared token:
 
