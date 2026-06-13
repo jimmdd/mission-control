@@ -43,7 +43,7 @@ from gsd_backend import (
 )
 
 MC_HOME = Path(os.environ.get("MC_HOME", str(Path.home() / ".mission-control")))
-MC_BASE_URL = os.environ.get("MISSION_CONTROL_URL", "http://localhost:18790")
+MC_BASE_URL = os.environ.get("MISSION_CONTROL_URL", "http://localhost:18900")
 ENV_FILE = MC_HOME / ".env"
 LIBRARIAN_DIR = MC_HOME / "librarian"
 SWARM_DIR = MC_HOME / "swarm"

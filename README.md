@@ -64,7 +64,7 @@ External tools like Linear or GitHub are useful, but they should not own the lif
 
 ## Architecture
 
-Mission Control runs as a standalone service on port `18790` by default.
+Mission Control runs as a standalone service on port `18900` by default.
 
 ```text
 ┌─────────────────────────────────────────────────────────────┐
@@ -183,7 +183,7 @@ The CLI talks to the same standalone API as the dashboard.
 Environment:
 
 ```bash
-MISSION_CONTROL_URL=http://127.0.0.1:18790
+MISSION_CONTROL_URL=http://127.0.0.1:18900
 ```
 
 The bridge claims inbox work through a durable task lease so multiple bridge
@@ -486,7 +486,7 @@ CONTEXT_FABRICA_EXISTING_EMBEDDING_DIMENSIONS=384
 MISSION_CONTROL_GSD_BACKEND=core
 GOOGLE_GENERATIVE_AI_API_KEY=your-gemini-key
 ANTHROPIC_API_KEY=your-anthropic-key
-MISSION_CONTROL_URL=http://127.0.0.1:18790
+MISSION_CONTROL_URL=http://127.0.0.1:18900
 EOF
 ```
 
@@ -521,8 +521,8 @@ state and a different command/runtime model.
 npm start
 
 # verify
-curl http://localhost:18790/health
-open http://localhost:18790/
+curl http://localhost:18900/health
+open http://localhost:18900/
 ```
 
 ### Connections & readiness

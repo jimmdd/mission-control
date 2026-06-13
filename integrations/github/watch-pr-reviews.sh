@@ -10,7 +10,7 @@ REGISTRY="$SWARM_DIR/active-tasks.json"
 STATE_TOOL="$SWARM_DIR/swarm-state.py"
 LOG="$SWARM_DIR/logs/pr-reviews.log"
 STATE_DIR="$SWARM_DIR/pr-review-state"
-MC_URL="${MISSION_CONTROL_URL:-http://localhost:18790}"
+MC_URL="${MISSION_CONTROL_URL:-http://localhost:18900}"
 LAUNCHER="$SWARM_DIR/run-claude.sh"
 TIMESTAMP=$(date -u +%Y-%m-%dT%H:%M:%SZ)
 

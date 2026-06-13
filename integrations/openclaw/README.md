@@ -8,4 +8,4 @@ Files:
 - `tools.ts` — optional OpenClaw tool wrappers that call the standalone Mission Control API
 - `openclaw.plugin.json` — example plugin manifest
 
-To use it, run Mission Control normally and point the integration at the standalone service URL, typically `http://127.0.0.1:18790`.
+To use it, run Mission Control normally and point the integration at the standalone service URL, typically `http://127.0.0.1:18900`.

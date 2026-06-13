@@ -23,7 +23,7 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 MC_HOME = Path(os.environ.get("MC_HOME", str(Path.home() / ".mission-control")))
-MC_BASE_URL = os.environ.get("MISSION_CONTROL_URL", "http://localhost:18790")
+MC_BASE_URL = os.environ.get("MISSION_CONTROL_URL", "http://localhost:18900")
 LINEAR_API_URL = "https://api.linear.app/graphql"
 ENV_FILE = MC_HOME / ".env"
 STATE_FILE = MC_HOME / "sync" / "linear-state.json"

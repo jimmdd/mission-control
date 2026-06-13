@@ -9,7 +9,7 @@
     "properties": {
       "serviceUrl": {
         "type": "string",
-        "default": "http://127.0.0.1:18790",
+        "default": "http://127.0.0.1:18900",
         "description": "Base URL for the standalone Mission Control service"
       }
     }
@@ -17,7 +17,7 @@
   "uiHints": {
     "serviceUrl": {
       "label": "Mission Control URL",
-      "placeholder": "http://127.0.0.1:18790",
+      "placeholder": "http://127.0.0.1:18900",
       "help": "Base URL for the standalone Mission Control service"
     }
   }

@@ -192,7 +192,7 @@ def main():
     services = []
 
     # 1. Mission Control
-    services.append(check_http_service("Mission Control", "http://127.0.0.1:18790/health"))
+    services.append(check_http_service("Mission Control", "http://127.0.0.1:18900/health"))
 
     # 2-5. Core launchd services
     launchd_services = [

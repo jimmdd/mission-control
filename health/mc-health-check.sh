@@ -4,7 +4,7 @@
 
 set -euo pipefail
 
-MC_URL="${MISSION_CONTROL_URL:-http://127.0.0.1:18790}"
+MC_URL="${MISSION_CONTROL_URL:-http://127.0.0.1:18900}"
 MC_HOME="${MC_HOME:-$HOME/.mission-control}"
 STATE_FILE="$MC_HOME/health-state.json"
 ALERT_SCRIPT="$MC_HOME/swarm/notify.sh"

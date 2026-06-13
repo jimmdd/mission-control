@@ -6,7 +6,7 @@ import { startLivenessReaper } from "./src/reaper.js";
 import { startNotifier } from "./src/notifier.js";
 
 // Config
-const PORT = parseInt(process.env.MC_PORT ?? "18790", 10);
+const PORT = parseInt(process.env.MC_PORT ?? "18900", 10);
 const HOST = process.env.MC_HOST ?? "127.0.0.1";
 const MC_HOME = process.env.MC_HOME ?? `${process.env.HOME}/.mission-control`;
 const DB_PATH = process.env.MC_DB_PATH ?? `${MC_HOME}/data/mc.db`;

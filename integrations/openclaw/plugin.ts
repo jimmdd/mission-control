@@ -3,7 +3,7 @@ import type { IncomingMessage, ServerResponse } from "node:http";
 import type { OpenClawPluginApi } from "./sdk-shim.js";
 import { registerTools } from "./tools.js";
 
-const MC_URL = process.env.MISSION_CONTROL_URL ?? "http://127.0.0.1:18790";
+const MC_URL = process.env.MISSION_CONTROL_URL ?? "http://127.0.0.1:18900";
 
 const missionControlPlugin = {
   id: "mission-control",

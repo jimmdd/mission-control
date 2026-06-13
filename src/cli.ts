@@ -9,7 +9,7 @@ import { stdin as input, stdout as outputStream } from "node:process";
 
 type Json = Record<string, unknown> | unknown[];
 
-const MC_URL = process.env.MISSION_CONTROL_URL ?? "http://127.0.0.1:18790";
+const MC_URL = process.env.MISSION_CONTROL_URL ?? "http://127.0.0.1:18900";
 const API_PREFIX = "/api";
 const MC_HOME = process.env.MC_HOME ?? join(homedir(), ".mission-control");
 

@@ -5,7 +5,7 @@ import { join } from "node:path";
 import { homedir } from "node:os";
 import type { OpenClawPluginApi } from "./sdk-shim.js";
 
-const MC_URL = process.env.MISSION_CONTROL_URL ?? "http://127.0.0.1:18790";
+const MC_URL = process.env.MISSION_CONTROL_URL ?? "http://127.0.0.1:18900";
 const API_PREFIX = "/api";
 const MC_HOME = process.env.MC_HOME ?? join(homedir(), ".mission-control");
 

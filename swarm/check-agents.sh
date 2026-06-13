@@ -16,7 +16,7 @@ if [ -f "$MC_HOME/.env" ]; then
   set +a
 fi
 
-MC_URL="${MISSION_CONTROL_URL:-http://localhost:18790}"
+MC_URL="${MISSION_CONTROL_URL:-http://localhost:18900}"
 GSD_BACKEND="${MISSION_CONTROL_GSD_BACKEND:-core}"
 CONFIG="$SWARM_DIR/swarm-config.json"
 CFG_REVIEW_EFFORT=$(jq -r '.codex.reviewEffort // "xhigh"' "$CONFIG" 2>/dev/null || echo "xhigh")

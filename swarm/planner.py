@@ -578,7 +578,7 @@ def build_step_prompt(
     description = task.get("description", "")
     ticket_id_match = re.search(r'[A-Z]+-\d+', task_title)
     ticket_id = ticket_id_match.group(0) if ticket_id_match else "TICKET"
-    mc_base = os.environ.get("MISSION_CONTROL_URL", "http://localhost:18790")
+    mc_base = os.environ.get("MISSION_CONTROL_URL", "http://localhost:18900")
 
     acceptance = "\n".join(
         f"- {c}" for c in step.get("acceptance_criteria", step.get("done_when", []))
