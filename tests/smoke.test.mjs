@@ -32,10 +32,11 @@ test("knowledge management CLI registers diagnostic commands", () => {
 });
 
 test("dashboard exposes recall diagnostics and shared state", () => {
-  const html = read("public/index.html");
-  assert.match(html, /kb-recall-query/);
-  assert.match(html, /runKnowledgeRecall/);
-  assert.match(html, /SHARED/);
+  // CSS/JS are extracted into separate static assets; check across the bundle.
+  const dashboard = read("public/index.html") + read("public/app.js");
+  assert.match(dashboard, /kb-recall-query/);
+  assert.match(dashboard, /runKnowledgeRecall/);
+  assert.match(dashboard, /SHARED/);
 });
 
 test("GSD Pi backend is explicit stub until adapter is implemented", () => {

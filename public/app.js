@@ -1,0 +1,2890 @@
+        const getApiUrl = (path) => {
+            const withToken = (base) => {
+                if (!state.accessToken) return base;
+                const sep = base.includes('?') ? '&' : '?';
+                return `${base}${sep}token=${encodeURIComponent(state.accessToken)}`;
+            };
+            return withToken(`/api${path}`);
+        };
+
+        // State
+        let state = {
+            tasks: [],
+            activities: [],
+            agentStatus: {},
+            systemStats: null,
+            lastEvent: null,
+            triageState: null,
+            selectedTaskId: null,
+            activeTriageTaskId: null,
+            filter: 'all',
+            sort: 'newest',
+            lastUpdated: null,
+            isDrawerOpen: false,
+            drawerInitialLoad: false,
+            activityExpanded: false,
+            activityExpandedToggled: false,
+            showDoneInGraph: false,
+            showDoneCards: false,
+            lastRenderedTasksHtml: '',
+            lastRenderedTelemetryHtml: '',
+            deliverables: [],
+            lastActivityCount: 0,
+            lastActivityId: null,
+            childActivities: {},
+            boardSummary: null,
+            boardSummarySeen: false,
+            boardCursor: null,
+            boardGeneratedAt: null,
+            boardRequestSeq: 0,
+            boardAppliedSeq: 0,
+            readOnly: false,
+            accessToken: null
+        };
+
+        // Constants
+        const STATUSES = ['inbox', 'planning', 'in_progress', 'assigned', 'review', 'on_hold', 'done', 'failed'];
+        const PRIORITIES = { urgent: 4, high: 3, normal: 2, low: 1 };
+
+        // DOM Elements
+        const els = {
+            taskList: document.getElementById('task-list'),
+            filters: document.getElementById('filters'),
+            sortSelect: document.getElementById('sort-select'),
+            lastUpdated: document.getElementById('last-updated'),
+            drawer: document.getElementById('drawer'),
+            drawerOverlay: document.getElementById('drawer-overlay'),
+            closeDrawer: document.getElementById('close-drawer'),
+            drawerTitle: document.getElementById('drawer-title'),
+            drawerMeta: document.getElementById('drawer-meta'),
+            drawerDescription: document.getElementById('drawer-description'),
+            drawerTriageSection: document.getElementById('drawer-triage-section'),
+            drawerTriage: document.getElementById('drawer-triage'),
+            drawerTimeline: document.getElementById('drawer-timeline'),
+            drawerDeliverablesSection: document.getElementById('drawer-deliverables-section'),
+            drawerDeliverables: document.getElementById('drawer-deliverables'),
+            addNoteForm: document.getElementById('add-note-form'),
+            noteInput: document.getElementById('note-input'),
+            btnSend: document.getElementById('btn-send')
+        };
+
+        // Utilities
+        const timeAgo = (dateString) => {
+            if (!dateString) return '';
+            const date = new Date(dateString);
+            const now = new Date();
+            const seconds = Math.floor((now - date) / 1000);
+            if (seconds < 1) return 'just now';
+            
+            let interval = seconds / 31536000;
+            if (interval > 1) return Math.floor(interval) + "y ago";
+            interval = seconds / 2592000;
+            if (interval > 1) return Math.floor(interval) + "mo ago";
+            interval = seconds / 86400;
+            if (interval > 1) return Math.floor(interval) + "d ago";
+            interval = seconds / 3600;
+            if (interval > 1) return Math.floor(interval) + "h ago";
+            interval = seconds / 60;
+            if (interval > 1) return Math.floor(interval) + "m ago";
+            return seconds + "s ago";
+        };
+
+        const TZ = 'America/Los_Angeles';
+
+        const formatStepTime = (dateString) => {
+            if (!dateString) return '';
+            const date = new Date(dateString);
+            const now = new Date();
+            
+            const fmt = { timeZone: TZ };
+            const todayStr = now.toLocaleDateString('en-US', fmt);
+            const dateStr = date.toLocaleDateString('en-US', fmt);
+            const yesterdayDate = new Date(now);
+            yesterdayDate.setDate(yesterdayDate.getDate() - 1);
+            const yesterdayStr = yesterdayDate.toLocaleDateString('en-US', fmt);
+            
+            const timeStr = date.toLocaleTimeString('en-US', { timeZone: TZ, hour: 'numeric', minute: '2-digit', hour12: true }).toLowerCase();
+            
+            if (dateStr === todayStr) return timeStr;
+            if (dateStr === yesterdayStr) return `Yesterday ${timeStr}`;
+            
+            const month = date.toLocaleDateString('en-US', { timeZone: TZ, month: 'short' });
+            const day = date.toLocaleDateString('en-US', { timeZone: TZ, day: 'numeric' });
+            return `${month} ${day} ${timeStr}`;
+        };
+
+        const taskDuration = (task) => {
+            if (!task.created_at) return '';
+            const start = new Date(task.created_at);
+            const isActive = ['in_progress', 'assigned', 'testing'].includes(task.status);
+            const end = isActive ? new Date() : new Date(task.updated_at || task.created_at);
+            const ms = end - start;
+            const mins = Math.floor(ms / 60000);
+            if (mins < 1) return '< 1m';
+            if (mins < 60) return mins + 'm';
+            const hrs = Math.floor(mins / 60);
+            if (hrs < 24) return hrs + 'h ' + (mins % 60) + 'm';
+            const days = Math.floor(hrs / 24);
+            return days + 'd ' + (hrs % 24) + 'h';
+        };
+
+        const getHeartbeatMeta = (agent) => {
+            if (!agent || !agent.lastHeartbeatAt) {
+                return { hasHeartbeat: false, ageMs: null, stale: false, thresholdMs: 300000 };
+            }
+            const intervalSec = Number(agent.heartbeatIntervalSec || 0);
+            const serverThresholdMs = Number(state.boardSummary?.heartbeatThresholdMs || 0);
+            const thresholdMs = Math.max(serverThresholdMs || 300000, intervalSec > 0 ? intervalSec * 3000 : 0);
+            const ageMs = Date.now() - Number(agent.lastHeartbeatAt);
+            const stale = (agent.liveStatus || agent.status) === 'running' && ageMs > thresholdMs;
+            return { hasHeartbeat: true, ageMs, stale, thresholdMs };
+        };
+
+        const formatHeartbeatAge = (ageMs) => {
+            if (ageMs === null || ageMs === undefined || ageMs < 0) return '--';
+            const sec = Math.floor(ageMs / 1000);
+            if (sec < 60) return `${sec}s`;
+            const min = Math.floor(sec / 60);
+            if (min < 60) return `${min}m`;
+            const hr = Math.floor(min / 60);
+            return `${hr}h ${min % 60}m`;
+        };
+
+        const computeHeartbeatHealth = () => {
+            if (!state.boardSummarySeen) {
+                return { running: 0, stale: 0, missing: 0 };
+            }
+
+            if (state.boardSummary) {
+                return {
+                    running: Number(state.boardSummary.runningSwarmAgents || 0),
+                    stale: Number(state.boardSummary.staleHeartbeat || 0),
+                    missing: Number(state.boardSummary.missingHeartbeat || 0)
+                };
+            }
+
+            let running = 0;
+            let stale = 0;
+            let missing = 0;
+            Object.values(state.agentStatus || {}).forEach(agent => {
+                const effective = agent.liveStatus || agent.status;
+                if (effective !== 'running') return;
+                running += 1;
+                const hb = getHeartbeatMeta(agent);
+                if (!hb.hasHeartbeat) missing += 1;
+                else if (hb.stale) stale += 1;
+            });
+            return { running, stale, missing };
+        };
+
+        const escapeHtml = (unsafe) => {
+            return (unsafe || '').toString()
+                .replace(/&/g, "&amp;")
+                .replace(/</g, "&lt;")
+                .replace(/>/g, "&gt;")
+                .replace(/"/g, "&quot;")
+                .replace(/'/g, "&#039;");
+        };
+
+        const parseMarkdown = (text) => {
+            if (!text) return '';
+            const images = [];
+            let clean = text.replace(/!\[([^\]]*)\]\(([^)]+)\)/g, (_, alt, url) => {
+                const idx = images.length;
+                images.push({ alt, url });
+                return `__IMG_${idx}__`;
+            });
+            let html = escapeHtml(clean);
+            images.forEach((img, idx) => {
+                html = html.replace(`__IMG_${idx}__`, `<img src="${img.url}" alt="${escapeHtml(img.alt)}" style="max-width: 100%; border-radius: 4px; margin: 8px 0;">`);
+            });
+            html = html.replace(/\*\*(.*?)\*\*/g, '<strong>$1</strong>');
+            html = html.replace(/\[([^\]]+)\]\(([^)]+)\)/g, '<a href="$2" target="_blank" rel="noopener noreferrer">$1</a>');
+            html = html.replace(/\n/g, '<br>');
+            return html;
+        };
+
+        const extractTargetRepo = (title) => {
+            if (!title) return null;
+            const parts = title.split('—');
+            if (parts.length > 1) {
+                return parts[parts.length - 1].trim();
+            }
+            return null;
+        };
+
+        // API Calls
+        const fetchTasks = async () => {
+            try {
+                const res = await fetch(getApiUrl('/tasks?limit=500'));
+                if (!res.ok) throw new Error('Network response was not ok');
+                const data = await res.json();
+                state.tasks = data;
+                state.lastUpdated = new Date();
+                updateLastUpdated();
+                renderFilters();
+                renderTasks();
+                updateMissionControl();
+                renderTelemetryStrip();
+            } catch (error) {
+                console.error('Failed to fetch tasks:', error);
+                if (state.tasks.length === 0) {
+                    const errorHtml = `<div class="empty-state">CONNECTION FAILED. RETRYING...</div>`;
+                    if (state.lastRenderedTasksHtml !== errorHtml) {
+                        els.taskList.innerHTML = errorHtml;
+                        state.lastRenderedTasksHtml = errorHtml;
+                    }
+                }
+            }
+        };
+
+        const fetchMeta = async () => {
+            try {
+                const res = await fetch(getApiUrl('/meta'));
+                if (!res.ok) return;
+                const meta = await res.json();
+                state.readOnly = Boolean(meta.readOnly);
+                if (state.readOnly && els.addNoteForm) {
+                    els.addNoteForm.style.display = 'none';
+                }
+            } catch (error) {
+                console.error('Failed to fetch meta:', error);
+            }
+        };
+
+        const fetchAgentStatus = async () => {
+            try {
+                const res = await fetch(getApiUrl('/agent-status'));
+                if (res.ok) {
+                    state.agentStatus = await res.json();
+                    renderTasks();
+                    renderTelemetryStrip();
+                }
+            } catch (error) {
+                console.error('Failed to fetch agent status:', error);
+            }
+        };
+
+        const fetchSystemStats = async () => {
+            try {
+                const res = await fetch(getApiUrl('/system-stats'));
+                if (res.ok) {
+                    state.systemStats = await res.json();
+                    renderTelemetryStrip();
+                }
+            } catch (error) {
+                console.error('Failed to fetch system stats:', error);
+            }
+        };
+
+        const fetchLastEvent = async () => {
+            try {
+                const res = await fetch(getApiUrl('/events?limit=1'));
+                if (res.ok) {
+                    const events = await res.json();
+                    if (events && events.length > 0) {
+                        state.lastEvent = events[0];
+                        renderTelemetryStrip();
+                    }
+                }
+            } catch (error) {
+                console.error('Failed to fetch last event:', error);
+            }
+        };
+
+        const fetchServiceHealth = async () => {
+            try {
+                const res = await fetch(getApiUrl('/services/health'));
+                if (res.ok) {
+                    const data = await res.json();
+                    renderServiceHealth(data);
+                }
+            } catch (error) {
+                console.error('Failed to fetch service health:', error);
+            }
+        };
+
+        function renderServiceHealth(data) {
+            const indicator = document.getElementById('services-overall-indicator');
+            const grid = document.getElementById('services-grid');
+            if (!indicator || !grid) return;
+
+            const overall = data.overall || 'critical';
+            const label = overall === 'healthy' ? 'ALL SYSTEMS OPERATIONAL' : overall === 'degraded' ? 'DEGRADED' : 'CRITICAL';
+            indicator.innerHTML = `<span class="services-overall"><span class="dot ${overall}"></span>${label}</span>`;
+
+            grid.innerHTML = (data.services || []).map(svc => {
+                const pidText = svc.pid ? `PID ${svc.pid}` : '';
+                const uptimeText = svc.uptime ? svc.uptime : '';
+                const meta = [pidText, uptimeText].filter(Boolean).join(' / ');
+                return `<div class="service-card">
+                    <div class="svc-name">${escapeHtml(svc.name)}<span class="svc-badge ${svc.status}">${svc.status}</span></div>
+                    <div class="svc-meta">${meta || svc.details || '-'}</div>
+                </div>`;
+            }).join('');
+        }
+
+        function toggleServicesPanel() {
+            const grid = document.getElementById('services-grid');
+            const toggle = document.getElementById('services-toggle');
+            if (!grid) return;
+            if (grid.style.display === 'none') {
+                grid.style.display = 'flex';
+                if (toggle) toggle.textContent = '(hide)';
+            } else {
+                grid.style.display = 'none';
+                if (toggle) toggle.textContent = '(show)';
+            }
+        }
+
+        const fetchTaskDetails = async (taskId) => {
+            if (state.drawerInitialLoad) {
+                const loadingHtml = `<div class="loading"><div class="spinner"></div></div>`;
+                els.drawerTimeline.innerHTML = loadingHtml;
+                state.lastActivityCount = 0;
+                state.lastActivityId = null;
+                els.drawerTriageSection.style.display = 'none';
+                els.drawerDeliverablesSection.style.display = 'none';
+            }
+
+            try {
+                const [activitiesRes, triageRes, deliverablesRes] = await Promise.all([
+                    fetch(getApiUrl(`/tasks/${taskId}/activities`)),
+                    fetch(getApiUrl(`/tasks/${taskId}/triage-state`)),
+                    fetch(getApiUrl(`/tasks/${taskId}/deliverables`))
+                ]);
+
+                if (activitiesRes.ok) {
+                    state.activities = await activitiesRes.json();
+                } else {
+                    state.activities = [];
+                }
+
+                if (triageRes.ok) {
+                    const triageData = await triageRes.json();
+                    // Handle case where triage_state might be a stringified JSON or an object
+                    state.triageState = typeof triageData === 'string' ? JSON.parse(triageData) : triageData;
+                } else {
+                    state.triageState = null;
+                }
+
+                if (deliverablesRes.ok) {
+                    state.deliverables = await deliverablesRes.json();
+                } else {
+                    state.deliverables = [];
+                }
+
+                renderDrawerDetails();
+                state.drawerInitialLoad = false;
+            } catch (error) {
+                console.error('Failed to fetch task details:', error);
+                if (state.drawerInitialLoad) {
+                    const errorHtml = `<div class="empty-state">FAILED TO LOAD TELEMETRY</div>`;
+                    els.drawerTimeline.innerHTML = errorHtml;
+                    state.lastActivityCount = 0;
+                    state.lastActivityId = null;
+                }
+            }
+        };
+
+        const fetchChildActivities = async () => {
+            const childIds = state.tasks.filter(t => t.parent_task_id).map(t => t.id);
+            const rootIds = state.tasks.filter(t => !t.parent_task_id).map(t => t.id);
+            const allIds = [...childIds, ...rootIds];
+            if (allIds.length === 0) return;
+
+            try {
+                const results = await Promise.all(
+                    allIds.map(id => fetch(getApiUrl(`/tasks/${id}/activities`)).then(res => res.ok ? res.json() : []))
+                );
+                
+                allIds.forEach((id, index) => {
+                    state.childActivities[id] = results[index];
+                });
+                
+                renderProcessGraph();
+            } catch (error) {
+                console.error('Failed to fetch task activities:', error);
+            }
+        };
+
+        const fetchBoard = async ({ live = false } = {}) => {
+            const reqSeq = ++state.boardRequestSeq;
+            try {
+                const params = new URLSearchParams();
+                params.set('limit', live ? '50' : '300');
+                if (live) {
+                    params.set('live', 'true');
+                    if (state.boardCursor) params.set('since', state.boardCursor);
+                }
+                const res = await fetch(getApiUrl(`/board?${params.toString()}`));
+                if (!res.ok) throw new Error('Failed to fetch board');
+                const payload = await res.json();
+
+                if (reqSeq < state.boardAppliedSeq) {
+                    return;
+                }
+                state.boardAppliedSeq = reqSeq;
+
+                if (payload.summary) {
+                    state.boardSummary = payload.summary;
+                    state.boardSummarySeen = true;
+                    state.boardGeneratedAt = payload.summary.boardGeneratedAt || new Date().toISOString();
+                }
+                if (payload.nextCursor) {
+                    if (!live) {
+                        state.boardCursor = payload.nextCursor;
+                    } else if (!state.boardCursor || String(payload.nextCursor) > String(state.boardCursor)) {
+                        state.boardCursor = payload.nextCursor;
+                    }
+                }
+                if (payload.swarm) state.agentStatus = payload.swarm;
+
+                if (Array.isArray(payload.tasks) && payload.tasks.length > 0) {
+                    const taskMap = new Map(state.tasks.map(t => [t.id, t]));
+                    payload.tasks.forEach(task => {
+                        const prev = taskMap.get(task.id) || {};
+                        taskMap.set(task.id, { ...prev, ...task });
+                    });
+                    state.tasks = Array.from(taskMap.values());
+                }
+
+                if (Array.isArray(payload.recentEvents) && payload.recentEvents.length > 0) {
+                    state.lastEvent = payload.recentEvents[0];
+                }
+
+                renderTasks();
+                updateMissionControl();
+                renderTelemetryStrip();
+                if (state.isDrawerOpen && state.selectedTaskId) {
+                    renderDrawerDetails();
+                }
+            } catch (error) {
+                console.error('Failed to fetch board:', error);
+            }
+        };
+
+        const parseLifecycleSteps = (activities, taskId) => {
+            if (!activities || activities.length === 0) return [];
+            
+            const steps = [];
+            const sorted = [...activities].sort((a, b) => new Date(a.created_at) - new Date(b.created_at));
+            
+            sorted.forEach(act => {
+                const msg = act.message || '';
+                let type = null;
+                let label = null;
+                let agent = null;
+                let isMilestone = false;
+                
+                if (msg.includes('Bridge picked up')) {
+                    type = 'intake'; label = 'INTAKE';
+                    agent = 'bridge';
+                } else if (act.activity_type === 'planning_questions') {
+                    type = 'triage'; label = 'TRIAGE';
+                    agent = 'gemini';
+                } else if (msg.includes('Self-answered') && msg.includes('questions')) {
+                    type = 'triage'; label = 'SELF-ANSWER';
+                    agent = 'gemini';
+                } else if (msg.includes('All triage questions answered') || msg.includes('All questions answered')) {
+                    type = 'triage-done'; label = 'TRIAGE DONE';
+                    agent = 'system';
+                    isMilestone = true;
+                } else if (msg.includes('triaged as ready')) {
+                    type = 'dispatch'; label = 'DISPATCH';
+                    agent = 'bridge';
+                } else if (act.activity_type === 'prompt_sent') {
+                    type = 'prompt'; label = 'PROMPT';
+                    agent = state.agentStatus[taskId]?.agent || 'system';
+                } else if (msg.includes('Investigation agent spawned') || msg.includes('Agent spawned for')) {
+                    type = 'spawn'; label = 'SPAWN';
+                    agent = state.agentStatus[taskId]?.agent || 'claude';
+                } else if (act.activity_type === 'investigation_findings') {
+                    type = 'complete'; label = 'FINDINGS';
+                    agent = 'claude';
+                    isMilestone = true;
+                } else if (msg.includes('Codex review PASSED')) {
+                    type = 'review-pass'; label = 'REVIEW:PASS';
+                    agent = 'codex';
+                } else if (msg.includes('Codex review cycle') || msg.includes('Codex review found')) {
+                    type = 'review-fail'; label = 'REVIEW:FAIL';
+                    agent = 'codex';
+                } else if (msg.includes('Review found blocking issues')) {
+                    type = 'iterate'; label = 'ITERATE';
+                    agent = 'codex';
+                } else if (msg.includes('Agent respawned')) {
+                    type = 'respawn'; label = 'RESPAWN';
+                    agent = state.agentStatus[taskId]?.agent || 'system';
+                } else if (msg.includes('GitHub PR review detected')) {
+                    type = 'feedback'; label = 'PR FEEDBACK';
+                    const match = msg.match(/—\s*([^\s]+)\s*feedback/);
+                    agent = match ? match[1] : 'reviewer';
+                } else if (msg.includes('Change request received')) {
+                    type = 'feedback'; label = 'CHANGE REQ';
+                        agent = 'external';
+                } else if (msg.includes('CI passed')) {
+                    type = 'complete'; label = 'COMPLETE';
+                    agent = 'system';
+                } else if (msg.includes('Agent relaunched')) {
+                    type = 'relaunch'; label = 'RELAUNCH';
+                    agent = state.agentStatus[taskId]?.agent || 'system';
+                } else if (msg.match(/PR #\d+ approved by/)) {
+                    type = 'approved'; label = 'PR APPROVED';
+                    const userMatch = msg.match(/@(\S+)/);
+                    agent = userMatch ? userMatch[1] : 'reviewer';
+                    isMilestone = true;
+                } else if (msg.match(/PR #\d+ changes requested by/)) {
+                    type = 'feedback'; label = 'CHANGES REQ';
+                    const userMatch = msg.match(/@(\S+)/);
+                    agent = userMatch ? userMatch[1] : 'reviewer';
+                    } else if (msg.includes('External ticket marked') || msg.includes('Linear ticket marked')) {
+                        type = 'done'; label = 'EXTERNAL DONE';
+                        agent = 'external';
+                        isMilestone = true;
+                    }
+                
+                if (type && label) {
+                    steps.push({ type, label, time: act.created_at, msg, agent, isMilestone: isMilestone || false });
+                }
+            });
+            
+            return steps;
+        };
+
+        // Rendering
+        const renderTelemetryStrip = () => {
+            const el = document.getElementById('telemetry-strip');
+            if (!el) return;
+
+            const staleHeartbeat = state.boardSummary?.staleHeartbeat || 0;
+            const missingHeartbeat = state.boardSummary?.missingHeartbeat || 0;
+            const hbThreshold = state.boardSummary?.heartbeatThresholdMs || 300000;
+
+            const mod0 = `
+                <div class="telemetry-module">
+                    <div class="telemetry-title">HEARTBEAT HEALTH</div>
+                    <div class="telemetry-value" style="display:flex; align-items:center; height:100%; font-size:11px; color: var(--text-secondary);">
+                        STALE <span style="color:${staleHeartbeat > 0 ? '#fca5a5' : 'var(--text-primary)'}; margin:0 8px 0 4px;">${staleHeartbeat}</span>
+                        MISSING <span style="color:${missingHeartbeat > 0 ? '#fca5a5' : 'var(--text-primary)'}; margin:0 8px 0 4px;">${missingHeartbeat}</span>
+                        <span style="opacity:0.55;">THR ${Math.round(hbThreshold/1000)}s</span>
+                    </div>
+                </div>
+            `;
+
+            // Module 1: SWARM PRESSURE — uses liveStatus (tmux-aware) over registry status
+            let claudeCount = 0;
+            let codexCount = 0;
+            Object.values(state.agentStatus).forEach(agent => {
+                const effectiveStatus = agent.liveStatus || agent.status;
+                if (effectiveStatus === 'running') {
+                    if (agent.agent === 'claude') claudeCount++;
+                    else if (agent.agent === 'codex') codexCount++;
+                }
+            });
+            const totalActive = claudeCount + codexCount;
+            const maxClaude = state.systemStats?.concurrency?.maxClaude || 10;
+            const maxCodex = state.systemStats?.concurrency?.maxCodex || 3;
+            const maxSlots = maxClaude + maxCodex;
+            const pressurePct = Math.min(100, (totalActive / maxSlots) * 100);
+            let pressureColor = 'green';
+            if (pressurePct >= 80) pressureColor = 'red';
+            else if (pressurePct >= 50) pressureColor = 'amber';
+
+            const mod1 = `
+                <div class="telemetry-module">
+                    <div class="telemetry-title">SWARM PRESSURE</div>
+                    <div class="telemetry-bar-container">
+                        <div class="telemetry-bar-fill ${pressureColor}" style="width: ${pressurePct}%"></div>
+                    </div>
+                    <div class="telemetry-value" style="font-size: 10px; margin-top: 4px; color: var(--text-secondary);">
+                        ${claudeCount}/10 CLAUDE &middot; ${codexCount}/3 CODEX
+                    </div>
+                </div>
+            `;
+
+            // Module 2: ACTIVE AGENTS
+            const activeAgents = Object.values(state.agentStatus).filter(a => (a.liveStatus || a.status) === 'running');
+            let mod2Content = '';
+            if (activeAgents.length === 0) {
+                mod2Content = `<div style="font-family: var(--font-mono); font-size: 10px; color: rgba(255,255,255,0.3); margin-top: 4px;">IDLE</div>`;
+            } else {
+                const visibleAgents = activeAgents.slice(0, 4);
+                const extraCount = activeAgents.length - 4;
+                
+                mod2Content = visibleAgents.map(a => {
+                    let repoName = a.tmuxSession || 'unknown';
+                    if (repoName.startsWith('claude-') || repoName.startsWith('codex-')) {
+                        const parts = repoName.split('-');
+                        if (parts.length >= 3) {
+                            repoName = parts.slice(2).join('-');
+                        }
+                    }
+                    
+                    let durationStr = '';
+                    if (a.startedAt) {
+                        const ms = Date.now() - a.startedAt;
+                        const mins = Math.floor(ms / 60000);
+                        if (mins < 60) durationStr = `${mins}m`;
+                        else {
+                            const hrs = Math.floor(mins / 60);
+                            durationStr = `${hrs}h ${mins % 60}m`;
+                        }
+                    }
+                    
+                    return `
+                        <div class="telemetry-agent-row">
+                            <div class="telemetry-agent-dot"></div>
+                            <span style="flex: 1; overflow: hidden; text-overflow: ellipsis;">${escapeHtml(repoName)}</span>
+                            <span>${durationStr}</span>
+                        </div>
+                    `;
+                }).join('');
+                
+                if (extraCount > 0) {
+                    mod2Content += `<div class="telemetry-agent-row" style="color: rgba(255,255,255,0.3);">+${extraCount} MORE</div>`;
+                }
+            }
+
+            const mod2 = `
+                <div class="telemetry-module">
+                    <div class="telemetry-title">ACTIVE AGENTS</div>
+                    <div style="display: flex; flex-direction: column; justify-content: center; flex: 1;">
+                        ${mod2Content}
+                    </div>
+                </div>
+            `;
+
+            // Module 3: THROUGHPUT (24H)
+            const now = new Date();
+            const last24hTasks = state.tasks.filter(t => {
+                if (!t.created_at) return false;
+                return (now - new Date(t.created_at)) <= 24 * 60 * 60 * 1000;
+            });
+            
+            let inCount = 0, triagedCount = 0, dispatchedCount = 0, doneCount = 0;
+            last24hTasks.forEach(t => {
+                if (t.status === 'inbox') inCount++;
+                else if (t.status === 'planning') triagedCount++;
+                else if (t.status === 'assigned' || t.status === 'in_progress' || t.status === 'testing' || t.status === 'review') dispatchedCount++;
+                else if (t.status === 'done') doneCount++;
+            });
+
+            const mod3 = `
+                <div class="telemetry-module">
+                    <div class="telemetry-title">THROUGHPUT (24H)</div>
+                    <div class="telemetry-value" style="display: flex; align-items: center; height: 100%; font-size: 11px; color: var(--text-secondary);">
+                        IN <span style="color: var(--text-primary); margin: 0 6px 0 4px;">${inCount}</span> &middot; 
+                        TRIAGED <span style="color: var(--text-primary); margin: 0 6px 0 4px;">${triagedCount}</span> &middot; 
+                        DISPATCHED <span style="color: var(--text-primary); margin: 0 6px 0 4px;">${dispatchedCount}</span> &middot; 
+                        DONE <span style="color: var(--text-primary); margin: 0 0 0 4px;">${doneCount}</span>
+                    </div>
+                </div>
+            `;
+
+            // Module 4: SYSTEM
+            let cpuPct = 0;
+            let memPct = 0;
+            let memText = '0/0 GB';
+            
+            if (state.systemStats) {
+                if (state.systemStats.cpu) cpuPct = state.systemStats.cpu.usagePercent || 0;
+                if (state.systemStats.memory) {
+                    memPct = state.systemStats.memory.usagePercent || 0;
+                    const used = (state.systemStats.memory.usedGB || 0).toFixed(1);
+                    const total = (state.systemStats.memory.totalGB || 0).toFixed(0);
+                    memText = `${used}/${total} GB`;
+                }
+            }
+            
+            let cpuColor = 'green';
+            if (cpuPct >= 80) cpuColor = 'red';
+            else if (cpuPct >= 60) cpuColor = 'amber';
+            
+            let memColor = 'green';
+            if (memPct >= 80) memColor = 'red';
+            else if (memPct >= 60) memColor = 'amber';
+
+            const mod4 = `
+                <div class="telemetry-module">
+                    <div class="telemetry-title">SYSTEM</div>
+                    <div style="display: flex; flex-direction: column; justify-content: center; flex: 1;">
+                        <div class="telemetry-system-row">
+                            <div class="telemetry-system-label">CPU</div>
+                            <div class="telemetry-system-val">${cpuPct.toFixed(1)}%</div>
+                            <div class="telemetry-system-bar">
+                                <div class="telemetry-bar-fill ${cpuColor}" style="width: ${cpuPct}%"></div>
+                            </div>
+                        </div>
+                        <div class="telemetry-system-row">
+                            <div class="telemetry-system-label">MEM</div>
+                            <div class="telemetry-system-val">${memText}</div>
+                            <div class="telemetry-system-bar">
+                                <div class="telemetry-bar-fill ${memColor}" style="width: ${memPct}%"></div>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            `;
+
+            // Module 5: LAST EVENT
+            let eventTime = '--:--';
+            let eventMsg = 'NO EVENTS';
+            
+            if (state.lastEvent) {
+                if (state.lastEvent.created_at) {
+                    const d = new Date(state.lastEvent.created_at);
+                    eventTime = d.toLocaleTimeString('en-US', { timeZone: TZ, hour: '2-digit', minute: '2-digit', hour12: false });
+                }
+                eventMsg = state.lastEvent.message || state.lastEvent.type || 'UNKNOWN EVENT';
+            }
+
+            const mod5 = `
+                <div class="telemetry-module">
+                    <div class="telemetry-title">LAST EVENT</div>
+                    <div style="display: flex; align-items: center; height: 100%;">
+                        <div class="telemetry-ticker">
+                            <span class="telemetry-ticker-time">[${eventTime}]</span>
+                            <span title="${escapeHtml(eventMsg)}">${escapeHtml(eventMsg)}</span>
+                        </div>
+                    </div>
+                </div>
+            `;
+
+            const newHtml = mod0 + mod1 + mod2 + mod3 + mod4 + mod5;
+            
+            if (state.lastRenderedTelemetryHtml !== newHtml) {
+                el.innerHTML = newHtml;
+                state.lastRenderedTelemetryHtml = newHtml;
+            }
+        };
+
+        const updateLastUpdated = () => {
+            if (state.lastUpdated) {
+                const timeString = state.lastUpdated.toLocaleTimeString('en-US', { timeZone: TZ, hour12: false });
+                els.lastUpdated.textContent = `LAST SYNC: ${timeString}`;
+            }
+        };
+
+        const renderFilters = () => {
+            const counts = { all: state.tasks.length };
+            STATUSES.forEach(status => counts[status] = 0);
+            
+            state.tasks.forEach(task => {
+                if (counts[task.status] !== undefined) {
+                    counts[task.status]++;
+                }
+            });
+
+            const filters = [
+                { id: 'all', label: 'ALL' },
+                { id: 'planning', label: 'PLANNING' },
+                { id: 'in_progress', label: 'IN PROGRESS' },
+                { id: 'review', label: 'REVIEW' },
+                { id: 'on_hold', label: 'ON HOLD' },
+                { id: 'done', label: 'DONE' }
+            ];
+
+            const doneCount = counts['done'] || 0;
+            const showDoneBtn = state.filter === 'all' && doneCount > 0
+                ? `<button class="filter-pill pg-done-pill" id="cards-done-toggle" style="opacity: ${state.showDoneCards ? 1 : 0.5}">
+                    ${state.showDoneCards ? 'Hide' : 'Show'} Done <span class="filter-count">${doneCount}</span>
+                  </button>`
+                : '';
+
+            els.filters.innerHTML = filters.map(f => `
+                <button class="filter-pill ${state.filter === f.id ? 'active' : ''}" data-filter="${f.id}">
+                    ${f.label} <span class="filter-count">${counts[f.id] || 0}</span>
+                </button>
+            `).join('') + showDoneBtn;
+
+            // Add event listeners — scope to pills with data-filter only
+            els.filters.querySelectorAll('.filter-pill[data-filter]').forEach(btn => {
+                btn.addEventListener('click', (e) => {
+                    state.filter = e.currentTarget.dataset.filter;
+                    renderFilters();
+                    renderTasks();
+                    renderProcessGraph();
+                });
+            });
+
+            const doneToggle = document.getElementById('cards-done-toggle');
+            if (doneToggle) {
+                doneToggle.addEventListener('click', () => {
+                    state.showDoneCards = !state.showDoneCards;
+                    renderFilters();
+                    renderTasks();
+                });
+            }
+        };
+
+        const getProcessedTasks = () => {
+            // Filter
+            let filtered = state.tasks;
+            if (state.filter !== 'all') {
+                filtered = state.tasks.filter(t => t.status === state.filter);
+            } else if (!state.showDoneCards) {
+                filtered = state.tasks.filter(t => t.status !== 'done');
+            }
+
+            // Sort
+            filtered.sort((a, b) => {
+                if (state.sort === 'newest') {
+                    return new Date(b.created_at) - new Date(a.created_at);
+                } else if (state.sort === 'oldest') {
+                    return new Date(a.created_at) - new Date(b.created_at);
+                } else if (state.sort === 'status') {
+                    return STATUSES.indexOf(a.status) - STATUSES.indexOf(b.status);
+                } else if (state.sort === 'priority') {
+                    const pA = PRIORITIES[a.priority] || 0;
+                    const pB = PRIORITIES[b.priority] || 0;
+                    return pB - pA;
+                }
+                return 0;
+            });
+
+            // Organize parent/child
+            const taskMap = new Map(filtered.map(t => [t.id, { ...t, children: [] }]));
+            const rootTasks = [];
+
+            // First pass: assign children
+            taskMap.forEach(task => {
+                if (task.parent_task_id && taskMap.has(task.parent_task_id)) {
+                    taskMap.get(task.parent_task_id).children.push(task);
+                } else {
+                    rootTasks.push(task);
+                }
+            });
+
+            // Sort children by newest
+            rootTasks.forEach(task => {
+                task.children.sort((a, b) => new Date(b.created_at) - new Date(a.created_at));
+            });
+
+            return rootTasks;
+        };
+
+        const renderTasks = () => {
+            const rootTasks = getProcessedTasks();
+
+            const countEl = document.getElementById('task-cards-count');
+            if (countEl) countEl.textContent = rootTasks.length;
+
+            if (rootTasks.length === 0) {
+                const emptyHtml = `<div class="empty-state">NO TASKS FOUND IN CURRENT VIEW</div>`;
+                if (state.lastRenderedTasksHtml !== emptyHtml) {
+                    els.taskList.innerHTML = emptyHtml;
+                    state.lastRenderedTasksHtml = emptyHtml;
+                }
+                return;
+            }
+
+            const newHtml = rootTasks.map(task => {
+                const hasChildren = task.children && task.children.length > 0;
+                let statusColor = `var(--status-${task.status})`;
+                
+                const agent = state.agentStatus[task.id];
+                let agentBadgeHtml = '';
+                if (agent) {
+                    const effectiveStatus = agent.liveStatus || agent.status;
+                    let dotClass = 'completed';
+                    if (effectiveStatus === 'running') dotClass = 'running';
+                    if (effectiveStatus === 'failed') dotClass = 'failed';
+                    const heartbeat = getHeartbeatMeta(agent);
+                    const isDone = ['done', 'review'].includes(task.status);
+                    const heartbeatBadge = heartbeat.hasHeartbeat && !isDone
+                        ? `<span class="heartbeat-pill ${heartbeat.stale ? 'stale' : ''}">HB ${formatHeartbeatAge(heartbeat.ageMs)}</span>`
+                        : '';
+                    
+                    const prText = agent.pr ? `<span style="opacity: 0.5; margin-left: 4px;">PR #${agent.pr}</span>` : '';
+                    agentBadgeHtml = `
+                        <div class="agent-badge">
+                            <div class="agent-dot ${dotClass}"></div>
+                            ${agent.agent.toUpperCase()}${prText}
+                            ${heartbeatBadge}
+                        </div>
+                    `;
+                }
+
+                const subtaskChipsHtml = hasChildren ? `
+                    <div class="subtask-chips">
+                        ${task.children.map(child => {
+                            const repo = extractTargetRepo(child.title) || 'task';
+                            return `
+                                <div class="subtask-chip">
+                                    <div class="chip-status-dot" style="background-color: var(--status-${child.status})"></div>
+                                    ${escapeHtml(repo)}
+                                    <span class="chip-duration">${taskDuration(child)}</span>
+                                </div>
+                            `;
+                        }).join('')}
+                    </div>
+                ` : '';
+
+                const subtaskDetailsHtml = hasChildren ? `
+                    <div class="subtask-details">
+                        <div class="subtask-details-inner">
+                            ${task.children.map(child => {
+                                const repo = extractTargetRepo(child.title) || 'task';
+                                const childAgent = state.agentStatus[child.id];
+                                let childAgentBadgeHtml = '';
+                                if (childAgent) {
+                                    const childEffective = childAgent.liveStatus || childAgent.status;
+                                    let dotClass = 'completed';
+                                    if (childEffective === 'running') dotClass = 'running';
+                                    if (childEffective === 'failed') dotClass = 'failed';
+                                    
+                                    const prText = childAgent.pr ? `<span style="opacity: 0.5; margin-left: 4px;">PR #${childAgent.pr}</span>` : '';
+                                    childAgentBadgeHtml = `
+                                        <div class="agent-badge" style="margin-left: auto;">
+                                            <div class="agent-dot ${dotClass}"></div>
+                                            ${childAgent.agent.toUpperCase()}${prText}
+                                        </div>
+                                    `;
+                                }
+                                return `
+                                    <div class="subtask-entry" onclick="handleTaskClick(event, '${child.id}')">
+                                        <div class="subtask-repo">${escapeHtml(repo)}</div>
+                                        <div class="badge badge-status ${child.status}">${child.status.replace('_', ' ')}</div>
+                                        <div class="subtask-duration ${['in_progress', 'assigned', 'testing'].includes(child.status) ? 'active' : ''}">${taskDuration(child)}</div>
+                                        ${childAgentBadgeHtml}
+                                    </div>
+                                `;
+                            }).join('')}
+                        </div>
+                    </div>
+                ` : '';
+
+                let triageIndicatorHtml = '';
+                let hasTriage = false;
+                if (task.status === 'planning' && task.triage_state) {
+                    try {
+                        const triageState = typeof task.triage_state === 'string' ? JSON.parse(task.triage_state) : task.triage_state;
+                        if (triageState && triageState.questions && triageState.questions.length > 0) {
+                            hasTriage = true;
+                            const total = triageState.questions.length;
+                            const answered = triageState.questions.filter(q => q.answered || q.answer).length;
+                            const allDone = answered === total;
+                            triageIndicatorHtml = `
+                                <button class="triage-indicator-btn" data-triage-task="${task.id}" onclick="openTriageModal(event, '${task.id}')" ${allDone ? 'style="color: var(--accent); border-color: rgba(0,255,136,0.3);"' : ''}>
+                                    ${allDone
+                                        ? '<svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="20 6 9 17 4 12"></polyline></svg> TRIAGE ✓'
+                                        : `<svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"></circle><path d="M9.09 9a3 3 0 0 1 5.83 1c0 2-3 3-3 3"></path><line x1="12" y1="17" x2="12.01" y2="17"></line></svg> TRIAGE (${answered}/${total})`
+                                    }
+                                </button>
+                            `;
+                        }
+                    } catch (e) {
+                        console.error('Failed to parse triage_state', e);
+                    }
+                }
+                
+                const isExpandable = hasChildren;
+
+                const stageMap = [
+                    { status: 'inbox', label: 'SYNCED', desc: 'Uplinked from external system' },
+                    { status: 'planning', label: 'TRIAGE', desc: 'Analyzing requirements' },
+                    { status: 'assigned', label: 'DISPATCH', desc: 'Assigning to agents' },
+                    { status: 'in_progress', label: 'ACTIVE', desc: 'Agents executing' },
+                    { status: 'review', label: 'REVIEW', desc: 'Awaiting review' },
+                    { status: 'done', label: 'NOMINAL', desc: 'Mission complete' }
+                ];
+
+                let activeIdx = 0;
+                if (task.status === 'inbox') activeIdx = 0;
+                else if (task.status === 'planning') activeIdx = 1;
+                else if (task.status === 'assigned') activeIdx = 2;
+                else if (task.status === 'in_progress') activeIdx = 3;
+                else if (task.status === 'testing' || task.status === 'review') activeIdx = 4;
+                else if (task.status === 'done') activeIdx = 5;
+                else if (task.status === 'failed') activeIdx = 3;
+
+                const pct = ((activeIdx + 1) / stageMap.length) * 100;
+                const cur = stageMap[activeIdx];
+                const isActive = ['in_progress', 'assigned', 'testing'].includes(task.status);
+
+                const milestoneHtml = `
+                    <div class="card-milestone">
+                        <div class="milestone-bar">
+                            <div class="milestone-bar-fill ${isActive ? 'active' : ''}" style="width: ${pct}%"></div>
+                        </div>
+                        <span class="milestone-pct">${Math.round(pct)}%</span>
+                    </div>
+                `;
+
+                // Preserve expanded state
+                const existingCard = document.getElementById(`card-${task.id}`);
+                const isExpanded = existingCard && existingCard.classList.contains('expanded') ? 'expanded' : '';
+
+                const normalizedStatus = String(task.status || '').trim().toLowerCase();
+                const isDone = normalizedStatus === 'done';
+                const priorityClass = !isDone
+                    ? (task.priority === 'urgent' ? 'priority-urgent' : task.priority === 'high' ? 'priority-high' : '')
+                    : '';
+
+                // Structured live progress (phase / step / blocked reason).
+                let progressBadgeHtml = '';
+                const prog = task.progress;
+                if (prog && !isDone) {
+                    if (prog.state === 'blocked' || prog.state === 'waiting') {
+                        const reason = escapeHtml(prog.blocked_reason || (prog.state === 'waiting' ? 'waiting on subtask' : 'blocked'));
+                        progressBadgeHtml = `<div class="badge" title="${reason}" style="background: rgba(239,68,68,0.16); color:#ef4444; font-size:9px; padding:1px 6px;">${prog.state.toUpperCase()}</div>`;
+                    } else if (prog.phase || prog.step_label) {
+                        const stepTxt = (prog.step_index && prog.step_total) ? ` ${prog.step_index}/${prog.step_total}` : '';
+                        const tip = escapeHtml(prog.step_label || prog.phase || '');
+                        progressBadgeHtml = `<div class="badge" title="${tip}" style="background: rgba(0,224,199,0.12); color:#00e0c7; font-size:9px; padding:1px 6px;">${escapeHtml((prog.phase || 'running').toUpperCase())}${stepTxt}</div>`;
+                    }
+                }
+
+                return `
+                    <div class="task-card ${isExpanded} ${isDone ? 'task-done' : ''} ${priorityClass}" id="card-${task.id}" style="--card-status-color: ${statusColor}">
+                        <div class="card-header" onclick="${isExpandable ? `toggleChildren(event, '${task.id}')` : `handleTaskClick(event, '${task.id}')`}">
+                            <div class="card-top">
+                                ${isExpandable ? `<div class="card-expand-icon">▼</div>` : `<div class="card-expand-icon" style="opacity: 0"></div>`}
+                                <div class="card-priority ${task.priority || 'normal'}" title="${task.priority || 'normal'}"></div>
+                                <div class="card-title" onclick="handleTaskClick(event, '${task.id}')" title="${escapeHtml(task.title)}">${escapeHtml(task.title)}</div>
+                                ${agentBadgeHtml}
+                            </div>
+                            <div class="card-subtitle">
+                                <div class="badge badge-status ${task.status}">${task.status.replace('_', ' ')}</div>
+                                ${progressBadgeHtml}
+                                ${task.task_type === 'investigation'
+                                    ? '<div class="badge" style="background: rgba(147, 130, 255, 0.15); color: #9382ff; font-size: 9px; padding: 1px 6px;">INVESTIGATION</div>'
+                                    : task.task_type === 'research'
+                                        ? '<div class="badge" style="background: rgba(0, 224, 199, 0.16); color: #00e0c7; font-size: 9px; padding: 1px 6px;">RESEARCH</div>'
+                                        : ''}
+                                <div class="card-time">${timeAgo(task.created_at)}</div>
+                                ${triageIndicatorHtml}
+                            </div>
+                            ${subtaskChipsHtml}
+                            ${milestoneHtml}
+                        </div>
+                        ${subtaskDetailsHtml}
+                    </div>
+                `;
+            }).join('');
+
+            if (state.lastRenderedTasksHtml !== newHtml) {
+                els.taskList.innerHTML = newHtml;
+                state.lastRenderedTasksHtml = newHtml;
+            }
+            
+            renderProcessGraph();
+        };
+
+        window.handleTaskClick = (event, taskId) => {
+            event.stopPropagation();
+            openDrawer(taskId);
+        };
+
+        window.toggleChildren = (event, parentId) => {
+            event.stopPropagation();
+            const card = document.getElementById(`card-${parentId}`);
+            if (card) {
+                card.classList.toggle('expanded');
+            }
+        };
+
+        window.openTriageModal = (event, taskId) => {
+            event.stopPropagation();
+            const task = state.tasks.find(t => t.id === taskId);
+            if (!task || !task.triage_state) return;
+
+            state.activeTriageTaskId = taskId;
+            renderTriageModalContent(task);
+            
+            const modal = document.getElementById('triage-modal');
+            const overlay = document.getElementById('triage-modal-overlay');
+            modal.classList.add('open');
+            overlay.classList.add('open');
+        };
+
+        window.closeTriageModal = () => {
+            state.activeTriageTaskId = null;
+            const modal = document.getElementById('triage-modal');
+            const overlay = document.getElementById('triage-modal-overlay');
+            modal.classList.remove('open');
+            overlay.classList.remove('open');
+        };
+
+        const renderTriageModalContent = (task) => {
+            const contentEl = document.getElementById('triage-modal-content');
+            if (!task || !task.triage_state) {
+                contentEl.innerHTML = '';
+                return;
+            }
+
+            try {
+                const triageState = typeof task.triage_state === 'string' ? JSON.parse(task.triage_state) : task.triage_state;
+                if (triageState && triageState.questions) {
+                    contentEl.innerHTML = triageState.questions.map((q, idx) => {
+                        const isAnswered = q.answered || q.answer;
+                        const hasOptions = q.options && q.options.length > 0;
+                        const isOther = (opt) => /other\s*\(/i.test(opt);
+                        const answerEditorHtml = state.readOnly
+                            ? `<div style="color: var(--text-secondary); font-size: 12px; opacity: 0.8;">Read-only mode: answer editing disabled.</div>`
+                            : `${hasOptions ? `
+                                <div class="triage-options">
+                                    ${q.options.filter(o => !isOther(o)).map(opt => `
+                                        <button class="triage-option-chip" onclick="selectTriageOption(event, '${task.id}', ${idx}, this.textContent)">${escapeHtml(opt)}</button>
+                                    `).join('')}
+                                </div>
+                            ` : ''}
+                            <div class="triage-custom-row">
+                                <input type="text" id="triage-ans-${task.id}-${idx}" class="kb-textarea" style="margin: 0; min-height: 36px; height: 36px; font-family: var(--font-body); padding: 8px 12px; font-size: 13px;" placeholder="${hasOptions ? 'Or type a custom answer...' : 'Type answer...'}" onclick="event.stopPropagation()" onkeydown="if(event.key==='Enter') submitTriageAnswer(event, '${task.id}', ${idx})">
+                                <button class="btn-send" style="padding: 8px 16px;" onclick="submitTriageAnswer(event, '${task.id}', ${idx})">Submit</button>
+                            </div>`;
+                        return `
+                            <div style="margin-bottom: 16px; padding-bottom: 16px; border-bottom: 1px solid rgba(255,255,255,0.05);">
+                                <div style="color: var(--text-primary); margin-bottom: 8px; font-size: 13px;"><span style="color: var(--accent);">Q:</span> ${escapeHtml(q.q || q.question)}</div>
+                                ${isAnswered ? `
+                                    <div style="color: var(--text-secondary); display: flex; gap: 8px; align-items: flex-start;">
+                                        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="rgba(0, 255, 136, 0.8)" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="margin-top: 2px; flex-shrink: 0;"><polyline points="20 6 9 17 4 12"></polyline></svg>
+                                        <span>${escapeHtml(q.answer)}</span>
+                                    </div>
+                                ` : `
+                                    ${answerEditorHtml}
+                                `}
+                            </div>
+                        `;
+                    }).join('');
+                }
+            } catch (e) {
+                console.error('Failed to parse triage_state', e);
+                contentEl.innerHTML = '<div style="color: var(--status-error);">Failed to load triage questions.</div>';
+            }
+        };
+
+        window.selectTriageOption = (event, taskId, questionIdx, value) => {
+            event.stopPropagation();
+            const inputEl = document.getElementById(`triage-ans-${taskId}-${questionIdx}`);
+            if (inputEl) inputEl.value = value;
+            submitTriageAnswer(event, taskId, questionIdx);
+        };
+
+        window.submitTriageAnswer = async (event, taskId, questionIdx) => {
+            event.stopPropagation();
+            if (state.readOnly) {
+                alert('Read-only mode: editing is disabled.');
+                return;
+            }
+            const inputEl = document.getElementById(`triage-ans-${taskId}-${questionIdx}`);
+            const answer = inputEl.value.trim();
+            if (!answer) return;
+
+            const task = state.tasks.find(t => t.id === taskId);
+            if (!task || !task.triage_state) return;
+
+            try {
+                const triageState = typeof task.triage_state === 'string' ? JSON.parse(task.triage_state) : task.triage_state;
+                if (triageState.questions && triageState.questions[questionIdx]) {
+                    triageState.questions[questionIdx].answer = answer;
+                    triageState.questions[questionIdx].answered = true;
+                    
+                    // Check if all answered
+                    const allAnswered = triageState.questions.every(q => q.answered || q.answer);
+                    if (allAnswered) {
+                        triageState.status = 'answered';
+                    }
+
+                    const res = await fetch(getApiUrl(`/tasks/${taskId}`), {
+                        method: 'PATCH',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify({ triage_state: JSON.stringify(triageState) })
+                    });
+
+                    if (!res.ok) throw new Error('Failed to submit answer');
+                    
+                    // Update local state — only re-render the modal, not all cards
+                    task.triage_state = JSON.stringify(triageState);
+                    if (state.activeTriageTaskId === taskId) {
+                        renderTriageModalContent(task);
+                    }
+                    // Update card triage indicator without full re-render
+                    const indicator = document.querySelector(`[data-triage-task="${taskId}"]`);
+                    if (indicator) {
+                        const answered = triageState.questions.filter(q => q.answered || q.answer).length;
+                        const total = triageState.questions.length;
+                        indicator.textContent = allAnswered ? `TRIAGE ✓` : `TRIAGE (${answered}/${total})`;
+                        if (allAnswered) indicator.style.color = 'var(--accent)';
+                    }
+                }
+            } catch (err) {
+                console.error('Error submitting triage answer:', err);
+                alert('Failed to submit answer: ' + err.message);
+            }
+        };
+
+        const openDrawer = (taskId) => {
+            const task = state.tasks.find(t => t.id === taskId);
+            if (!task) return;
+
+            state.selectedTaskId = taskId;
+            state.isDrawerOpen = true;
+
+            if (els.addNoteForm) {
+                els.addNoteForm.style.display = state.readOnly ? 'none' : '';
+            }
+
+            // Populate basic info immediately
+            els.drawerTitle.textContent = task.title;
+            els.drawerDescription.innerHTML = parseMarkdown(task.description) || '<span style="color: var(--text-secondary)">No description provided.</span>';
+            els.drawerDescription.classList.add('collapsed');
+            const descToggle = document.getElementById('desc-toggle');
+            if (descToggle) descToggle.textContent = '(show)';
+            
+            const externalUrl = task.external_url || task.linear_issue_url;
+            const sourceLabel = externalUrl ? 'EXTERNAL' : 'MANUAL';
+            const sourceHtml = externalUrl
+                ? `<a href="${externalUrl}" target="_blank" rel="noopener noreferrer">${sourceLabel}</a>`
+                : sourceLabel;
+
+            let triageBtnHtml = '';
+            if (!state.readOnly && !task.parent_task_id && (task.status === 'in_progress' || task.status === 'assigned')) {
+                triageBtnHtml = `<button class="btn-triage" id="btn-triage" onclick="handleBackToTriage('${task.id}')">Back to Triage</button>`;
+            }
+
+            let promoteBtnHtml = '';
+            if (!state.readOnly && (task.task_type === 'investigation' || task.task_type === 'research')) {
+                promoteBtnHtml = `<button class="btn-promote" onclick="handlePromoteToCoding('${task.id}')">Promote to Coding</button>`;
+            }
+
+            let doneBtnHtml = '';
+            if (!state.readOnly && task.status !== 'done') {
+                doneBtnHtml = `<button class="btn-done" onclick="handleMarkDone('${task.id}')">Mark Done</button>`;
+            }
+
+            let agentInfoHtml = '';
+            const agent = state.agentStatus[taskId];
+            if (agent) {
+                const prLink = agent.pr ? `<a href="#" style="color: var(--accent); text-decoration: none;">PR #${agent.pr}</a>` : '';
+                const branchInfo = agent.branch ? `<span style="color: var(--text-secondary);">Branch:</span> ${escapeHtml(agent.branch)}` : '';
+                const reviewInfo = agent.reviewCycles !== undefined ? `<span style="color: var(--text-secondary);">Reviews:</span> ${agent.reviewCycles}` : '';
+                
+                agentInfoHtml = `
+                    <div style="width: 100%; display: flex; gap: 12px; font-family: var(--font-mono); font-size: 11px; margin-top: 8px; padding-top: 8px; border-top: 1px solid rgba(255,255,255,0.05);">
+                        <span style="color: var(--text-secondary);">Agent:</span> <span style="color: var(--text-primary);">${agent.agent.toUpperCase()}</span>
+                        ${branchInfo ? `<span>${branchInfo}</span>` : ''}
+                        ${reviewInfo ? `<span>${reviewInfo}</span>` : ''}
+                        ${prLink ? `<span>${prLink}</span>` : ''}
+                    </div>
+                `;
+            }
+
+            const taskTypeBadge = task.task_type === 'investigation'
+                ? '<div class="badge" style="background: rgba(147, 130, 255, 0.15); color: #9382ff;">INVESTIGATION</div>'
+                : task.task_type === 'research'
+                    ? '<div class="badge" style="background: rgba(0, 224, 199, 0.16); color: #00e0c7;">RESEARCH</div>'
+                    : '';
+
+            els.drawerMeta.innerHTML = `
+                <div class="badge badge-status ${task.status}">${task.status.replace('_', ' ')}</div>
+                ${taskTypeBadge}
+                <div class="badge badge-source">${sourceHtml}</div>
+                ${state.readOnly ? '' : `<div class="priority-picker" id="priority-picker">
+                    ${['urgent','high','normal','low'].map(p => {
+                        const active = (task.priority || 'normal') === p;
+                        return `<button class="priority-opt ${p} ${active ? 'active' : ''}" onclick="handleSetPriority('${task.id}', '${p}')">${p.toUpperCase()}</button>`;
+                    }).join('')}
+                </div>`}
+                <div class="time-ago" style="font-family: var(--font-mono); font-size: 11px; color: var(--text-secondary);">Created ${timeAgo(task.created_at)}</div>
+                ${triageBtnHtml}
+                ${promoteBtnHtml}
+                ${doneBtnHtml}
+                ${agentInfoHtml}
+            `;
+
+            // Open UI
+            els.drawerOverlay.classList.add('open');
+            els.drawer.classList.add('open');
+
+            // Fetch details
+            state.drawerInitialLoad = true;
+            state.activityExpanded = false;
+            fetchTaskDetails(taskId);
+        };
+
+        const closeDrawer = () => {
+            state.isDrawerOpen = false;
+            state.selectedTaskId = null;
+            els.drawerOverlay.classList.remove('open');
+            els.drawer.classList.remove('open');
+        };
+
+        const renderDrawerDetails = () => {
+            // Render Triage State
+            if (state.triageState && state.triageState.questions && state.triageState.questions.length > 0) {
+                els.drawerTriageSection.style.display = 'block';
+                const task = state.tasks.find(t => t.id === state.selectedTaskId);
+                const isPostTriage = task && !['inbox', 'planning'].includes(task.status);
+                if (isPostTriage) {
+                    els.drawerTriage.classList.add('collapsed');
+                } else {
+                    els.drawerTriage.classList.remove('collapsed');
+                }
+                const toggleEl = document.getElementById('triage-toggle');
+                if (toggleEl) toggleEl.textContent = els.drawerTriage.classList.contains('collapsed') ? '(show)' : '(hide)';
+                const triageHtml = state.triageState.questions.map(q => `
+                    <div class="qa-item">
+                        <div class="qa-question">${escapeHtml(q.question)}</div>
+                        <div class="qa-answer">${escapeHtml(q.answer || 'Pending...')}</div>
+                    </div>
+                `).join('');
+                if (els.drawerTriage.innerHTML !== triageHtml) {
+                    els.drawerTriage.innerHTML = triageHtml;
+                }
+            } else {
+                els.drawerTriageSection.style.display = 'none';
+            }
+
+            // Render Deliverables
+            if (state.deliverables && state.deliverables.length > 0) {
+                els.drawerDeliverablesSection.style.display = '';
+                const typeIcons = { 'gsd-plan': '\u{1F4CB}', 'gsd-verification': '\u2705', 'gsd-prd': '\u{1F4C4}' };
+                els.drawerDeliverables.innerHTML = state.deliverables.map(d => `
+                    <div class="deliverable-card" onclick="this.classList.toggle('expanded')">
+                        <div class="deliverable-header">
+                            <span class="deliverable-type-icon">${typeIcons[d.deliverable_type] || '\u{1F4CE}'}</span>
+                            <span class="deliverable-title">${escapeHtml(d.title)}</span>
+                            <span class="deliverable-time">${timeAgo(d.created_at)}</span>
+                            <span class="deliverable-chevron">\u25B6</span>
+                        </div>
+                        <div class="deliverable-body">
+                            <div class="deliverable-body-content">${d.description ? parseMarkdown(d.description) : '<span style="color: var(--text-secondary);">No description.</span>'}</div>
+                        </div>
+                    </div>
+                `).join('');
+            } else {
+                els.drawerDeliverablesSection.style.display = 'none';
+            }
+
+            // Render Activities
+            if (state.activities.length === 0) {
+                const emptyHtml = `<div class="empty-state">NO ACTIVITY RECORDED</div>`;
+                if (state.lastActivityCount !== 0) {
+                    els.drawerTimeline.innerHTML = emptyHtml;
+                    state.lastActivityCount = 0;
+                    state.lastActivityId = null;
+                }
+                return;
+            }
+
+            // Sort activities newest first for timeline
+            const sortedActivities = [...state.activities].sort((a, b) => new Date(b.created_at) - new Date(a.created_at));
+            
+            const currentCount = sortedActivities.length;
+            const currentLatestId = sortedActivities[0].id;
+
+            // Skip re-render if data hasn't changed (unless we just toggled expanded state)
+            if (state.lastActivityCount === currentCount && state.lastActivityId === currentLatestId && !state.activityExpandedToggled) {
+                return;
+            }
+            
+            state.activityExpandedToggled = false; // Reset toggle flag
+
+            const visibleActivities = state.activityExpanded ? sortedActivities : sortedActivities.slice(0, 3);
+            const selectedTask = state.tasks.find(t => t.id === state.selectedTaskId);
+            const selectedSwarm = selectedTask ? state.agentStatus[selectedTask.id] : null;
+            const selectedHeartbeat = getHeartbeatMeta(selectedSwarm);
+
+            const drawerHeartbeatBanner = selectedSwarm && selectedHeartbeat.hasHeartbeat
+                ? `<div class="timeline-item type-heartbeat${selectedHeartbeat.stale ? ' heartbeat-stale' : ''}" style="margin-bottom: 8px;">
+                        <div class="timeline-header">
+                            <span class="timeline-type">swarm heartbeat</span>
+                            <span class="timeline-time">${formatHeartbeatAge(selectedHeartbeat.ageMs)} ago</span>
+                            <span class="heartbeat-pill ${selectedHeartbeat.stale ? 'stale' : ''}">${selectedHeartbeat.stale ? 'stale' : 'healthy'}</span>
+                        </div>
+                    </div>`
+                : '';
+
+            let timelineHtml = drawerHeartbeatBanner + visibleActivities.map(act => {
+                const isPrompt = act.activity_type === 'prompt_sent';
+                const isFindings = act.activity_type === 'investigation_findings' || act.activity_type === 'research_findings';
+                const isPlanning = act.activity_type === 'planning_questions';
+                const isLinearComment = act.activity_type === 'linear_comment';
+                const isHeartbeat = act.activity_type === 'updated' && typeof act.message === 'string' && act.message.startsWith('Agent heartbeat:');
+                const isCollapsible = isPrompt || isFindings || isPlanning;
+                const contentHtml = act.message ? (isCollapsible
+                    ? `<div class="timeline-content ${isPrompt ? 'prompt-content' : isFindings ? 'findings-content' : 'prompt-content'} collapsed" onclick="this.classList.toggle('collapsed')">${parseMarkdown(act.message)}</div>`
+                    : `<div class="timeline-content">${parseMarkdown(act.message)}</div>`
+                ) : '';
+                const typeLabels = {
+                    'prompt_sent': 'agent prompt',
+                    'investigation_findings': 'investigation findings',
+                    'research_findings': 'research findings',
+                    'planning_questions': 'triage started',
+                    'linear_comment': 'external reply',
+                    'heartbeat': 'agent heartbeat',
+                    'spawned': 'agent spawned',
+                    'status_changed': 'status changed',
+                    'updated': 'update',
+                };
+                const activityKey = isHeartbeat ? 'heartbeat' : act.activity_type;
+                const typeLabel = typeLabels[activityKey] || act.activity_type.replace('_', ' ');
+                const heartbeatPill = isHeartbeat && selectedHeartbeat.hasHeartbeat
+                    ? `<span class="heartbeat-pill ${selectedHeartbeat.stale ? 'stale' : ''}">${selectedHeartbeat.stale ? 'STALE' : 'OK'} ${formatHeartbeatAge(selectedHeartbeat.ageMs)}</span>`
+                    : '';
+                return `
+                    <div class="timeline-item type-${isHeartbeat ? 'heartbeat' : act.activity_type}${isFindings ? ' findings-highlight' : ''}${isHeartbeat && selectedHeartbeat.stale ? ' heartbeat-stale' : ''}">
+                        <div class="timeline-header">
+                            <span class="timeline-type" ${isFindings ? 'style="color: #9382ff;"' : isPlanning ? 'style="color: var(--stage-triage);"' : isLinearComment ? 'style="color: #6366f1;"' : ''}>${escapeHtml(typeLabel)}</span>
+                            <span class="timeline-time">${timeAgo(act.created_at)}</span>
+                            ${heartbeatPill}
+                            ${isCollapsible ? '<span style="font-size:9px;color:rgba(255,255,255,0.3);margin-left:4px;cursor:pointer;" onclick="this.parentElement.nextElementSibling.classList.toggle(\'collapsed\')">(click to expand)</span>' : ''}
+                        </div>
+                        ${contentHtml}
+                    </div>
+                `;
+            }).join('');
+
+            if (sortedActivities.length > 3) {
+                const btnText = state.activityExpanded ? 'SHOW LESS' : `SHOW MORE (${sortedActivities.length - 3})`;
+                timelineHtml += `
+                    <button class="btn-show-more" onclick="toggleActivityExpanded()">
+                        ${btnText}
+                    </button>
+                `;
+            }
+
+            els.drawerTimeline.innerHTML = timelineHtml;
+            state.lastActivityCount = currentCount;
+            state.lastActivityId = currentLatestId;
+        };
+
+        window.toggleActivityExpanded = () => {
+            state.activityExpanded = !state.activityExpanded;
+            state.activityExpandedToggled = true;
+            renderDrawerDetails();
+        };
+
+        // Event Listeners
+        els.sortSelect.addEventListener('change', (e) => {
+            state.sort = e.target.value;
+            renderTasks();
+        });
+
+        els.closeDrawer.addEventListener('click', closeDrawer);
+        els.drawerOverlay.addEventListener('click', closeDrawer);
+
+        document.getElementById('close-triage-modal').addEventListener('click', closeTriageModal);
+        document.getElementById('triage-modal-overlay').addEventListener('click', closeTriageModal);
+        document.addEventListener('keydown', (e) => {
+            if (e.key === 'Escape') {
+                if (state.activeTriageTaskId) {
+                    closeTriageModal();
+                } else if (state.isDrawerOpen) {
+                    closeDrawer();
+                }
+            }
+        });
+
+        els.addNoteForm.addEventListener('submit', async (e) => {
+            e.preventDefault();
+            if (state.readOnly) {
+                alert('Read-only mode: adding notes is disabled.');
+                return;
+            }
+            const text = els.noteInput.value.trim();
+            if (!text || !state.selectedTaskId) return;
+
+            const selectedTask = state.tasks.find(t => t.id === state.selectedTaskId);
+            const status = selectedTask?.status || '';
+            let activityType = 'updated';
+            if (status === 'planning') {
+                activityType = 'planning_answer';
+            } else if (status === 'review' || status === 'testing') {
+                activityType = 'manual_feedback';
+            }
+            
+            els.btnSend.disabled = true;
+            els.noteInput.disabled = true;
+            
+            try {
+                await fetch(getApiUrl(`/tasks/${state.selectedTaskId}/activities`), {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({
+                        activity_type: activityType,
+                        message: text
+                    })
+                });
+                
+                els.noteInput.value = '';
+                fetchTaskDetails(state.selectedTaskId);
+            } catch (error) {
+                console.error('Failed to add note:', error);
+                alert('Failed to add note.');
+            } finally {
+                els.btnSend.disabled = false;
+                els.noteInput.disabled = false;
+                els.noteInput.focus();
+            }
+        });
+
+        window.handleSetPriority = async (taskId, priority) => {
+            if (state.readOnly) {
+                alert('Read-only mode: priority edits are disabled.');
+                return;
+            }
+            try {
+                await fetch(getApiUrl(`/tasks/${taskId}`), {
+                    method: 'PATCH',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ priority })
+                });
+                const task = state.tasks.find(t => t.id === taskId);
+                if (task) task.priority = priority;
+                renderTasks();
+                if (state.selectedTaskId === taskId) openDrawer(taskId);
+            } catch (error) {
+                console.error('Failed to set priority:', error);
+            }
+        };
+
+        window.handleBackToTriage = async (taskId) => {
+            if (state.readOnly) {
+                alert('Read-only mode: status changes are disabled.');
+                return;
+            }
+            if (!confirm('Send this task back to triage? Running agents will need to be manually stopped.')) {
+                return;
+            }
+            
+            try {
+                await fetch(getApiUrl(`/tasks/${taskId}`), {
+                    method: 'PATCH',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ status: 'planning' })
+                });
+                
+                await fetch(getApiUrl(`/tasks/${taskId}/activities`), {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({
+                        activity_type: 'status_changed',
+                        message: 'Sent back to triage from dashboard'
+                    })
+                });
+                
+                fetchTasks();
+                closeDrawer();
+            } catch (error) {
+                console.error('Failed to send back to triage:', error);
+                alert('Failed to update task status.');
+            }
+        };
+
+        window.handlePromoteToCoding = async (taskId) => {
+            if (state.readOnly) {
+                alert('Read-only mode: workflow transitions are disabled.');
+                return;
+            }
+
+            const reason = prompt('Why should this research/investigation move to coding implementation? (required)');
+            if (!reason || reason.trim().length < 5) {
+                alert('Promotion cancelled: reason must be at least 5 characters.');
+                return;
+            }
+
+            try {
+                const res = await fetch(getApiUrl(`/tasks/${taskId}/promote`), {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ reason: reason.trim() })
+                });
+                if (!res.ok) {
+                    const data = await res.json().catch(() => ({}));
+                    throw new Error(data.error || 'Failed to promote task');
+                }
+
+                await fetchTasks();
+                if (state.selectedTaskId === taskId) {
+                    openDrawer(taskId);
+                }
+            } catch (error) {
+                console.error('Failed to promote research/investigation task:', error);
+                alert(`Failed to promote task: ${error.message || 'Unknown error'}`);
+            }
+        };
+
+        window.handleMarkDone = async (taskId) => {
+            if (state.readOnly) {
+                alert('Read-only mode: workflow transitions are disabled.');
+                return;
+            }
+
+            const reason = prompt('Optional reason for marking this task done:') || '';
+
+            try {
+                const res = await fetch(getApiUrl(`/tasks/${taskId}/done`), {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ reason: reason.trim() })
+                });
+                if (!res.ok) {
+                    const data = await res.json().catch(() => ({}));
+                    throw new Error(data.error || 'Failed to mark task done');
+                }
+
+                await fetchTasks();
+                if (state.selectedTaskId === taskId) {
+                    openDrawer(taskId);
+                }
+            } catch (error) {
+                console.error('Failed to mark task done:', error);
+                alert(`Failed to mark task done: ${error.message || 'Unknown error'}`);
+            }
+        };
+
+        // Mission Control Logic
+        const initMissionControl = () => {
+            // Uptime clock
+            const startTime = Date.now();
+            setInterval(() => {
+                const now = Date.now();
+                const diff = Math.floor((now - startTime) / 1000);
+                const h = String(Math.floor(diff / 3600)).padStart(2, '0');
+                const m = String(Math.floor((diff % 3600) / 60)).padStart(2, '0');
+                const s = String(diff % 60).padStart(2, '0');
+                const uptimeEl = document.getElementById('chip-uptime-val');
+                if (uptimeEl) uptimeEl.textContent = `${h}:${m}:${s}`;
+            }, 1000);
+        };
+
+        const updateMissionControl = () => {
+            const tasks = state.tasks;
+            
+            // Metrics Chips
+            const totalTasks = tasks.length;
+            const childTasks = tasks.filter(t => t.parent_task_id);
+            const activeAgents = state.boardSummary?.runningSwarmAgents ?? childTasks.filter(t => t.status === 'in_progress' || t.status === 'assigned').length;
+            const triageTasks = tasks.filter(t => t.status === 'inbox' || t.status === 'planning').length;
+            
+            const tasksVal = document.getElementById('chip-tasks-val');
+            if (tasksVal) tasksVal.textContent = totalTasks;
+            
+            const agentsVal = document.getElementById('chip-agents-val');
+            if (agentsVal) agentsVal.textContent = activeAgents;
+            
+            const triageVal = document.getElementById('chip-triage-val');
+            if (triageVal) triageVal.textContent = triageTasks;
+
+            const hb = computeHeartbeatHealth();
+            const hbRun = document.getElementById('chip-hb-running');
+            const hbStale = document.getElementById('chip-hb-stale');
+            const hbMissing = document.getElementById('chip-hb-missing');
+            const hbChip = document.getElementById('chip-health');
+            if (hbRun) hbRun.textContent = hb.running;
+            if (hbStale) hbStale.textContent = hb.stale;
+            if (hbMissing) hbMissing.textContent = hb.missing;
+            if (hbChip) {
+                hbChip.classList.remove('warn', 'alert');
+                if (hb.stale > 0 || hb.missing > 0) hbChip.classList.add('warn');
+                if (hb.stale > 0 && hb.missing > 0) hbChip.classList.add('alert');
+            }
+
+            // Pipeline Flow
+            const now = new Date();
+            const counts = {
+                intake: tasks.filter(t => t.status === 'inbox' && !t.parent_task_id).length,
+                triage: tasks.filter(t => t.status === 'planning' && !t.parent_task_id).length,
+                dispatch: tasks.filter(t => t.status === 'assigned' && !t.parent_task_id).length,
+                swarm: childTasks.filter(t => t.status === 'in_progress' || t.status === 'assigned').length,
+                review: tasks.filter(t => t.status === 'testing' || t.status === 'review').length,
+                complete: tasks.filter(t => t.status === 'done').length
+            };
+            
+            const stages = ['intake', 'triage', 'dispatch', 'swarm', 'review', 'complete'];
+            stages.forEach((stage, idx) => {
+                const el = document.getElementById(`stage-${stage}`);
+                if (el) {
+                    const count = counts[stage] || 0;
+                    const countEl = el.querySelector('.stage-count');
+                    if (countEl) countEl.textContent = count;
+                    if (count > 0) {
+                        el.classList.add('active');
+                    } else {
+                        el.classList.remove('active');
+                    }
+                }
+                
+                // Update connection lines
+                if (idx < stages.length - 1) {
+                    const nextStage = stages[idx + 1];
+                    const conn = document.getElementById(`conn-${stage}-${nextStage}`);
+                    if (conn) {
+                        if (counts[stage] > 0 || counts[nextStage] > 0) {
+                            conn.classList.add('active');
+                        } else {
+                            conn.classList.remove('active');
+                        }
+                    }
+                }
+            });
+
+            // Swarm agent dots
+            const swarmDots = document.getElementById('swarm-dots');
+            if (swarmDots) {
+                if (childTasks.length === 0) {
+                    swarmDots.innerHTML = '';
+                } else {
+                    swarmDots.innerHTML = childTasks.map((t, i) => {
+                        const repo = extractTargetRepo(t.title) || 'agent';
+                        let dotClass = 'completed';
+                        if (t.status === 'in_progress' || t.status === 'assigned') dotClass = 'running';
+                        if (t.status === 'failed') dotClass = 'failed';
+                        return `<div class="swarm-dot ${dotClass}" title="${escapeHtml(repo)}" style="animation-delay: ${i * 0.3}s"></div>`;
+                    }).join('');
+                }
+            }
+        };
+
+        const extractTicketId = (title) => {
+            if (!title) return 'TASK';
+            const match = title.match(/^\[?([A-Z]+-\d+)\]?:?/);
+            if (match) return match[1];
+            return title.substring(0, 8) + (title.length > 8 ? '...' : '');
+        };
+
+        const getProcessGraphTasks = () => {
+            let tasks = state.tasks;
+            if (state.filter !== 'all') {
+                const matchingIds = new Set(tasks.filter(t => t.status === state.filter).map(t => t.id));
+                tasks = tasks.filter(t => matchingIds.has(t.id) || matchingIds.has(t.parent_task_id));
+            }
+            const sorted = [...tasks].sort((a, b) => new Date(b.created_at) - new Date(a.created_at));
+            const taskMap = new Map(sorted.map(t => [t.id, { ...t, children: [] }]));
+            const rootTasks = [];
+            taskMap.forEach(task => {
+                if (task.parent_task_id && taskMap.has(task.parent_task_id)) {
+                    taskMap.get(task.parent_task_id).children.push(task);
+                } else {
+                    rootTasks.push(task);
+                }
+            });
+            rootTasks.forEach(task => {
+                task.children.sort((a, b) => new Date(b.created_at) - new Date(a.created_at));
+            });
+            return rootTasks;
+        };
+
+        const renderProcessGraph = () => {
+            const container = document.getElementById('process-graph-content');
+            if (!container) return;
+
+            const rootTasks = getProcessGraphTasks();
+            
+            if (rootTasks.length === 0) {
+                container.innerHTML = `<div class="empty-state" style="padding: 24px;">NO PROCESS DATA</div>`;
+                return;
+            }
+
+            let hiddenDoneCount = 0;
+            
+            const filteredRootTasks = rootTasks.map(root => {
+                const isRootDone = root.status === 'done';
+                const children = root.children || [];
+                const doneChildren = children.filter(c => c.status === 'done');
+                const activeChildren = children.filter(c => c.status !== 'done');
+                
+                let shouldHideRoot = isRootDone && activeChildren.length === 0;
+                
+                if (shouldHideRoot) {
+                    hiddenDoneCount += 1 + doneChildren.length;
+                    if (!state.showDoneInGraph) return null;
+                } else {
+                    hiddenDoneCount += doneChildren.length;
+                }
+                
+                return {
+                    ...root,
+                    displayChildren: state.showDoneInGraph ? children : activeChildren,
+                    isDone: isRootDone
+                };
+            }).filter(Boolean);
+
+            const doneToggleBtn = document.getElementById('pg-done-toggle');
+            if (doneToggleBtn) {
+                doneToggleBtn.textContent = state.showDoneInGraph ? `Hide Done (${hiddenDoneCount})` : `Show Done (${hiddenDoneCount})`;
+                if (hiddenDoneCount === 0) {
+                    doneToggleBtn.style.display = 'none';
+                } else {
+                    doneToggleBtn.style.display = 'block';
+                }
+            }
+
+            if (filteredRootTasks.length === 0 && hiddenDoneCount > 0) {
+                container.innerHTML = `<div class="empty-state" style="padding: 24px;">ALL PROCESSES COMPLETE &mdash; ${hiddenDoneCount} done</div>`;
+                return;
+            }
+
+            const html = filteredRootTasks.map(root => {
+                const hasChildren = root.displayChildren && root.displayChildren.length > 0;
+                const rootStatusColor = `var(--status-${root.status})`;
+                const rootDoneStyle = root.isDone ? 'opacity: 0.7; filter: grayscale(60%);' : '';
+                
+                const rootTicketId = extractTicketId(root.title);
+                const rootTitle = root.title.replace(/^\[?[A-Z]+-\d+\]?:?\s*/, '');
+                
+                let rootAgentHtml = '';
+                const rootAgent = state.agentStatus[root.id];
+                if (rootAgent) {
+                    const effectiveStatus = rootAgent.liveStatus || rootAgent.status;
+                    let dotClass = 'completed';
+                    if (effectiveStatus === 'running') dotClass = 'running';
+                    if (effectiveStatus === 'failed') dotClass = 'failed';
+                    const prText = rootAgent.pr ? `<span style="opacity: 0.5; margin-left: 4px;">PR #${rootAgent.pr}</span>` : '';
+                    rootAgentHtml = `
+                        <div class="agent-badge">
+                            <div class="agent-dot ${dotClass}"></div>
+                            ${rootAgent.agent.toUpperCase()}${prText}
+                        </div>
+                    `;
+                }
+
+                let rootLifecycleHtml = '';
+                if (!hasChildren && state.childActivities[root.id]) {
+                    const rootSteps = parseLifecycleSteps(state.childActivities[root.id], root.id);
+                    if (rootSteps.length > 0) {
+                        const isRootInProgress = ['in_progress', 'assigned', 'planning'].includes(root.status);
+
+                        let pendingStep = null;
+                        if (root.status === 'planning') {
+                            pendingStep = { type: 'pending-triage', label: 'AWAITING ANSWERS', agent: '', css: 'feedback' };
+                        } else if (root.status === 'assigned' || root.status === 'in_progress') {
+                            const lastStep = rootSteps[rootSteps.length - 1];
+                            if (lastStep && lastStep.type === 'spawn') {
+                                pendingStep = { type: 'pending-active', label: 'RESEARCHING', agent: 'claude', css: 'spawn' };
+                            }
+                        } else if (root.status === 'review') {
+                            pendingStep = { type: 'pending-review', label: 'REVIEW', agent: '', css: 'feedback' };
+                        } else if (root.status === 'done') {
+                            pendingStep = { type: 'done', label: 'DONE', agent: 'system', css: 'complete', isMilestone: true };
+                        }
+
+                        rootLifecycleHtml = `
+                            <div class="pg-timeline" style="${rootDoneStyle}">
+                                ${rootSteps.map((step, idx) => {
+                                    const isLast = idx === rootSteps.length - 1 && !pendingStep;
+                                    const dotClass = isLast && isRootInProgress ? 'pulse-dot' : '';
+                                    const milestoneClass = step.isMilestone ? 'milestone' : '';
+                                    const connHtml = (idx < rootSteps.length - 1 || pendingStep) ? `<div class="pg-tl-conn"></div>` : '';
+                                    return `
+                                        <div class="pg-tl-step ${step.type} ${milestoneClass}" title="${escapeHtml(step.msg)}">
+                                            <div class="pg-tl-dot ${dotClass}"></div>
+                                            <div class="pg-tl-label">${step.label}</div>
+                                            <div class="pg-tl-agent">${step.agent ? step.agent.toUpperCase() : ''}</div>
+                                            <div class="pg-tl-time">${formatStepTime(step.time)}</div>
+                                        </div>
+                                        ${connHtml}
+                                    `;
+                                }).join('')}
+                                ${pendingStep ? `
+                                    <div class="pg-tl-step ${pendingStep.css} pending" title="Current stage">
+                                        <div class="pg-tl-dot pulse-dot"></div>
+                                        <div class="pg-tl-label">${pendingStep.label}</div>
+                                        <div class="pg-tl-agent">${pendingStep.agent ? pendingStep.agent.toUpperCase() : ''}</div>
+                                    </div>
+                                ` : ''}
+                            </div>
+                        `;
+                    }
+                }
+
+                const rootNodeHtml = `
+                    <div class="pg-root-wrapper ${hasChildren ? 'has-children' : ''}">
+                        <div class="pg-node" style="--node-color: ${rootStatusColor}; ${rootDoneStyle}" onclick="handleTaskClick(event, '${root.id}')">
+                            <div class="pg-node-top">
+                                <div class="pg-node-title" title="${escapeHtml(root.title)}">
+                                    <span style="color: var(--accent); margin-right: 4px;">${escapeHtml(rootTicketId)}</span>
+                                    ${escapeHtml(rootTitle)}
+                                </div>
+                            </div>
+                            <div class="pg-node-bottom">
+                                <div class="badge badge-status ${root.status}">${root.status.replace('_', ' ')}</div>
+                                ${rootAgentHtml}
+                            </div>
+                        </div>
+                        ${rootLifecycleHtml}
+                    </div>
+                `;
+
+                let childrenHtml = '';
+                if (hasChildren) {
+                    const childrenNodes = root.displayChildren.map(child => {
+                        const childStatusColor = `var(--status-${child.status})`;
+                        const childDoneStyle = child.status === 'done' ? 'opacity: 0.7; filter: grayscale(60%);' : '';
+                        const repo = extractTargetRepo(child.title) || 'task';
+                        
+                        let childAgentHtml = '';
+                        const childAgent = state.agentStatus[child.id];
+                        if (childAgent) {
+                            const effectiveStatus = childAgent.liveStatus || childAgent.status;
+                            let dotClass = 'completed';
+                            if (effectiveStatus === 'running') dotClass = 'running';
+                            if (effectiveStatus === 'failed') dotClass = 'failed';
+                            const prText = childAgent.pr ? `<span style="opacity: 0.5; margin-left: 4px;">PR #${childAgent.pr}</span>` : '';
+                            childAgentHtml = `
+                                <div class="agent-badge">
+                                    <div class="agent-dot ${dotClass}"></div>
+                                    ${childAgent.agent.toUpperCase()}${prText}
+                                </div>
+                            `;
+                        }
+
+                        let lifecycleHtml = '';
+                        if (state.childActivities[child.id]) {
+                            const steps = parseLifecycleSteps(state.childActivities[child.id], child.id);
+
+                            if (steps.length > 0) {
+                                const isChildInProgress = ['in_progress', 'assigned', 'testing'].includes(child.status);
+                                const effectiveAgentStatus = childAgent ? (childAgent.liveStatus || childAgent.status) : null;
+                                const lastStepType = steps[steps.length - 1]?.type;
+                                
+                                let pendingStep = null;
+                                if (effectiveAgentStatus === 'running') {
+                                    pendingStep = { type: 'pending-active', label: 'CODING', agent: childAgent?.agent || '', css: 'spawn' };
+                                } else if (child.status === 'review' && !steps.some(s => s.type === 'approved')) {
+                                    pendingStep = { type: 'pending-review', label: 'AWAITING REVIEW', agent: '', css: 'feedback' };
+                                } else if (child.status === 'in_progress' && effectiveAgentStatus !== 'running') {
+                                    pendingStep = { type: 'pending-idle', label: 'IDLE', agent: '', css: 'respawn' };
+                                } else if (child.status === 'on_hold') {
+                                    pendingStep = { type: 'pending-hold', label: 'ON HOLD', agent: '', css: 'feedback' };
+                                } else if (child.status === 'done') {
+                                    pendingStep = { type: 'done', label: 'EXTERNAL DONE', agent: 'external', css: 'complete', isMilestone: true };
+                                }
+
+                                lifecycleHtml = `
+                                    <div class="pg-timeline" style="${childDoneStyle}">
+                                        ${steps.map((step, idx) => {
+                                            const isLast = idx === steps.length - 1 && !pendingStep;
+                                            const dotClass = isLast && isChildInProgress ? 'pulse-dot' : '';
+                                            const milestoneClass = step.isMilestone || step.type === 'complete' || step.type === 'approved' ? 'milestone' : '';
+                                            const connHtml = (idx < steps.length - 1 || pendingStep) ? `<div class="pg-tl-conn"></div>` : '';
+                                            return `
+                                                <div class="pg-tl-step ${step.type} ${milestoneClass}" title="${escapeHtml(step.msg)}">
+                                                    <div class="pg-tl-dot ${dotClass}"></div>
+                                                    <div class="pg-tl-label">${step.label}</div>
+                                                    <div class="pg-tl-agent">${step.agent ? step.agent.toUpperCase() : ''}</div>
+                                                    <div class="pg-tl-time">${formatStepTime(step.time)}</div>
+                                                </div>
+                                                ${connHtml}
+                                            `;
+                                        }).join('')}
+                                        ${pendingStep ? `
+                                            <div class="pg-tl-step ${pendingStep.css} pending" title="Current state">
+                                                <div class="pg-tl-dot ${effectiveAgentStatus === 'running' ? 'pulse-dot' : ''}"></div>
+                                                <div class="pg-tl-label">${pendingStep.label}</div>
+                                                <div class="pg-tl-agent">${pendingStep.agent ? pendingStep.agent.toUpperCase() : ''}</div>
+                                                <div class="pg-tl-time">now</div>
+                                            </div>
+                                        ` : ''}
+                                    </div>
+                                `;
+                            }
+                        }
+
+                        return `
+                            <div class="pg-child-wrapper">
+                                <div class="pg-node" style="--node-color: ${childStatusColor}; ${childDoneStyle}" onclick="handleTaskClick(event, '${child.id}')">
+                                    <div class="pg-node-top">
+                                        <div class="pg-node-title" style="color: var(--accent);" title="${escapeHtml(child.title)}">
+                                            ${escapeHtml(repo)}
+                                        </div>
+                                    </div>
+                                    <div class="pg-node-bottom">
+                                        <div class="badge badge-status ${child.status}">${child.status.replace('_', ' ')}</div>
+                                        ${childAgentHtml}
+                                    </div>
+                                </div>
+                                ${lifecycleHtml}
+                            </div>
+                        `;
+                    }).join('');
+                    
+                    childrenHtml = `
+                        <div class="pg-children">
+                            ${childrenNodes}
+                        </div>
+                    `;
+                }
+
+                return `
+                    <div class="pg-row">
+                        ${rootNodeHtml}
+                        ${childrenHtml}
+                    </div>
+                `;
+            }).join('');
+
+            container.innerHTML = html;
+        };
+
+        window.toggleNewTaskForm = () => {
+            const container = document.getElementById('new-task-form-container');
+            const btn = document.getElementById('btn-new-task');
+            if (container.style.display === 'none') {
+                container.style.display = 'block';
+                btn.classList.add('active');
+                document.getElementById('new-task-title').focus();
+            } else {
+                container.style.display = 'none';
+                btn.classList.remove('active');
+                document.getElementById('new-task-title').value = '';
+                document.getElementById('new-task-desc').value = '';
+                document.getElementById('new-task-desc').style.display = 'none';
+                document.getElementById('new-task-error').style.display = 'none';
+                setNewTaskPriority('normal');
+                setNewTaskType('implementation');
+            }
+        };
+
+        window.toggleNewTaskDesc = () => {
+            const desc = document.getElementById('new-task-desc');
+            if (desc.style.display === 'none') {
+                desc.style.display = 'block';
+                desc.focus();
+            } else {
+                desc.style.display = 'none';
+            }
+        };
+
+        window.setNewTaskPriority = (val) => {
+            document.getElementById('new-task-priority').value = val;
+            document.querySelectorAll('#new-task-priority-pills .filter-pill').forEach(pill => {
+                if (pill.dataset.val === val) {
+                    pill.classList.add('active');
+                } else {
+                    pill.classList.remove('active');
+                }
+            });
+        };
+
+        window.setNewTaskType = (val) => {
+            document.getElementById('new-task-type').value = val;
+            document.querySelectorAll('#new-task-type-pills .filter-pill').forEach(pill => {
+                if (pill.dataset.val === val) {
+                    pill.classList.add('active');
+                } else {
+                    pill.classList.remove('active');
+                }
+            });
+        };
+
+        window.submitNewTask = async (e) => {
+            e.preventDefault();
+            const title = document.getElementById('new-task-title').value.trim();
+            const description = document.getElementById('new-task-desc').value.trim();
+            const priority = document.getElementById('new-task-priority').value;
+            const errorEl = document.getElementById('new-task-error');
+            
+            if (!title) return;
+            
+            try {
+                const taskType = document.getElementById('new-task-type').value || 'implementation';
+                const payload = { title, description, priority, task_type: taskType, source: 'dashboard' };
+
+                const res = await fetch(getApiUrl('/tasks'), {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify(payload)
+                });
+                
+                if (!res.ok) throw new Error('Failed to create task');
+                
+                // Reset form
+                document.getElementById('new-task-title').value = '';
+                document.getElementById('new-task-desc').value = '';
+                document.getElementById('new-task-desc').style.display = 'none';
+                setNewTaskPriority('normal');
+                setNewTaskType('implementation');
+                errorEl.style.display = 'none';
+                
+                toggleNewTaskForm();
+                fetchData();
+            } catch (err) {
+                errorEl.textContent = err.message;
+                errorEl.style.display = 'block';
+            }
+        };
+
+        window.toggleTaskCards = () => {
+            const content = document.getElementById('task-cards-content');
+            const toggle = document.getElementById('task-cards-toggle');
+            if (content.classList.contains('collapsed')) {
+                content.classList.remove('collapsed');
+                toggle.textContent = '(hide)';
+            } else {
+                content.classList.add('collapsed');
+                toggle.textContent = '(show)';
+            }
+        };
+
+        window.toggleProcessGraphDone = () => {
+            state.showDoneInGraph = !state.showDoneInGraph;
+            renderProcessGraph();
+        };
+
+        window.toggleProcessGraph = () => {
+            const content = document.getElementById('process-graph-content');
+            const toggle = document.getElementById('process-graph-toggle');
+            if (content.classList.contains('collapsed')) {
+                content.classList.remove('collapsed');
+                toggle.textContent = '(hide)';
+                fetchChildActivities();
+            } else {
+                content.classList.add('collapsed');
+                toggle.textContent = '(show)';
+            }
+        };
+
+        // Knowledge Base Logic
+        let kbState = {
+            entries: [],
+            knownRepos: [],
+            projects: new Set(),
+            repos: new Set(),
+            reposByProject: {},
+            selectedProject: '',
+            selectedRepo: '',
+            defaultProject: ''
+        };
+
+        window.toggleKnowledgePanel = async () => {
+            const content = document.getElementById('knowledge-content');
+            const toggle = document.getElementById('knowledge-toggle');
+            if (content.classList.contains('collapsed')) {
+                content.classList.remove('collapsed');
+                toggle.textContent = '(hide)';
+                if (kbState.knownRepos.length === 0) {
+                    try {
+                        const [reposRes, configRes] = await Promise.all([
+                            fetch(getApiUrl('/repos')),
+                            fetch(getApiUrl('/config'))
+                        ]);
+                        if (reposRes.ok) {
+                            const data = await reposRes.json();
+                            kbState.knownRepos = data.repos || [];
+                            kbState.reposByProject = {};
+                            kbState.knownRepos.forEach(r => {
+                                kbState.projects.add(r.project);
+                                kbState.repos.add(r.repo);
+                                if (!kbState.reposByProject[r.project]) kbState.reposByProject[r.project] = new Set();
+                                kbState.reposByProject[r.project].add(r.repo);
+                            });
+                        }
+                        if (configRes.ok) {
+                            const cfg = await configRes.json();
+                            if (cfg.defaultProject && kbState.projects.has(cfg.defaultProject)) {
+                                kbState.defaultProject = cfg.defaultProject;
+                                kbState.selectedProject = cfg.defaultProject;
+                            }
+                        }
+                        updateKbSelectors();
+                    } catch {}
+                }
+                loadKnowledge();
+            } else {
+                content.classList.add('collapsed');
+                toggle.textContent = '(show)';
+            }
+        };
+
+        window.setKbImportance = (val) => {
+            document.getElementById('kb-importance').value = val;
+            const pLevel = 6 - val;
+            document.querySelectorAll('#kb-priority-pills .kb-priority-select').forEach(pill => {
+                pill.className = 'kb-priority-select' + (parseInt(pill.dataset.val) === val ? ` active-p${pLevel}` : '');
+            });
+        };
+
+        const renderKnowledgeList = () => {
+            const list = document.getElementById('knowledge-list');
+            if (!kbState.entries.length) {
+                list.innerHTML = '<div style="color: var(--text-secondary); font-size: 12px; padding: 12px; text-align: center;">No knowledge entries found for this scope.</div>';
+                return;
+            }
+
+            list.innerHTML = kbState.entries.map(entry => {
+                const isAuto = entry.source === 'auto';
+                const sourceClass = isAuto ? 'auto' : 'human';
+                const sourceLabel = isAuto ? 'AUTO' : 'HUMAN';
+                const importance = Math.max(1, Math.min(5, Math.round(entry.importance || 3)));
+                const pLevel = 6 - importance;
+                const pLabel = `P${pLevel}`;
+                
+                let scopeLabel = 'global';
+                if (entry.scope && entry.scope.startsWith('repo:')) {
+                    scopeLabel = entry.scope.slice(5);
+                } else if (entry.scope && entry.scope.startsWith('project:')) {
+                    scopeLabel = entry.scope.slice(8);
+                } else if (entry.scope && entry.scope !== 'global') {
+                    scopeLabel = entry.scope;
+                }
+
+                return `
+                    <div class="kb-entry">
+                        <div class="kb-entry-header">
+                            <div class="kb-badges">
+                                <span class="kb-badge ${sourceClass}">${sourceLabel}</span>
+                                ${entry.category ? `<span class="kb-badge category">${escapeHtml(entry.category)}</span>` : ''}
+                                <span class="kb-badge" style="background: rgba(255,255,255,0.05); border: 1px solid rgba(255,255,255,0.1);">${escapeHtml(scopeLabel)}</span>
+                                ${entry.shared ? '<span class="kb-badge" style="background: rgba(139,92,246,0.1); color: #a78bfa; border: 1px solid rgba(139,92,246,0.25);">SHARED</span>' : ''}
+                            </div>
+                            <div style="display: flex; align-items: center; gap: 12px;">
+                                <span class="kb-priority p${pLevel}">${pLabel}</span>
+                                <button class="kb-delete" onclick="deleteKnowledge('${entry.id}')" title="Delete entry">×</button>
+                            </div>
+                        </div>
+                        <div class="kb-text">${escapeHtml(entry.text)}</div>
+                    </div>
+                `;
+            }).join('');
+        };
+
+        window.runKnowledgeRecall = async () => {
+            const queryInput = document.getElementById('kb-recall-query');
+            const results = document.getElementById('kb-recall-results');
+            const queryText = queryInput.value.trim();
+            if (!queryText) return;
+            results.style.display = 'block';
+            results.innerHTML = '<div style="color: var(--text-secondary); font-size: 12px; padding: 12px;">Running recall...</div>';
+            try {
+                const params = new URLSearchParams({ query: queryText, limit: '8' });
+                if (kbState.selectedProject) params.set('project', kbState.selectedProject);
+                if (kbState.selectedRepo) params.set('repo', kbState.selectedRepo);
+                const res = await fetch(getApiUrl(`/knowledge/recall?${params.toString()}`));
+                if (!res.ok) throw new Error('Recall failed');
+                const data = await res.json();
+                const rows = data.results || [];
+                if (!rows.length) {
+                    results.innerHTML = '<div style="color: var(--text-secondary); font-size: 12px; padding: 12px;">No recall matches.</div>';
+                    return;
+                }
+                results.innerHTML = rows.map(row => `
+                    <div class="kb-entry">
+                        <div class="kb-entry-header">
+                            <div class="kb-badges">
+                                <span class="kb-badge" style="background: rgba(139,92,246,0.1); color: #a78bfa; border: 1px solid rgba(139,92,246,0.25);">${escapeHtml(row.schema || 'schema')}</span>
+                                <span class="kb-badge category">${Number(row.score || 0).toFixed(3)}</span>
+                                <span class="kb-badge" style="background: rgba(255,255,255,0.05); border: 1px solid rgba(255,255,255,0.1);">${escapeHtml(row.domain || row.scope || 'global')}</span>
+                            </div>
+                        </div>
+                        <div class="kb-text">${escapeHtml(row.text || '')}</div>
+                    </div>
+                `).join('');
+            } catch (err) {
+                results.innerHTML = '<div style="color: var(--status-failed); font-size: 12px; padding: 12px;">Recall failed.</div>';
+            }
+        };
+
+        const updateKbSelectors = () => {
+            const projSelect = document.getElementById('kb-project-select');
+            const repoSelect = document.getElementById('kb-repo-select');
+            
+            const activeProj = kbState.selectedProject || projSelect.value;
+            const currentRepo = repoSelect.value;
+
+            projSelect.innerHTML = '<option value="">All Projects</option>' + 
+                Array.from(kbState.projects).sort().map(p => `<option value="${p}" ${p === activeProj ? 'selected' : ''}>${p}</option>`).join('');
+            
+            // Filter repos by selected project
+            const visibleRepos = activeProj && kbState.reposByProject[activeProj]
+                ? Array.from(kbState.reposByProject[activeProj]).sort()
+                : Array.from(kbState.repos).sort();
+
+            const repoStillValid = visibleRepos.includes(currentRepo);
+            repoSelect.innerHTML = '<option value="">All Repos</option>' + 
+                visibleRepos.map(r => `<option value="${r}" ${r === currentRepo && repoStillValid ? 'selected' : ''}>${r}</option>`).join('');
+            
+            if (!repoStillValid) {
+                kbState.selectedRepo = '';
+            }
+
+            const scopeProj = document.getElementById('kb-scope-project');
+            const scopeRepo = document.getElementById('kb-scope-repo');
+            if (scopeProj) {
+                const defaultProj = kbState.defaultProject || '';
+                scopeProj.innerHTML = '<option value="">Global (no project)</option>' +
+                    Array.from(kbState.projects).sort().map(p => `<option value="${p}" ${p === defaultProj ? 'selected' : ''}>${p}</option>`).join('');
+                updateKbScopeRepo();
+            }
+        };
+
+        window.updateKbScopeRepo = () => {
+            const scopeProj = document.getElementById('kb-scope-project');
+            const scopeRepo = document.getElementById('kb-scope-repo');
+            if (!scopeProj || !scopeRepo) return;
+            const proj = scopeProj.value;
+            const repos = proj && kbState.reposByProject[proj]
+                ? Array.from(kbState.reposByProject[proj]).sort()
+                : Array.from(kbState.repos).sort();
+            scopeRepo.innerHTML = '<option value="">All repos in project</option>' +
+                repos.map(r => `<option value="${r}">${r}</option>`).join('');
+        };
+
+        window.loadKnowledge = async () => {
+            try {
+                const projSelect = document.getElementById('kb-project-select');
+                const repoSelect = document.getElementById('kb-repo-select');
+                
+                const prevProject = kbState.selectedProject;
+                kbState.selectedProject = projSelect.value;
+                kbState.selectedRepo = repoSelect.value;
+
+                // If project changed, update repo dropdown and reset repo selection
+                if (kbState.selectedProject !== prevProject) {
+                    kbState.selectedRepo = '';
+                    updateKbSelectors();
+                }
+
+                let url = getApiUrl('/knowledge');
+                const params = new URLSearchParams();
+                if (kbState.selectedProject) params.append('project', kbState.selectedProject);
+                if (kbState.selectedRepo) params.append('repo', kbState.selectedRepo);
+                
+                if (params.toString()) {
+                    url += '?' + params.toString();
+                }
+
+                const res = await fetch(url);
+                if (!res.ok) throw new Error('Failed to fetch knowledge');
+                
+                const data = await res.json();
+                kbState.entries = data.entries || [];
+                
+                // Extract unique projects and repos for selectors if not filtering
+                if (!kbState.selectedProject && !kbState.selectedRepo) {
+                    kbState.entries.forEach(e => {
+                        if (e.scope && e.scope.startsWith('repo:')) {
+                            const parts = e.scope.slice(5).split('/');
+                            if (parts[0]) kbState.projects.add(parts[0]);
+                            if (parts[1]) {
+                                kbState.repos.add(parts[1]);
+                                if (!kbState.reposByProject[parts[0]]) kbState.reposByProject[parts[0]] = new Set();
+                                kbState.reposByProject[parts[0]].add(parts[1]);
+                            }
+                        } else if (e.scope && e.scope.startsWith('project:')) {
+                            kbState.projects.add(e.scope.slice(8));
+                        }
+                    });
+                    updateKbSelectors();
+                }
+
+                renderKnowledgeList();
+            } catch (err) {
+                console.error('Error loading knowledge:', err);
+                document.getElementById('knowledge-list').innerHTML = '<div style="color: var(--status-failed); font-size: 12px; padding: 12px;">Failed to load knowledge base.</div>';
+            }
+        };
+
+        const detectRepoFromText = (text) => {
+            const lower = text.toLowerCase();
+            let bestMatch = null;
+            let bestLen = 0;
+            for (const r of kbState.knownRepos) {
+                const repoLower = r.repo.toLowerCase();
+                if (lower.includes(repoLower) && repoLower.length > bestLen) {
+                    bestMatch = r;
+                    bestLen = repoLower.length;
+                }
+            }
+            return bestMatch;
+        };
+
+        window.addKnowledge = async (e) => {
+            e.preventDefault();
+            const textInput = document.getElementById('kb-text');
+            const importanceInput = document.getElementById('kb-importance');
+            const scopeProj = document.getElementById('kb-scope-project');
+            const scopeRepo = document.getElementById('kb-scope-repo');
+            const btn = document.getElementById('btn-add-kb');
+
+            const text = textInput.value.trim();
+            if (!text) return;
+
+            let project = scopeProj.value || '';
+            let repo = scopeRepo.value || '';
+            const importance = parseInt(importanceInput.value) || 5;
+
+            if (!project && !repo) {
+                const detected = detectRepoFromText(text);
+                if (detected) {
+                    project = detected.project;
+                    repo = detected.repo;
+                }
+            }
+
+            try {
+                btn.disabled = true;
+                btn.textContent = 'Adding...';
+
+                const res = await fetch(getApiUrl('/knowledge'), {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({
+                        text,
+                        project,
+                        repo,
+                        importance,
+                        category: 'developer_note'
+                    })
+                });
+
+                if (!res.ok) throw new Error('Failed to add knowledge');
+
+                textInput.value = '';
+                setKbImportance(5);
+                kbUrlDismissed = false;
+                kbDetectedUrl = '';
+                document.getElementById('kb-url-bar').style.display = 'none';
+                await loadKnowledge();
+            } catch (err) {
+                console.error('Error adding knowledge:', err);
+                alert('Failed to add knowledge entry');
+            } finally {
+                btn.disabled = false;
+                btn.textContent = 'Add Knowledge';
+            }
+        };
+
+        let kbUrlDismissed = false;
+        let kbDetectedUrl = '';
+
+        window.detectKbUrl = () => {
+            const text = document.getElementById('kb-text').value.trim();
+            const bar = document.getElementById('kb-url-bar');
+            const preview = document.getElementById('kb-url-preview');
+
+            const urlMatch = text.match(/^(https?:\/\/[^\s]+)$/);
+            if (urlMatch && !kbUrlDismissed) {
+                kbDetectedUrl = urlMatch[1];
+                bar.style.display = 'block';
+                preview.style.display = 'none';
+                preview.textContent = '';
+            } else {
+                bar.style.display = 'none';
+                kbDetectedUrl = '';
+            }
+        };
+
+        window.kbUrlAction = async (action) => {
+            const bar = document.getElementById('kb-url-bar');
+            const preview = document.getElementById('kb-url-preview');
+            const textInput = document.getElementById('kb-text');
+            const fetchBtn = document.getElementById('kb-url-fetch-btn');
+
+            if (action === 'dismiss') {
+                kbUrlDismissed = true;
+                bar.style.display = 'none';
+                return;
+            }
+
+            if (action === 'reference') {
+                textInput.value = `Reference: ${kbDetectedUrl}\n\n(Stored as URL reference — agents should visit this link for details)`;
+                bar.style.display = 'none';
+                kbUrlDismissed = true;
+                return;
+            }
+
+            if (action === 'fetch' || action === 'claude') {
+                const isClaude = action === 'claude';
+                const activeBtn = isClaude ? document.getElementById('kb-url-claude-btn') : fetchBtn;
+                const origText = activeBtn.textContent;
+
+                try {
+                    activeBtn.disabled = true;
+                    activeBtn.textContent = isClaude ? 'READING...' : 'FETCHING...';
+                    preview.style.display = 'block';
+                    preview.style.color = 'var(--text-secondary)';
+                    preview.textContent = isClaude ? 'Claude is reading the page via MCP... (may take 30-60s)' : 'Fetching content...';
+
+                    const payload = { url: kbDetectedUrl };
+                    if (isClaude) payload.method = 'claude';
+
+                    const res = await fetch(getApiUrl('/knowledge/fetch-url'), {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify(payload)
+                    });
+
+                    if (!res.ok) {
+                        const err = await res.json();
+                        throw new Error(err.error || 'Fetch failed');
+                    }
+
+                    const data = await res.json();
+
+                    if (data.needsClaude) {
+                        preview.textContent = 'This page requires JavaScript (e.g. Notion). Use "VIA CLAUDE" to read it with MCP.';
+                        preview.style.color = 'var(--status-warning, #f5a623)';
+                        return;
+                    }
+
+                    if (!data.text) {
+                        preview.textContent = 'No content extracted. Try "VIA CLAUDE" for JS-heavy pages.';
+                        preview.style.color = 'var(--status-warning, #f5a623)';
+                        return;
+                    }
+
+                    const title = data.title ? `${data.title}\n\n` : '';
+                    const extracted = `${title}Source: ${data.url}\n\n${data.text}`;
+
+                    preview.textContent = data.text.slice(0, 500) + (data.text.length > 500 ? '\n\n... (truncated preview)' : '');
+                    preview.style.display = 'block';
+
+                    textInput.value = extracted;
+                    bar.style.display = 'none';
+                    kbUrlDismissed = true;
+                } catch (err) {
+                    preview.textContent = `Error: ${err.message}`;
+                    preview.style.color = 'var(--status-error)';
+                } finally {
+                    activeBtn.disabled = false;
+                    activeBtn.textContent = origText;
+                }
+                return;
+            }
+        };
+
+        window.deleteKnowledge = async (id) => {
+            if (!confirm('Delete this knowledge entry?')) return;
+            
+            try {
+                const res = await fetch(getApiUrl(`/knowledge/${id}`), {
+                    method: 'DELETE'
+                });
+
+                if (!res.ok) throw new Error('Failed to delete knowledge');
+                
+                await loadKnowledge();
+            } catch (err) {
+                console.error('Error deleting knowledge:', err);
+                alert('Failed to delete knowledge entry');
+            }
+        };
+
+        // Knowledge Review Logic
+        let krActiveTab = 'browse';
+        let krStagedEntries = [];
+        let krCanonicalEntries = [];
+
+        window.switchKrTab = (tab) => {
+            krActiveTab = tab;
+            document.querySelectorAll('.kr-tab').forEach(t => t.classList.remove('active'));
+            document.getElementById(`kr-tab-${tab}`).classList.add('active');
+            document.getElementById('kr-view-browse').style.display = tab === 'browse' ? '' : 'none';
+            document.getElementById('kr-view-review').style.display = tab === 'review' ? '' : 'none';
+            document.getElementById('kr-view-canonical').style.display = tab === 'canonical' ? '' : 'none';
+            if (tab === 'review') loadKrStaged();
+            if (tab === 'canonical') loadKrCanonical();
+        };
+
+        const loadKrStaged = async () => {
+            try {
+                const res = await fetch(getApiUrl('/knowledge?stage=staged&limit=100'));
+                if (!res.ok) throw new Error('Failed');
+                const data = await res.json();
+                krStagedEntries = data.entries || [];
+                const badge = document.getElementById('kr-staged-count');
+                if (krStagedEntries.length > 0) {
+                    badge.textContent = krStagedEntries.length;
+                    badge.style.display = '';
+                } else {
+                    badge.style.display = 'none';
+                }
+                renderKrList('kr-review-list', krStagedEntries, true);
+            } catch (err) {
+                document.getElementById('kr-review-list').innerHTML = '<div style="color: var(--status-failed); font-size: 12px; padding: 12px;">Failed to load staged entries.</div>';
+            }
+        };
+
+        const loadKrCanonical = async () => {
+            try {
+                const res = await fetch(getApiUrl('/knowledge?stage=canonical&limit=100'));
+                if (!res.ok) throw new Error('Failed');
+                const data = await res.json();
+                krCanonicalEntries = data.entries || [];
+                renderKrList('kr-canonical-list', krCanonicalEntries, false);
+            } catch (err) {
+                document.getElementById('kr-canonical-list').innerHTML = '<div style="color: var(--status-failed); font-size: 12px; padding: 12px;">Failed to load canonical entries.</div>';
+            }
+        };
+
+        const renderKrList = (containerId, entries, showActions) => {
+            const list = document.getElementById(containerId);
+            if (!entries.length) {
+                list.innerHTML = `<div style="color: var(--text-secondary); font-size: 12px; padding: 12px; text-align: center;">No ${showActions ? 'staged' : 'canonical'} entries found.</div>`;
+                return;
+            }
+            list.innerHTML = entries.map(entry => {
+                const importance = Math.max(1, Math.min(5, Math.round(entry.importance || 3)));
+                const pLevel = 6 - importance;
+                const timeStr = entry.timestamp ? new Date(entry.timestamp).toLocaleDateString() : '';
+                const stageClass = showActions ? ' staged' : '';
+                const canonicalActionsHtml = !showActions ? `
+                    <div class="kr-actions">
+                        <button class="kr-btn share" onclick="krShare('${entry.id}')">SHARE</button>
+                    </div>` : '';
+                const actionsHtml = showActions ? `
+                    <div class="kr-actions">
+                        <button class="kr-btn approve" onclick="krPromote('${entry.id}')">APPROVE</button>
+                        <button class="kr-btn reject" onclick="krReject('${entry.id}')">REJECT</button>
+                        <button class="kr-btn edit" onclick="krToggleEdit('${entry.id}')">EDIT</button>
+                    </div>
+                    <div class="kr-edit-form" id="kr-edit-${entry.id}">
+                        <textarea class="kr-edit-input" id="kr-text-${entry.id}" rows="3">${escapeHtml(entry.text)}</textarea>
+                        <div class="kr-edit-row" style="margin-bottom: 6px;">
+                            <label>DOMAIN</label>
+                            <input class="kr-edit-input" style="margin-bottom:0" id="kr-domain-${entry.id}" value="${escapeHtml(entry.domain || '')}">
+                        </div>
+                        <div style="display:flex; gap:6px; justify-content:flex-end;">
+                            <button class="kr-btn edit" onclick="krSaveEdit('${entry.id}')">SAVE</button>
+                            <button class="kr-btn approve" onclick="krSaveAndPromote('${entry.id}')">SAVE & APPROVE</button>
+                        </div>
+                    </div>` : '';
+
+                return `
+                    <div class="kr-entry${stageClass}">
+                        <div class="kb-entry-header">
+                            <div class="kb-badges">
+                                <span class="kb-badge" style="background: rgba(245,158,11,0.1); color: #f59e0b; border: 1px solid rgba(245,158,11,0.2);">${escapeHtml(entry.stage || 'unknown')}</span>
+                                ${entry.category ? `<span class="kb-badge category">${escapeHtml(entry.category)}</span>` : ''}
+                                <span class="kb-badge" style="background: rgba(255,255,255,0.05); border: 1px solid rgba(255,255,255,0.1);">${escapeHtml(entry.domain || 'global')}</span>
+                                ${entry.shared ? '<span class="kb-badge" style="background: rgba(139,92,246,0.1); color: #a78bfa; border: 1px solid rgba(139,92,246,0.25);">SHARED</span>' : ''}
+                                <span style="font-size: 10px; color: var(--text-secondary);">${timeStr}</span>
+                            </div>
+                            <div style="display: flex; align-items: center; gap: 8px;">
+                                <span class="kb-priority p${pLevel}">P${pLevel}</span>
+                                ${!showActions ? `<button class="kb-delete" onclick="deleteKnowledge('${entry.id}')" title="Delete">x</button>` : ''}
+                            </div>
+                        </div>
+                        <div class="kb-text">${escapeHtml(entry.text)}</div>
+                        ${actionsHtml}
+                        ${canonicalActionsHtml}
+                    </div>`;
+            }).join('');
+        };
+
+        window.krPromote = async (id) => {
+            try {
+                const res = await fetch(getApiUrl(`/knowledge/${id}/promote`), { method: 'POST' });
+                if (!res.ok) throw new Error('Failed');
+                await loadKrStaged();
+            } catch (err) {
+                alert('Failed to promote entry');
+            }
+        };
+
+        window.krReject = async (id) => {
+            if (!confirm('Reject and delete this staged entry?')) return;
+            try {
+                const res = await fetch(getApiUrl(`/knowledge/${id}/reject`), { method: 'POST' });
+                if (!res.ok) throw new Error('Failed');
+                await loadKrStaged();
+            } catch (err) {
+                alert('Failed to reject entry');
+            }
+        };
+
+        window.krShare = async (id) => {
+            if (!confirm('Share this canonical entry to the shared Context Fabrica schema?')) return;
+            try {
+                const res = await fetch(getApiUrl(`/knowledge/${id}/share`), { method: 'POST' });
+                const data = await res.json().catch(() => ({}));
+                if (!res.ok || data.error) throw new Error(data.error || 'Failed');
+                await loadKrCanonical();
+                alert(`Shared to ${data.target_schema || 'shared Context Fabrica'}`);
+            } catch (err) {
+                alert(`Failed to share entry: ${err.message || 'Unknown error'}`);
+            }
+        };
+
+        window.krToggleEdit = (id) => {
+            const form = document.getElementById(`kr-edit-${id}`);
+            form.classList.toggle('visible');
+        };
+
+        window.krSaveEdit = async (id) => {
+            const text = document.getElementById(`kr-text-${id}`).value.trim();
+            const domain = document.getElementById(`kr-domain-${id}`).value.trim();
+            try {
+                const res = await fetch(getApiUrl(`/knowledge/${id}`), {
+                    method: 'PATCH',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ text: text || undefined, domain: domain || undefined })
+                });
+                if (!res.ok) throw new Error('Failed');
+                await loadKrStaged();
+            } catch (err) {
+                alert('Failed to update entry');
+            }
+        };
+
+        window.krSaveAndPromote = async (id) => {
+            await krSaveEdit(id);
+            await krPromote(id);
+        };
+
+        // Auto-load staged count when knowledge panel opens
+        const origToggleKnowledge = window.toggleKnowledgePanel;
+        window.toggleKnowledgePanel = async () => {
+            await origToggleKnowledge();
+            const content = document.getElementById('knowledge-content');
+            if (!content.classList.contains('collapsed')) {
+                loadKrStaged(); // load count badge
+            }
+        };
+
+        // Config Panel Logic
+        window.toggleConfigPanel = () => {
+            const content = document.getElementById('config-content');
+            const toggle = document.getElementById('config-toggle');
+            if (content.classList.contains('collapsed')) {
+                content.classList.remove('collapsed');
+                toggle.textContent = '(hide)';
+                loadConfig();
+            } else {
+                content.classList.add('collapsed');
+                toggle.textContent = '(show)';
+            }
+        };
+
+        window.loadConfig = async () => {
+            try {
+                const res = await fetch(getApiUrl('/config'));
+                if (!res.ok) throw new Error('Failed to fetch config');
+                const data = await res.json();
+                
+                if (data.claude) {
+                    if (data.claude.model) document.getElementById('config-claude-model').value = data.claude.model;
+                    if (data.claude.fallbackModel !== undefined) document.getElementById('config-claude-fallback').value = data.claude.fallbackModel;
+                    if (data.claude.maxAgents) document.getElementById('config-claude-slots').value = data.claude.maxAgents;
+                }
+                if (data.codex) {
+                    if (data.codex.model) document.getElementById('config-codex-model').value = data.codex.model;
+                    if (data.codex.effort) document.getElementById('config-codex-effort').value = data.codex.effort;
+                    if (data.codex.reviewEffort) document.getElementById('config-codex-review').value = data.codex.reviewEffort;
+                    if (data.codex.maxAgents) document.getElementById('config-codex-slots').value = data.codex.maxAgents;
+                }
+                if (data.ciAutoFix) {
+                    if (data.ciAutoFix.enabled !== undefined) document.getElementById('config-ci-enabled').value = String(data.ciAutoFix.enabled);
+                    if (data.ciAutoFix.maxCycles) document.getElementById('config-ci-maxcycles').value = data.ciAutoFix.maxCycles;
+                }
+            } catch (err) {
+                console.error('Error loading config:', err);
+            }
+        };
+
+        window.saveConfig = async () => {
+            const btn = document.getElementById('btn-save-config');
+            try {
+                btn.disabled = true;
+                btn.textContent = 'Saving...';
+                
+                const payload = {
+                    claude: {
+                        model: document.getElementById('config-claude-model').value,
+                        fallbackModel: document.getElementById('config-claude-fallback').value,
+                        maxAgents: parseInt(document.getElementById('config-claude-slots').value) || 10
+                    },
+                    codex: {
+                        model: document.getElementById('config-codex-model').value,
+                        effort: document.getElementById('config-codex-effort').value,
+                        reviewEffort: document.getElementById('config-codex-review').value,
+                        maxAgents: parseInt(document.getElementById('config-codex-slots').value) || 3
+                    },
+                    ciAutoFix: {
+                        enabled: document.getElementById('config-ci-enabled').value === 'true',
+                        maxCycles: parseInt(document.getElementById('config-ci-maxcycles').value) || 2
+                    }
+                };
+
+                const res = await fetch(getApiUrl('/config'), {
+                    method: 'PATCH',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify(payload)
+                });
+
+                if (!res.ok) throw new Error('Failed to save config');
+                
+                btn.textContent = 'Saved!';
+                setTimeout(() => {
+                    btn.textContent = 'Save';
+                    btn.disabled = false;
+                }, 2000);
+            } catch (err) {
+                console.error('Error saving config:', err);
+                btn.textContent = 'Error';
+                setTimeout(() => {
+                    btn.textContent = 'Save';
+                    btn.disabled = false;
+                }, 2000);
+            }
+        };
+
+        // Initialization & Polling
+        const init = () => {
+            const url = new URL(window.location.href);
+            const token = url.searchParams.get('token');
+            if (token) {
+                state.accessToken = token;
+                url.searchParams.delete('token');
+                window.history.replaceState({}, '', `${url.pathname}${url.search}${url.hash}`);
+            }
+
+            initMissionControl();
+            fetchMeta();
+            fetchTasks();
+            fetchAgentStatus();
+            fetchSystemStats();
+            fetchLastEvent();
+            fetchServiceHealth();
+            fetchBoard({ live: false });
+
+            setInterval(() => {
+                fetchBoard({ live: true });
+            }, 8000);
+
+            // Poll every 30 seconds
+            setInterval(() => {
+                fetchMeta();
+                fetchTasks();
+                fetchAgentStatus();
+                fetchSystemStats();
+                fetchLastEvent();
+                fetchServiceHealth();
+                fetchBoard({ live: false });
+                if (state.isDrawerOpen && state.selectedTaskId) {
+                    fetchTaskDetails(state.selectedTaskId);
+                }
+                const pgContent = document.getElementById('process-graph-content');
+                if (pgContent && !pgContent.classList.contains('collapsed')) {
+                    fetchChildActivities();
+                }
+            }, 30000);
+
+            // Reactive updates via server-sent events. Coalesces bursts into a
+            // single refresh; the polls above remain as a fallback if SSE drops.
+            try {
+                let sseRefreshTimer = null;
+                const scheduleSseRefresh = () => {
+                    if (sseRefreshTimer) return;
+                    sseRefreshTimer = setTimeout(() => {
+                        sseRefreshTimer = null;
+                        fetchBoard({ live: true });
+                        fetchLastEvent();
+                        if (state.isDrawerOpen && state.selectedTaskId) {
+                            fetchTaskDetails(state.selectedTaskId);
+                        }
+                    }, 400);
+                };
+                const es = new EventSource(getApiUrl('/stream'));
+                es.onmessage = () => scheduleSseRefresh();
+                // EventSource auto-reconnects on error; polling covers any gap.
+            } catch (e) {
+                /* EventSource unsupported — rely on polling */
+            }
+        };
+
+        // Start
+        init();

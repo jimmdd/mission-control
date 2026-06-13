@@ -523,6 +523,32 @@ function getDashboardHtml(): string | null {
   }
 }
 
+const STATIC_CONTENT_TYPES: Record<string, string> = {
+  ".css": "text/css; charset=utf-8",
+  ".js": "application/javascript; charset=utf-8",
+  ".map": "application/json; charset=utf-8",
+};
+
+// Serves a UI asset from public/. The path regex allows only a flat filename
+// with a known extension — no slashes, no "..", so directory traversal is
+// impossible. Returns true if it handled the request.
+function serveStaticAsset(res: ServerResponse, pathname: string): boolean {
+  const match = pathname.match(/^\/([A-Za-z0-9_-]+\.(css|js|map))$/);
+  if (!match) return false;
+  try {
+    const thisDir = dirname(fileURLToPath(import.meta.url));
+    const filePath = join(thisDir, "..", "public", match[1]);
+    if (!existsSync(filePath)) return false;
+    res.statusCode = 200;
+    res.setHeader("Content-Type", STATIC_CONTENT_TYPES[`.${match[2]}`] ?? "application/octet-stream");
+    res.setHeader("Cache-Control", "no-cache");
+    res.end(readFileSync(filePath, "utf-8"));
+    return true;
+  } catch {
+    return false;
+  }
+}
+
 function serveDashboard(res: ServerResponse): void {
   const html = getDashboardHtml();
   if (!html) {
@@ -618,6 +644,13 @@ export function createHandler(
       res.statusCode = 403;
       res.setHeader("Content-Type", "text/plain; charset=utf-8");
       res.end("Forbidden: cross-site request blocked");
+      return;
+    }
+
+    // Static UI assets (CSS/JS) are inert and contain no secrets, so they are
+    // served before the auth gate — a <script src> can't carry a token, and the
+    // dashboard HTML behind auth is what gates access to data.
+    if (method === "GET" && serveStaticAsset(res, pathname)) {
       return;
     }
 
