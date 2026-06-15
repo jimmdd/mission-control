@@ -38,6 +38,9 @@ type RenderKind =
   | "swarm-sessions"
   | "checkpoints"
   | "connections"
+  | "objectives"
+  | "objective"
+  | "pages"
   | "result";
 
 type SwarmRegistryEntry = Record<string, unknown> & {
@@ -529,6 +532,59 @@ function renderSwarmSessions(data: unknown): void {
   console.log(`Active registry entries: ${rows.length}`);
 }
 
+function renderObjectives(data: unknown): void {
+  const rows = asArray(data).map(o => ({
+    id: o.id,
+    status: o.status,
+    round: `${o.round ?? 0}/${o.max_rounds ?? "?"}`,
+    subtasks: o.subtasks_spawned ?? 0,
+    goal: truncate(o.goal ?? "", 64),
+    created: o.created_at ?? "",
+  }));
+  console.table(rows);
+  console.log(`Total objectives: ${rows.length}`);
+}
+
+function renderObjective(data: unknown): void {
+  if (!isRecord(data)) {
+    console.log(JSON.stringify(data, null, 2));
+    return;
+  }
+  printKV(data, ["id", "goal", "status", "round", "max_rounds", "subtasks_spawned", "max_subtasks", "anchor_task_id", "blocked_reason", "created_at", "updated_at"]);
+  const parseJson = (v: unknown) => {
+    if (typeof v !== "string" || !v.trim()) return null;
+    try { return JSON.parse(v); } catch { return v; }
+  };
+  const scope = parseJson(data.approved_scope) ?? parseJson(data.proposed_scope);
+  if (scope) {
+    console.log("\nscope:");
+    console.log(JSON.stringify(scope, null, 2));
+  }
+  const coverage = parseJson(data.coverage);
+  if (coverage) {
+    console.log("\ncoverage:");
+    console.log(JSON.stringify(coverage, null, 2));
+  }
+  if (Array.isArray(data.children) && data.children.length) {
+    console.log("\nsub-tasks:");
+    console.table(asArray(data.children).map(c => ({ id: c.id, status: c.status, type: c.task_type, title: truncate(c.title, 48) })));
+  }
+  if (isRecord(data.document)) {
+    console.log(`\ndocument: ${data.document.title} (${data.page_count ?? 0} pages)`);
+  }
+}
+
+function renderPages(data: unknown): void {
+  const rows = asArray(data).map(p => ({
+    slug: p.slug,
+    title: truncate(p.title ?? "", 48),
+    parent: p.parent_page_id ?? "",
+    bytes: typeof p.body_md === "string" ? p.body_md.length : 0,
+    updated: p.updated_at ?? "",
+  }));
+  console.table(rows);
+}
+
 function renderConnections(data: unknown): void {
   if (!isRecord(data)) {
     console.log(JSON.stringify(data, null, 2));
@@ -642,6 +698,15 @@ function outputValue(data: unknown, jsonMode: boolean, kind: RenderKind = "defau
       return;
     case "connections":
       renderConnections(data);
+      return;
+    case "objectives":
+      renderObjectives(data);
+      return;
+    case "objective":
+      renderObjective(data);
+      return;
+    case "pages":
+      renderPages(data);
       return;
     case "result":
       renderResult(data);
@@ -879,6 +944,13 @@ Commands:
   checkpoints resolve <id> --decision approve|reject|answer [--response TEXT]
 
   connections                  # agent runtime auth + connected sources
+
+  objectives create "<goal>" [--max-rounds N] [--max-subtasks N]   # autopilot
+  objectives list [--status STATUS]
+  objectives get <id>
+  objectives approve <id> [--decision approve|reject] [--scope-file f.json]
+  objectives pages <id>
+  objectives page <id> <slug>
 
   services health
   board [--limit N] [--offset N] [--since ISO] [--live true]
@@ -1229,6 +1301,63 @@ async function handleCheckpoints(args: ParsedArgs, jsonMode: boolean): Promise<v
   }
 }
 
+async function handleObjectives(args: ParsedArgs, jsonMode: boolean): Promise<void> {
+  const [action, id] = args.positionals;
+  switch (action ?? "list") {
+    case "list":
+      outputValue(await mcFetch("GET", `${API_PREFIX}/objectives${query({ status: flag(args, "status") })}`), jsonMode, "objectives");
+      return;
+    case "create": {
+      const goal = id ?? flag(args, "goal");
+      if (!goal) throw new Error('Usage: mc objectives create "<goal>" [--max-rounds N] [--max-subtasks N]');
+      const body: Record<string, unknown> = { goal };
+      if (flag(args, "max-rounds")) body.max_rounds = Number(flag(args, "max-rounds"));
+      if (flag(args, "max-subtasks")) body.max_subtasks = Number(flag(args, "max-subtasks"));
+      if (flag(args, "cost-cap")) body.cost_cap_usd = Number(flag(args, "cost-cap"));
+      outputValue(await mcFetch("POST", `${API_PREFIX}/objectives`, body), jsonMode, "objective");
+      return;
+    }
+    case "get":
+      if (!id) throw new Error("Usage: mc objectives get <id>");
+      outputValue(await mcFetch("GET", `${API_PREFIX}/objectives/${id}`), jsonMode, "objective");
+      return;
+    case "approve": {
+      if (!id) throw new Error("Usage: mc objectives approve <id> [--decision approve|reject] [--scope-file f.json]");
+      const body: Record<string, unknown> = { decision: flag(args, "decision") ?? "approve" };
+      const scopeFile = flag(args, "scope-file");
+      if (scopeFile) {
+        const raw = readFileSync(scopeFile, "utf-8");
+        try { body.scope = JSON.parse(raw); } catch { body.response = raw; }
+      }
+      outputValue(await mcFetch("POST", `${API_PREFIX}/objectives/${id}/approve`, body), jsonMode, "result");
+      return;
+    }
+    case "pages": {
+      if (!id) throw new Error("Usage: mc objectives pages <id>");
+      const doc = await mcFetch("GET", `${API_PREFIX}/objectives/${id}/document`);
+      outputValue(isRecord(doc) && Array.isArray(doc.pages) ? doc.pages : [], jsonMode, "pages");
+      return;
+    }
+    case "page": {
+      const slug = args.positionals[2];
+      if (!id || !slug) throw new Error("Usage: mc objectives page <id> <slug>");
+      const doc = await mcFetch("GET", `${API_PREFIX}/objectives/${id}/document`);
+      const document = isRecord(doc) && isRecord(doc.document) ? doc.document : null;
+      if (!document) throw new Error("No document for this objective yet");
+      const page = await mcFetch("GET", `${API_PREFIX}/documents/${document.id}/pages/${slug}`);
+      if (jsonMode) {
+        console.log(JSON.stringify(page, null, 2));
+      } else if (isRecord(page)) {
+        console.log(`# ${page.title}\n`);
+        console.log(typeof page.body_md === "string" ? page.body_md : "(empty)");
+      }
+      return;
+    }
+    default:
+      throw new Error("Unknown objectives command. Try: create, list, get, approve, pages, page");
+  }
+}
+
 async function run(): Promise<void> {
   const args = parseArgs(process.argv.slice(2));
   const jsonMode = hasFlag(args, "json");
@@ -1293,6 +1422,9 @@ async function run(): Promise<void> {
       return;
     case "connections":
       outputValue(await mcFetch("GET", `${API_PREFIX}/connections`), jsonMode, "connections");
+      return;
+    case "objectives":
+      await handleObjectives(subArgs, jsonMode);
       return;
     default:
       throw new Error(`Unknown command: ${command}`);

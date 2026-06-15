@@ -43,6 +43,16 @@ _DEFAULTS = {
     "routing_provider": "ollama",
     "verification_model": "minimax-m2.7:cloud",
     "verification_provider": "ollama",
+    # Autopilot roles — small/fast/cheap by default ("explore needs speed,
+    # not intelligence"). Override per-role in swarm-config.json "planner".
+    "scope_model": "gemini-2.5-flash",
+    "scope_provider": "gemini",
+    "explore_model": "gemini-2.5-flash",
+    "explore_provider": "gemini",
+    "synthesize_model": "gemini-2.5-flash",
+    "synthesize_provider": "gemini",
+    "gapcheck_model": "gemini-2.5-flash",
+    "gapcheck_provider": "gemini",
     "ollama_url": "http://localhost:11434",
     "max_step_retries": 2,
     "step_categories": {

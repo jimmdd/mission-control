@@ -2828,6 +2828,7 @@
             const token = url.searchParams.get('token');
             if (token) {
                 state.accessToken = token;
+                window.__MC_TOKEN__ = token; // expose for sibling panels (objectives.js)
                 url.searchParams.delete('token');
                 window.history.replaceState({}, '', `${url.pathname}${url.search}${url.hash}`);
             }

@@ -440,6 +440,59 @@ function rollUpDelegation(db: MissionControlDB, childId: string, events?: McEven
   }
 }
 
+type ResolveResult =
+  | { ok: true; checkpoint: unknown }
+  | { ok: false; code: number; error: string };
+
+// Resolve a pending checkpoint and resume its task once nothing else blocks it
+// on a human. Shared by the checkpoint-resolve route and objective approval.
+function resolveCheckpointAndResume(
+  db: MissionControlDB,
+  events: McEventBus,
+  checkpointId: string,
+  decisionRaw: string,
+  response?: string,
+): ResolveResult {
+  const existing = db.getCheckpoint(checkpointId);
+  if (!existing) return { ok: false, code: 404, error: "Checkpoint not found" };
+
+  const decisionMap: Record<string, "approved" | "rejected" | "answered"> = {
+    approve: "approved",
+    approved: "approved",
+    reject: "rejected",
+    rejected: "rejected",
+    answer: "answered",
+    answered: "answered",
+    choose: "answered",
+  };
+  const newStatus = decisionMap[decisionRaw.toLowerCase()];
+  if (!newStatus) return { ok: false, code: 400, error: "decision must be one of: approve, reject, answer" };
+
+  const resolved = db.resolveCheckpoint(checkpointId, newStatus, response);
+  if (!resolved) return { ok: false, code: 409, error: "Checkpoint is already resolved" };
+
+  const taskId = resolved.task_id;
+  db.createActivity({
+    task_id: taskId,
+    activity_type: "checkpoint_resolved",
+    message: response ? `Checkpoint ${newStatus}: ${response}` : `Checkpoint ${newStatus}.`,
+    metadata: JSON.stringify({ checkpoint_id: checkpointId, decision: newStatus }),
+  });
+
+  const task = db.getTask(taskId);
+  if (task && task.status === "on_hold" && db.countPendingCheckpoints(taskId) === 0) {
+    db.updateTask(taskId, { status: "inbox" });
+    db.upsertProgress(taskId, { state: "running", blocked_reason: null });
+    db.createActivity({
+      task_id: taskId,
+      activity_type: "status_changed",
+      message: "Checkpoint resolved — resuming task.",
+    });
+  }
+  events.emit("checkpoint_resolved", { taskId, checkpointId, decision: newStatus });
+  return { ok: true, checkpoint: resolved };
+}
+
 const API_PREFIX = "/api";
 
 function resolveApiRoutePath(pathname: string): string | null {
@@ -1251,60 +1304,15 @@ async function handleApiRequest(
           }
 
           if (segments.length === 3 && segments[2] === "resolve" && method === "POST") {
-            const checkpointId = segments[1];
-            const existing = db.getCheckpoint(checkpointId);
-            if (!existing) {
-              sendJson(res, 404, { error: "Checkpoint not found" });
-              return;
-            }
             const body = await parseBody(req);
-            const decisionRaw = isRecord(body) && typeof body.decision === "string" ? body.decision.toLowerCase() : "";
-            const decisionMap: Record<string, "approved" | "rejected" | "answered"> = {
-              approve: "approved",
-              approved: "approved",
-              reject: "rejected",
-              rejected: "rejected",
-              answer: "answered",
-              answered: "answered",
-              choose: "answered",
-            };
-            const newStatus = decisionMap[decisionRaw];
-            if (!newStatus) {
-              sendJson(res, 400, { error: "decision must be one of: approve, reject, answer" });
-              return;
-            }
+            const decisionRaw = isRecord(body) && typeof body.decision === "string" ? body.decision : "";
             const response = isRecord(body) && typeof body.response === "string" ? body.response : undefined;
-
-            const resolved = db.resolveCheckpoint(checkpointId, newStatus, response);
-            if (!resolved) {
-              sendJson(res, 409, { error: "Checkpoint is already resolved" });
+            const result = resolveCheckpointAndResume(db, events, segments[1], decisionRaw, response);
+            if (!result.ok) {
+              sendJson(res, result.code, { error: result.error });
               return;
             }
-
-            const taskId = resolved.task_id;
-            db.createActivity({
-              task_id: taskId,
-              activity_type: "checkpoint_resolved",
-              message: response
-                ? `Checkpoint ${newStatus}: ${response}`
-                : `Checkpoint ${newStatus}.`,
-              metadata: JSON.stringify({ checkpoint_id: checkpointId, decision: newStatus }),
-            });
-
-            // Resume the task once nothing else is blocking it on a human.
-            const task = db.getTask(taskId);
-            if (task && task.status === "on_hold" && db.countPendingCheckpoints(taskId) === 0) {
-              db.updateTask(taskId, { status: "inbox" });
-              db.upsertProgress(taskId, { state: "running", blocked_reason: null });
-              db.createActivity({
-                task_id: taskId,
-                activity_type: "status_changed",
-                message: "Checkpoint resolved — resuming task.",
-              });
-            }
-            events.emit("checkpoint_resolved", { taskId, checkpointId, decision: newStatus });
-
-            sendJson(res, 200, { checkpoint: resolved });
+            sendJson(res, 200, { checkpoint: result.checkpoint });
             return;
           }
         }
@@ -2050,6 +2058,209 @@ async function handleApiRequest(
           const result = await runPython([resolveRuntimePath("swarm", "connections.py")]);
           sendJson(res, 200, result);
           return;
+        }
+
+        if (segments[0] === "objectives") {
+          if (segments.length === 1 && method === "GET") {
+            sendJson(res, 200, db.listObjectives(url.searchParams.get("status") ?? undefined));
+            return;
+          }
+
+          if (segments.length === 1 && method === "POST") {
+            const body = await parseBody(req);
+            if (!isRecord(body) || typeof body.goal !== "string" || !body.goal.trim()) {
+              sendJson(res, 400, { error: "goal is required" });
+              return;
+            }
+            const goal = body.goal.trim();
+            const workspaceId = typeof body.workspace_id === "string" ? body.workspace_id : "default";
+            // Anchor task carries the objective on the board and gives it
+            // delegation/checkpoint/progress for free.
+            const anchor = db.createTask({
+              title: goal,
+              description: typeof body.description === "string" ? body.description : undefined,
+              status: "on_hold",
+              task_type: "investigation",
+              source: "autopilot",
+              workspace_id: workspaceId,
+            });
+            const objective = db.createObjective({
+              goal,
+              anchor_task_id: anchor.id,
+              workspace_id: workspaceId,
+              max_rounds: typeof body.max_rounds === "number" && Number.isFinite(body.max_rounds) ? Math.floor(body.max_rounds) : undefined,
+              max_subtasks: typeof body.max_subtasks === "number" && Number.isFinite(body.max_subtasks) ? Math.floor(body.max_subtasks) : undefined,
+              cost_cap_usd: typeof body.cost_cap_usd === "number" && Number.isFinite(body.cost_cap_usd) ? body.cost_cap_usd : undefined,
+              output_config: JSON.stringify(
+                isRecord(body.output_config) ? body.output_config : { knowledge: true, pages: true },
+              ),
+            });
+            db.createActivity({
+              task_id: anchor.id,
+              activity_type: "objective_created",
+              message: `Autopilot objective created: ${goal}`,
+              metadata: JSON.stringify({ objective_id: objective.id }),
+            });
+            events.emit("objective_created", { objectiveId: objective.id, anchorTaskId: anchor.id });
+            sendJson(res, 201, objective);
+            return;
+          }
+
+          if (segments.length >= 2) {
+            const objectiveId = segments[1];
+            const objective = db.getObjective(objectiveId);
+            if (!objective) {
+              sendJson(res, 404, { error: "Objective not found" });
+              return;
+            }
+
+            if (segments.length === 2 && method === "GET") {
+              const anchorId = objective.anchor_task_id;
+              const children = anchorId ? db.listChildTasks(anchorId) : [];
+              const document = db.getDocumentByObjective(objectiveId) ?? null;
+              const pages = document ? db.listPages(document.id) : [];
+              sendJson(res, 200, {
+                ...objective,
+                anchor_task: anchorId ? db.getTask(anchorId) ?? null : null,
+                children,
+                document,
+                page_count: pages.length,
+              });
+              return;
+            }
+
+            // PATCH /objectives/:id → autopilot persists loop state
+            if (segments.length === 2 && method === "PATCH") {
+              const body = await parseBody(req);
+              if (!isRecord(body)) {
+                sendJson(res, 400, { error: "Invalid request body" });
+                return;
+              }
+              const jsonField = (v: unknown): string | undefined =>
+                typeof v === "string" ? v : v !== undefined ? JSON.stringify(v) : undefined;
+              const updated = db.updateObjective(objectiveId, {
+                status: typeof body.status === "string" ? (body.status as never) : undefined,
+                proposed_scope: jsonField(body.proposed_scope),
+                approved_scope: jsonField(body.approved_scope),
+                coverage: jsonField(body.coverage),
+                round: typeof body.round === "number" ? body.round : undefined,
+                subtasks_spawned: typeof body.subtasks_spawned === "number" ? body.subtasks_spawned : undefined,
+                blocked_reason: typeof body.blocked_reason === "string" ? body.blocked_reason : undefined,
+              });
+              sendJson(res, 200, updated);
+              return;
+            }
+
+            // GET /objectives/:id/document → document + page tree
+            if (segments.length === 3 && segments[2] === "document" && method === "GET") {
+              const document = db.getDocumentByObjective(objectiveId);
+              if (!document) {
+                sendJson(res, 200, { document: null, pages: [] });
+                return;
+              }
+              sendJson(res, 200, { document, pages: db.listPages(document.id) });
+              return;
+            }
+
+            // POST /objectives/:id/document → create (or return existing) the wiki doc
+            if (segments.length === 3 && segments[2] === "document" && method === "POST") {
+              const existing = db.getDocumentByObjective(objectiveId);
+              if (existing) {
+                sendJson(res, 200, existing);
+                return;
+              }
+              const body = await parseBody(req);
+              const title = isRecord(body) && typeof body.title === "string" && body.title.trim() ? body.title.trim() : objective.goal;
+              const kind = isRecord(body) && typeof body.kind === "string" ? body.kind : "wiki";
+              const document = db.createDocument({
+                objective_id: objectiveId,
+                workspace_id: objective.workspace_id,
+                title,
+                kind,
+              });
+              sendJson(res, 201, document);
+              return;
+            }
+
+            // POST /objectives/:id/approve → resolve the pending scope checkpoint
+            if (segments.length === 3 && segments[2] === "approve" && method === "POST") {
+              if (!objective.anchor_task_id) {
+                sendJson(res, 400, { error: "Objective has no anchor task" });
+                return;
+              }
+              const pending = db
+                .listCheckpoints(objective.anchor_task_id)
+                .find((cp) => cp.status === "pending");
+              if (!pending) {
+                sendJson(res, 409, { error: "No pending scope checkpoint to approve" });
+                return;
+              }
+              const body = await parseBody(req);
+              const decision = isRecord(body) && typeof body.decision === "string" ? body.decision : "approve";
+              const response =
+                isRecord(body) && body.scope !== undefined
+                  ? JSON.stringify(body.scope)
+                  : isRecord(body) && typeof body.response === "string"
+                    ? body.response
+                    : undefined;
+              const result = resolveCheckpointAndResume(db, events, pending.id, decision, response);
+              if (!result.ok) {
+                sendJson(res, result.code, { error: result.error });
+                return;
+              }
+              events.emit("objective_scope_approved", { objectiveId, decision });
+              sendJson(res, 200, { success: true, checkpoint: result.checkpoint });
+              return;
+            }
+          }
+        }
+
+        if (segments[0] === "documents" && segments.length >= 2) {
+          const documentId = segments[1];
+          const document = db.getDocument(documentId);
+          if (!document) {
+            sendJson(res, 404, { error: "Document not found" });
+            return;
+          }
+
+          if (segments.length === 3 && segments[2] === "pages" && method === "GET") {
+            sendJson(res, 200, db.listPages(documentId));
+            return;
+          }
+
+          if (segments.length === 4 && segments[2] === "pages") {
+            const slug = segments[3];
+            if (method === "GET") {
+              const page = db.getPage(documentId, slug);
+              if (!page) {
+                sendJson(res, 404, { error: "Page not found" });
+                return;
+              }
+              sendJson(res, 200, page);
+              return;
+            }
+            if (method === "PUT") {
+              const body = await parseBody(req);
+              if (!isRecord(body) || typeof body.title !== "string" || !body.title.trim()) {
+                sendJson(res, 400, { error: "Page title is required" });
+                return;
+              }
+              const page = db.upsertPage(documentId, {
+                slug,
+                title: body.title.trim(),
+                body_md: typeof body.body_md === "string" ? body.body_md : undefined,
+                parent_page_id: typeof body.parent_page_id === "string" ? body.parent_page_id : undefined,
+                position: typeof body.position === "number" && Number.isFinite(body.position) ? Math.floor(body.position) : undefined,
+                source_record_ids: Array.isArray(body.source_record_ids)
+                  ? JSON.stringify(body.source_record_ids)
+                  : typeof body.source_record_ids === "string"
+                    ? body.source_record_ids
+                    : undefined,
+              });
+              sendJson(res, 200, page);
+              return;
+            }
+          }
         }
 
         sendJson(res, 404, { error: "Not found" });

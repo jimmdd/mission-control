@@ -285,6 +285,92 @@ export interface CreateCheckpointInput {
   options?: string;
 }
 
+export type ObjectiveStatus =
+  | "scoping"
+  | "awaiting_approval"
+  | "running"
+  | "paused"
+  | "blocked"
+  | "done"
+  | "failed";
+
+export interface ObjectiveRecord {
+  id: string;
+  goal: string;
+  status: ObjectiveStatus;
+  anchor_task_id: string | null;
+  workspace_id: string;
+  proposed_scope: string | null;
+  approved_scope: string | null;
+  round: number;
+  max_rounds: number;
+  max_subtasks: number;
+  subtasks_spawned: number;
+  cost_cap_usd: number | null;
+  output_config: string | null;
+  coverage: string | null;
+  blocked_reason: string | null;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface CreateObjectiveInput {
+  goal: string;
+  anchor_task_id?: string;
+  workspace_id?: string;
+  max_rounds?: number;
+  max_subtasks?: number;
+  cost_cap_usd?: number;
+  output_config?: string;
+}
+
+export interface UpdateObjectiveInput {
+  status?: ObjectiveStatus;
+  anchor_task_id?: string | null;
+  proposed_scope?: string | null;
+  approved_scope?: string | null;
+  round?: number;
+  max_rounds?: number;
+  max_subtasks?: number;
+  subtasks_spawned?: number;
+  cost_cap_usd?: number | null;
+  output_config?: string | null;
+  coverage?: string | null;
+  blocked_reason?: string | null;
+}
+
+export interface DocumentRecord {
+  id: string;
+  objective_id: string | null;
+  workspace_id: string;
+  title: string;
+  kind: string;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface DocumentPageRecord {
+  id: string;
+  document_id: string;
+  parent_page_id: string | null;
+  slug: string;
+  title: string;
+  body_md: string | null;
+  position: number;
+  source_record_ids: string | null;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface UpsertPageInput {
+  slug: string;
+  title: string;
+  body_md?: string | null;
+  parent_page_id?: string | null;
+  position?: number;
+  source_record_ids?: string | null;
+}
+
 const SCHEMA_SQL = `
 CREATE TABLE IF NOT EXISTS workspaces (
   id TEXT PRIMARY KEY,
@@ -415,6 +501,54 @@ CREATE TABLE IF NOT EXISTS task_checkpoints (
 
 CREATE INDEX IF NOT EXISTS idx_checkpoints_task ON task_checkpoints(task_id, created_at DESC);
 CREATE INDEX IF NOT EXISTS idx_checkpoints_status ON task_checkpoints(status);
+
+CREATE TABLE IF NOT EXISTS objectives (
+  id TEXT PRIMARY KEY,
+  goal TEXT NOT NULL,
+  status TEXT NOT NULL DEFAULT 'scoping' CHECK (status IN ('scoping', 'awaiting_approval', 'running', 'paused', 'blocked', 'done', 'failed')),
+  anchor_task_id TEXT REFERENCES tasks(id) ON DELETE SET NULL,
+  workspace_id TEXT DEFAULT 'default' REFERENCES workspaces(id),
+  proposed_scope TEXT,
+  approved_scope TEXT,
+  round INTEGER NOT NULL DEFAULT 0,
+  max_rounds INTEGER NOT NULL DEFAULT 3,
+  max_subtasks INTEGER NOT NULL DEFAULT 20,
+  subtasks_spawned INTEGER NOT NULL DEFAULT 0,
+  cost_cap_usd REAL,
+  output_config TEXT,
+  coverage TEXT,
+  blocked_reason TEXT,
+  created_at TEXT DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
+  updated_at TEXT DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))
+);
+
+CREATE TABLE IF NOT EXISTS documents (
+  id TEXT PRIMARY KEY,
+  objective_id TEXT REFERENCES objectives(id) ON DELETE CASCADE,
+  workspace_id TEXT DEFAULT 'default' REFERENCES workspaces(id),
+  title TEXT NOT NULL,
+  kind TEXT NOT NULL DEFAULT 'wiki',
+  created_at TEXT DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
+  updated_at TEXT DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))
+);
+
+CREATE TABLE IF NOT EXISTS document_pages (
+  id TEXT PRIMARY KEY,
+  document_id TEXT NOT NULL REFERENCES documents(id) ON DELETE CASCADE,
+  parent_page_id TEXT REFERENCES document_pages(id) ON DELETE CASCADE,
+  slug TEXT NOT NULL,
+  title TEXT NOT NULL,
+  body_md TEXT,
+  position INTEGER NOT NULL DEFAULT 0,
+  source_record_ids TEXT,
+  created_at TEXT DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
+  updated_at TEXT DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))
+);
+
+CREATE INDEX IF NOT EXISTS idx_objectives_status ON objectives(status);
+CREATE INDEX IF NOT EXISTS idx_documents_objective ON documents(objective_id);
+CREATE INDEX IF NOT EXISTS idx_pages_document ON document_pages(document_id, position);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_pages_slug ON document_pages(document_id, slug);
 CREATE INDEX IF NOT EXISTS idx_tasks_parent ON tasks(parent_task_id);
 CREATE UNIQUE INDEX IF NOT EXISTS idx_tasks_external_id ON tasks(external_id);
 `;
@@ -1372,6 +1506,150 @@ export class MissionControlDB {
     const map: Record<string, number> = {};
     for (const row of rows) map[row.tid] = row.n;
     return map;
+  }
+
+  // --- Objectives (autopilot) ---
+
+  createObjective(data: CreateObjectiveInput): ObjectiveRecord {
+    const id = randomUUID();
+    const now = new Date().toISOString();
+    this.db
+      .prepare(
+        `INSERT INTO objectives (id, goal, status, anchor_task_id, workspace_id, max_rounds, max_subtasks, cost_cap_usd, output_config, created_at, updated_at)
+         VALUES (?, ?, 'scoping', ?, ?, ?, ?, ?, ?, ?, ?)`,
+      )
+      .run(
+        id,
+        data.goal,
+        data.anchor_task_id ?? null,
+        data.workspace_id ?? "default",
+        data.max_rounds ?? 3,
+        data.max_subtasks ?? 20,
+        data.cost_cap_usd ?? null,
+        data.output_config ?? null,
+        now,
+        now,
+      );
+    return this.getObjective(id) as ObjectiveRecord;
+  }
+
+  getObjective(id: string): ObjectiveRecord | undefined {
+    return this.db.prepare("SELECT * FROM objectives WHERE id = ?").get(id) as ObjectiveRecord | undefined;
+  }
+
+  getObjectiveByAnchorTask(taskId: string): ObjectiveRecord | undefined {
+    return this.db.prepare("SELECT * FROM objectives WHERE anchor_task_id = ?").get(taskId) as
+      | ObjectiveRecord
+      | undefined;
+  }
+
+  listObjectives(status?: string): ObjectiveRecord[] {
+    if (status) {
+      return this.db
+        .prepare("SELECT * FROM objectives WHERE status = ? ORDER BY created_at DESC")
+        .all(status) as ObjectiveRecord[];
+    }
+    return this.db.prepare("SELECT * FROM objectives ORDER BY created_at DESC").all() as ObjectiveRecord[];
+  }
+
+  updateObjective(id: string, data: UpdateObjectiveInput): ObjectiveRecord | undefined {
+    const fields: Record<string, unknown> = {
+      status: data.status,
+      anchor_task_id: data.anchor_task_id,
+      proposed_scope: data.proposed_scope,
+      approved_scope: data.approved_scope,
+      round: data.round,
+      max_rounds: data.max_rounds,
+      max_subtasks: data.max_subtasks,
+      subtasks_spawned: data.subtasks_spawned,
+      cost_cap_usd: data.cost_cap_usd,
+      output_config: data.output_config,
+      coverage: data.coverage,
+      blocked_reason: data.blocked_reason,
+    };
+    const hasUpdates = Object.values(fields).some((value) => value !== undefined);
+    if (!hasUpdates) return this.getObjective(id);
+    const { sql, values } = this.buildDynamicUpdate(fields);
+    this.db.prepare(`UPDATE objectives SET ${sql} WHERE id = ?`).run(...values, id);
+    return this.getObjective(id);
+  }
+
+  // --- Documents / wiki pages ---
+
+  createDocument(data: { objective_id?: string; workspace_id?: string; title: string; kind?: string }): DocumentRecord {
+    const id = randomUUID();
+    const now = new Date().toISOString();
+    this.db
+      .prepare(
+        `INSERT INTO documents (id, objective_id, workspace_id, title, kind, created_at, updated_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?)`,
+      )
+      .run(id, data.objective_id ?? null, data.workspace_id ?? "default", data.title, data.kind ?? "wiki", now, now);
+    return this.db.prepare("SELECT * FROM documents WHERE id = ?").get(id) as DocumentRecord;
+  }
+
+  getDocument(id: string): DocumentRecord | undefined {
+    return this.db.prepare("SELECT * FROM documents WHERE id = ?").get(id) as DocumentRecord | undefined;
+  }
+
+  getDocumentByObjective(objectiveId: string): DocumentRecord | undefined {
+    return this.db
+      .prepare("SELECT * FROM documents WHERE objective_id = ? ORDER BY created_at ASC LIMIT 1")
+      .get(objectiveId) as DocumentRecord | undefined;
+  }
+
+  listPages(documentId: string): DocumentPageRecord[] {
+    return this.db
+      .prepare("SELECT * FROM document_pages WHERE document_id = ? ORDER BY position ASC, created_at ASC")
+      .all(documentId) as DocumentPageRecord[];
+  }
+
+  getPage(documentId: string, slug: string): DocumentPageRecord | undefined {
+    return this.db
+      .prepare("SELECT * FROM document_pages WHERE document_id = ? AND slug = ?")
+      .get(documentId, slug) as DocumentPageRecord | undefined;
+  }
+
+  upsertPage(documentId: string, data: UpsertPageInput): DocumentPageRecord {
+    const now = new Date().toISOString();
+    const existing = this.getPage(documentId, data.slug);
+    if (existing) {
+      this.db
+        .prepare(
+          `UPDATE document_pages SET title = ?, body_md = ?, parent_page_id = ?, position = ?, source_record_ids = ?, updated_at = ?
+           WHERE id = ?`,
+        )
+        .run(
+          data.title,
+          data.body_md ?? existing.body_md,
+          data.parent_page_id !== undefined ? data.parent_page_id : existing.parent_page_id,
+          data.position ?? existing.position,
+          data.source_record_ids !== undefined ? data.source_record_ids : existing.source_record_ids,
+          now,
+          existing.id,
+        );
+      return this.getPage(documentId, data.slug) as DocumentPageRecord;
+    }
+    const id = randomUUID();
+    this.db
+      .prepare(
+        `INSERT INTO document_pages (id, document_id, parent_page_id, slug, title, body_md, position, source_record_ids, created_at, updated_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      )
+      .run(
+        id,
+        documentId,
+        data.parent_page_id ?? null,
+        data.slug,
+        data.title,
+        data.body_md ?? null,
+        data.position ?? 0,
+        data.source_record_ids ?? null,
+        now,
+        now,
+      );
+    this.db.prepare("UPDATE documents SET updated_at = ? WHERE id = ?").run(now, documentId);
+    return this.getPage(documentId, data.slug) as DocumentPageRecord;
   }
 
   clearBlockingActivities(taskId: string): void {

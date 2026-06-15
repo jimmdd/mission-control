@@ -2546,6 +2546,14 @@ def run_once():
     process_in_progress_plans()
     process_review_tasks()
     process_human_escalations()
+
+    # Autopilot / Objective mode (fuzzy-goal autonomous runs). Best-effort —
+    # never let it break the core bridge loop.
+    try:
+        import autopilot
+        autopilot.process_objectives()
+    except Exception as e:
+        logging.error(f"autopilot loop error: {e}")
     # External review/ticket integrations should react to Mission Control state externally.
 
     # Signal whether an inbox task was claimed this cycle so the daemon can drain
