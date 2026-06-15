@@ -34,6 +34,7 @@ if str(SWARM_SCRIPTS_DIR) not in sys.path:
     sys.path.insert(0, str(SWARM_SCRIPTS_DIR))
 
 from context_fabrica_config import context_fabrica_dsn, make_context_fabrica_adapter
+import embeddings  # pluggable embedder (FastEmbed default; no API key)
 
 DEFAULT_LINEAR_CONFIG = {
     "label": "your-label",
@@ -401,7 +402,6 @@ BOT_COMMENT_MARKERS = [
 LIBRARIAN_DIR = MC_HOME / "librarian"
 GEMINI_FLASH = "gemini-2.5-flash"
 GEMINI_API_BASE = "https://generativelanguage.googleapis.com/v1beta"
-EMBEDDING_URL = "https://generativelanguage.googleapis.com/v1beta/models/gemini-embedding-001:embedContent"
 GEMINI_PRO = "gemini-2.5-pro"
 RESEARCH_DIR = MC_HOME / "swarm" / "research"
 SWARM_DIR = MC_HOME / "swarm"
@@ -611,18 +611,7 @@ def _distill_research(question: str, findings: str, repo_path: str) -> None:
         summary = findings.strip().split("\n\n")[0] if findings else ""
         text = f"Q: {question[:500]}\nA: {summary[:1500]}"
 
-        embed_payload = json.dumps({
-            "model": "models/gemini-embedding-001",
-            "content": {"parts": [{"text": text}]},
-        }).encode()
-        embed_req = urllib.request.Request(
-            EMBEDDING_URL,
-            data=embed_payload,
-            headers={"Content-Type": "application/json", "x-goog-api-key": api_key},
-            method="POST",
-        )
-        with urllib.request.urlopen(embed_req, timeout=15) as resp:
-            vector = json.loads(resp.read())["embedding"]["values"]
+        vector = embeddings.embed_text(text)
 
         scope = "global"
         domain = "general"
@@ -767,19 +756,9 @@ def _gather_librarian_context(question: str) -> str:
             context_parts.append(f"## Repo Index: {idx_file.stem}\n{content}")
             matched_repos.append((idx_file.parent.name, repo_name))
 
-    api_key = os.environ.get("GOOGLE_GENERATIVE_AI_API_KEY", "")
-    if api_key:
+    if True:
         try:
-            embed_payload = json.dumps({
-                "model": "models/gemini-embedding-001",
-                "content": {"parts": [{"text": question}]},
-            }).encode()
-            embed_req = urllib.request.Request(
-                EMBEDDING_URL,
-                data=embed_payload, headers={"Content-Type": "application/json", "x-goog-api-key": api_key}, method="POST",
-            )
-            with urllib.request.urlopen(embed_req, timeout=15) as resp:
-                vector = json.loads(resp.read())["embedding"]["values"]
+            vector = embeddings.embed_text(question)
 
             adapter = make_context_fabrica_adapter(bootstrap=True)
             results = adapter.search_chunks(vector, top_k=10)

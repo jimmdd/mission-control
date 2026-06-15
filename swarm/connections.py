@@ -159,10 +159,23 @@ def check_github():
     return _source("GitHub", "cli", "not_connected", "", "Run: gh auth login")
 
 
+def check_embedder():
+    try:
+        import embeddings
+        ok, reason = embeddings.available()
+        detail = f"{embeddings.provider()} ({embeddings.dimensions()}d)"
+        if ok:
+            return _source("Embeddings", "embedder", "connected", detail)
+        return _source("Embeddings", "embedder", "not_connected", detail, reason)
+    except Exception as e:
+        return _source("Embeddings", "embedder", "not_connected", "", str(e)[:80])
+
+
 def build_report():
     load_env()
     runtimes = [check_claude(), check_codex(), check_pi()]
     sources = check_mcp_sources()
+    sources.append(check_embedder())
     sources.append(check_linear())
     sources.append(check_github())
 

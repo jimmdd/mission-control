@@ -323,15 +323,37 @@ Mission Control uses the installed `context-fabrica` package directly, but it de
 
 ```bash
 CONTEXT_FABRICA_SCHEMA=mission_control
-CONTEXT_FABRICA_EMBEDDING_MODEL=gemini-embedding-001
-CONTEXT_FABRICA_EMBEDDING_DIMENSIONS=1536
+EMBEDDING_PROVIDER=fastembed          # fastembed | openai | ollama | gemini
+CONTEXT_FABRICA_EMBEDDING_DIMENSIONS=384
 CONTEXT_FABRICA_INCLUDE_EXISTING=true
 CONTEXT_FABRICA_EXISTING_SCHEMA=context_fabrica
 CONTEXT_FABRICA_EXISTING_EMBEDDER=fastembed
 CONTEXT_FABRICA_EXISTING_EMBEDDING_DIMENSIONS=384
 ```
 
-This avoids clobbering an existing Context Fabrica installation while still letting Mission Control read from it. Mission Control writes its own knowledge to `mission_control` with Gemini 1536-dimension embeddings, then also queries the existing `context_fabrica` schema read-only with the local embedder/dimension configured above. Sharing a write schema with a different embedding dimension can create pgvector dimension conflicts, so use separate schemas when changing models or dimensions.
+### Embeddings (pluggable, no key by default)
+
+Embeddings run through one pluggable module (`swarm/embeddings.py`). The default
+is **FastEmbed** — local, free, **no API key** (`BAAI/bge-small-en-v1.5`, 384
+dims) — so knowledge `inject` / `recall` / `reembed` work with zero credentials.
+Switch providers with `EMBEDDING_PROVIDER` (set `CONTEXT_FABRICA_EMBEDDING_DIMENSIONS`
+to match the model):
+
+| Provider | Key? | Model (default) | Dims |
+|---|---|---|---|
+| `fastembed` | none | `BAAI/bge-small-en-v1.5` (set `EMBEDDING_MODEL` for bge-base, 768) | 384 |
+| `openai` | `OPENAI_API_KEY` | `text-embedding-3-small` | 1536 |
+| `ollama` | none (local Ollama) | `nomic-embed-text` | 768 |
+| `gemini` | `GOOGLE_GENERATIVE_AI_API_KEY` | `gemini-embedding-001` | 1536 |
+
+Changing provider changes vector dimensions, so re-embed (`./mc knowledge reembed
+--force`) or recreate the `mission_control` schema. The default writes to
+`mission_control` (FastEmbed/384) and also reads the existing `context_fabrica`
+schema read-only — using FastEmbed for both keeps them consistent.
+
+Note: embeddings need no key, but **text generation** (triage, planner,
+autopilot scope/synthesis) still uses an LLM — configure a provider key or a
+local Ollama model for that.
 
 For existing-schema read-through, install the same local embedder dependency used to create that schema's vectors. The default assumes Context Fabrica's local FastEmbed/MiniLM path.
 
@@ -471,21 +493,24 @@ brew services start postgresql@17
 createdb context_fabrica
 psql -d context_fabrica -c "CREATE EXTENSION IF NOT EXISTS vector;"
 
-pip install context-fabrica
+pip install context-fabrica fastembed
 
 mkdir -p ~/.mission-control
 cat >> ~/.mission-control/.env << 'EOF'
 CONTEXT_FABRICA_DSN=postgresql://$(whoami)@localhost/context_fabrica
 CONTEXT_FABRICA_SCHEMA=mission_control
-CONTEXT_FABRICA_EMBEDDING_MODEL=gemini-embedding-001
-CONTEXT_FABRICA_EMBEDDING_DIMENSIONS=1536
+# Embeddings: FastEmbed is local and needs no API key (384 dims).
+EMBEDDING_PROVIDER=fastembed
+CONTEXT_FABRICA_EMBEDDING_DIMENSIONS=384
 CONTEXT_FABRICA_INCLUDE_EXISTING=true
 CONTEXT_FABRICA_EXISTING_SCHEMA=context_fabrica
 CONTEXT_FABRICA_EXISTING_EMBEDDER=fastembed
 CONTEXT_FABRICA_EXISTING_EMBEDDING_DIMENSIONS=384
 MISSION_CONTROL_GSD_BACKEND=core
-GOOGLE_GENERATIVE_AI_API_KEY=your-gemini-key
-ANTHROPIC_API_KEY=your-anthropic-key
+# Text generation (triage/planner/autopilot) still uses an LLM — set a key for
+# whichever provider you use, or point the planner at a local Ollama model.
+# ANTHROPIC_API_KEY=your-anthropic-key
+# GOOGLE_GENERATIVE_AI_API_KEY=your-gemini-key
 MISSION_CONTROL_URL=http://127.0.0.1:18900
 EOF
 ```
@@ -684,8 +709,9 @@ These can create tasks, sync comments, or react to review events, but the intern
 - **[context-fabrica](https://github.com/TaskForest/context-fabrica)** — knowledge storage and retrieval
 - **[@opengsd/gsd-core](https://github.com/open-gsd/gsd-core)** — current GSD planning and verification backend
 - **better-sqlite3** — local task database
-- **Gemini API** — embeddings and knowledge extraction
-- **Anthropic API** — planning and agent support
+- **FastEmbed** — local embeddings, no API key (default; pluggable)
+- **Anthropic / Gemini / Ollama** — text generation for planning, triage, and
+  autopilot (configurable; pick one)
 
 ---
 

@@ -91,19 +91,10 @@ def _make_adapter() -> PostgresPgvectorAdapter:
 
 # === Embedding ===
 
-def embed_text(text: str, api_key: str) -> List[float]:
-    payload = json.dumps(gemini_embedding_payload(text, model=EMBEDDING_MODEL)).encode()
-
-    req = urllib.request.Request(
-        EMBEDDING_URL,
-        data=payload,
-        headers={"Content-Type": "application/json", "x-goog-api-key": api_key},
-        method="POST",
-    )
-
-    with urllib.request.urlopen(req, timeout=30) as resp:
-        data = json.loads(resp.read())
-    return data["embedding"]["values"]
+def embed_text(text: str, api_key: str = "") -> List[float]:
+    # Routed through the pluggable embedder (FastEmbed by default; no API key).
+    import embeddings
+    return embeddings.embed_text(text)
 
 
 # === Gemini Distillation ===

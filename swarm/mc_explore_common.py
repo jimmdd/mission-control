@@ -84,17 +84,11 @@ def make_adapter() -> PostgresPgvectorAdapter:
 
 # === Gemini APIs ===
 
-def embed_text(text: str, api_key: str) -> List[float]:
-    payload = json.dumps(gemini_embedding_payload(text, model=EMBEDDING_MODEL)).encode()
-    req = urllib.request.Request(
-        EMBEDDING_URL,
-        data=payload,
-        headers={"Content-Type": "application/json", "x-goog-api-key": api_key},
-        method="POST",
-    )
-    with urllib.request.urlopen(req, timeout=30) as resp:
-        data = json.loads(resp.read())
-    return data["embedding"]["values"]
+def embed_text(text: str, api_key: str = "") -> List[float]:
+    # Routed through the pluggable embedder (FastEmbed by default; no API key).
+    # `api_key` is accepted for backward compatibility and ignored.
+    import embeddings
+    return embeddings.embed_text(text)
 
 
 def call_gemini(prompt: str, api_key: str, max_tokens: int = 4096, model: str = "gemini-2.5-flash") -> Optional[str]:

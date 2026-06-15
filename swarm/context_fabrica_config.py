@@ -17,8 +17,10 @@ from context_fabrica.storage import PostgresPgvectorAdapter
 
 DEFAULT_SCHEMA = "mission_control"
 DEFAULT_EXISTING_SCHEMA = "context_fabrica"
-DEFAULT_EMBEDDING_MODEL = "gemini-embedding-001"
-DEFAULT_EMBEDDING_DIMENSIONS = 1536
+# Default embedder is FastEmbed (local, no API key) at 384 dims. Override via
+# EMBEDDING_PROVIDER + CONTEXT_FABRICA_EMBEDDING_DIMENSIONS for openai/gemini.
+DEFAULT_EMBEDDING_MODEL = "BAAI/bge-small-en-v1.5"
+DEFAULT_EMBEDDING_DIMENSIONS = 384
 DEFAULT_EXISTING_EMBEDDER = "fastembed"
 DEFAULT_EXISTING_EMBEDDING_DIMENSIONS = 384
 GEMINI_API_BASE = "https://generativelanguage.googleapis.com/v1beta"

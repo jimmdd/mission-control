@@ -49,19 +49,10 @@ def get_gemini_key() -> str:
     return key
 
 
-def embed_text(text: str, api_key: str) -> List[float]:
-    payload = json.dumps(gemini_embedding_payload(text, model=EMBEDDING_MODEL)).encode()
-
-    req = urllib.request.Request(
-        EMBEDDING_URL,
-        data=payload,
-        headers={"Content-Type": "application/json", "x-goog-api-key": api_key},
-        method="POST",
-    )
-
-    with urllib.request.urlopen(req, timeout=30) as resp:
-        data = json.loads(resp.read())
-    return data["embedding"]["values"]
+def embed_text(text: str, api_key: str = "") -> List[float]:
+    # Routed through the pluggable embedder (FastEmbed by default; no API key).
+    import embeddings
+    return embeddings.embed_text(text)
 
 
 def _make_adapter() -> PostgresPgvectorAdapter:
@@ -181,9 +172,10 @@ def scope_to_domain(scope: str) -> str:
 
 
 def cmd_inject(args):
-    api_key = get_gemini_key()
-    if not api_key:
-        print(json.dumps({"error": "No Gemini API key"}))
+    import embeddings
+    ok, reason = embeddings.available()
+    if not ok:
+        print(json.dumps({"error": f"Embedder unavailable: {reason}"}))
         sys.exit(1)
 
     scope = args.scope or build_scope(args.project or "", args.repo or "")
@@ -295,9 +287,10 @@ def cmd_doctor(args):
 
 
 def cmd_reembed(args):
-    api_key = get_gemini_key()
-    if not api_key:
-        print(json.dumps({"error": "No Gemini API key"}))
+    import embeddings
+    ok, reason = embeddings.available()
+    if not ok:
+        print(json.dumps({"error": f"Embedder unavailable: {reason}"}))
         sys.exit(1)
 
     schema = args.schema or context_fabrica_schema()
@@ -331,7 +324,7 @@ def cmd_reembed(args):
 
 
 def _recall_primary(query: str, domains: list[str], top_k: int) -> list[dict]:
-    vector = embed_text(query, get_gemini_key())
+    vector = embed_text(query)
     adapter = _make_adapter()
     rows: list[dict] = []
     for domain in domains:

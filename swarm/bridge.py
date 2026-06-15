@@ -335,20 +335,10 @@ KNOWLEDGE_MAX_CHARS = 2000
 
 
 def _embed_query(text: str) -> Optional[List[float]]:
-    api_key = os.environ.get("GOOGLE_GENERATIVE_AI_API_KEY", "")
-    if not api_key:
-        return None
+    # Routed through the pluggable embedder (FastEmbed by default; no API key).
     try:
-        payload = json.dumps(gemini_embedding_payload(text, model=EMBEDDING_MODEL)).encode()
-        req = urllib.request.Request(
-            EMBEDDING_URL,
-            data=payload,
-            headers={"Content-Type": "application/json", "x-goog-api-key": api_key},
-            method="POST",
-        )
-        with urllib.request.urlopen(req, timeout=15) as resp:
-            data = json.loads(resp.read())
-        return data["embedding"]["values"]
+        import embeddings
+        return embeddings.embed_text(text)
     except Exception as e:
         logging.warning(f"Embedding query failed: {e}")
         return None
