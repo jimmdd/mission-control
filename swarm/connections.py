@@ -159,6 +159,26 @@ def check_github():
     return _source("GitHub", "cli", "not_connected", "", "Run: gh auth login")
 
 
+def check_knowledge_store():
+    # Knowledge memory needs PostgreSQL + pgvector + context-fabrica. It is
+    # optional — Mission Control runs without it — so report it as a source the
+    # user can enable, not a hard requirement.
+    if not os.environ.get("CONTEXT_FABRICA_DSN"):
+        return _source("Knowledge store", "postgres", "not_connected", "optional",
+                       "Add PostgreSQL + pgvector for cross-session knowledge memory")
+    try:
+        import mc_explore_common as mx  # imports context_fabrica
+        adapter = mx.make_adapter()
+        with adapter.connect() as conn:  # type: ignore[attr-defined]
+            with conn.cursor() as cur:
+                cur.execute("SELECT 1")
+                cur.fetchone()
+        return _source("Knowledge store", "postgres", "connected", "PostgreSQL reachable")
+    except Exception as e:
+        return _source("Knowledge store", "postgres", "not_connected", str(e)[:80],
+                       "Start PostgreSQL or fix CONTEXT_FABRICA_DSN")
+
+
 def check_embedder():
     try:
         import embeddings
@@ -176,6 +196,7 @@ def build_report():
     runtimes = [check_claude(), check_codex(), check_pi()]
     sources = check_mcp_sources()
     sources.append(check_embedder())
+    sources.append(check_knowledge_store())
     sources.append(check_linear())
     sources.append(check_github())
 

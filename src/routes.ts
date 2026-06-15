@@ -1,4 +1,4 @@
-import { readFileSync, writeFileSync, existsSync, readdirSync } from "node:fs";
+import { readFileSync, writeFileSync, existsSync, readdirSync, mkdirSync } from "node:fs";
 import { join, dirname } from "node:path";
 import { homedir, cpus, totalmem, freemem, loadavg } from "node:os";
 import { fileURLToPath } from "node:url";
@@ -1874,7 +1874,7 @@ async function handleApiRequest(
             if (body.repo) args.push("--repo", String(body.repo));
             if (body.scope) args.push("--scope", String(body.scope));
 
-            const result = await runPython(args);
+            const result = await runKnowledgePython(args);
             sendJson(res, 201, result);
             return;
           }
@@ -1886,7 +1886,7 @@ async function handleApiRequest(
             // If stage filter requested, use review script for stage-aware listing
             if (stage) {
               const reviewScript = resolveRuntimePath("swarm", "knowledge-review.py");
-              const result = await runPython([reviewScript, "list", "--stage", stage, "--limit", limit]);
+              const result = await runKnowledgePython([reviewScript, "list", "--stage", stage, "--limit", limit]);
               sendJson(res, 200, result);
               return;
             }
@@ -1902,13 +1902,13 @@ async function handleApiRequest(
               if (repo) args.push("--repo", repo);
             }
 
-            const result = await runPython(args);
+            const result = await runKnowledgePython(args);
             sendJson(res, 200, result);
             return;
           }
 
           if (segments.length === 2 && segments[1] === "doctor" && method === "GET") {
-            const result = await runPython([knowledgeScript, "doctor"]);
+            const result = await runKnowledgePython([knowledgeScript, "doctor"]);
             sendJson(res, 200, result);
             return;
           }
@@ -1926,7 +1926,7 @@ async function handleApiRequest(
             if (project) args.push("--project", project);
             if (repo) args.push("--repo", repo);
             if (domain) args.push("--domain", domain);
-            const result = await runPython(args);
+            const result = await runKnowledgePython(args);
             sendJson(res, 200, result);
             return;
           }
@@ -1939,7 +1939,7 @@ async function handleApiRequest(
             if (typeof payload.dimensions === "number" && Number.isFinite(payload.dimensions)) args.push("--dimensions", String(payload.dimensions));
             if (typeof payload.limit === "number" && Number.isFinite(payload.limit)) args.push("--limit", String(payload.limit));
             if (payload.force === true) args.push("--force");
-            const result = await runPython(args);
+            const result = await runKnowledgePython(args);
             sendJson(res, 200, result);
             return;
           }
@@ -2000,7 +2000,7 @@ async function handleApiRequest(
           if (segments.length === 2 && method === "DELETE") {
             const entryId = segments[1];
             const args = [knowledgeScript, "delete", "--id", entryId];
-            const result = await runPython(args);
+            const result = await runKnowledgePython(args);
             db.createEvent({
               type: "knowledge_deleted",
               message: `Knowledge entry deleted: ${entryId}`,
@@ -2014,19 +2014,19 @@ async function handleApiRequest(
           const reviewScript = resolveRuntimePath("swarm", "knowledge-review.py");
 
           if (segments.length === 3 && segments[0] === "knowledge" && segments[2] === "promote" && method === "POST") {
-            const result = await runPython([reviewScript, "promote", "--id", segments[1]]);
+            const result = await runKnowledgePython([reviewScript, "promote", "--id", segments[1]]);
             sendJson(res, 200, result);
             return;
           }
 
           if (segments.length === 3 && segments[0] === "knowledge" && segments[2] === "share" && method === "POST") {
-            const result = await runPython([reviewScript, "share", "--id", segments[1]]);
+            const result = await runKnowledgePython([reviewScript, "share", "--id", segments[1]]);
             sendJson(res, 200, result);
             return;
           }
 
           if (segments.length === 3 && segments[0] === "knowledge" && segments[2] === "reject" && method === "POST") {
-            const result = await runPython([reviewScript, "reject", "--id", segments[1]]);
+            const result = await runKnowledgePython([reviewScript, "reject", "--id", segments[1]]);
             sendJson(res, 200, result);
             return;
           }
@@ -2040,7 +2040,7 @@ async function handleApiRequest(
             const args = [reviewScript, "update", "--id", segments[1]];
             if (typeof body.text === "string" && body.text.trim()) args.push("--text", body.text);
             if (typeof body.domain === "string" && body.domain.trim()) args.push("--domain", body.domain);
-            const result = await runPython(args);
+            const result = await runKnowledgePython(args);
             sendJson(res, 200, result);
             return;
           }
@@ -2058,6 +2058,55 @@ async function handleApiRequest(
           const result = await runPython([resolveRuntimePath("swarm", "connections.py")]);
           sendJson(res, 200, result);
           return;
+        }
+
+        if (segments[0] === "settings" && segments.length === 1) {
+          if (method === "GET") {
+            // Report which known settings are configured (booleans only — never
+            // return secret values) plus the feature each unlocks.
+            const env = readEnvConfig();
+            const isSet = (key: string) => Boolean((env[key] ?? process.env[key] ?? "").trim());
+            sendJson(res, 200, {
+              configured: Object.fromEntries(SETTABLE_KEYS.map(k => [k, isSet(k)])),
+              features: {
+                generation: isSet("ANTHROPIC_API_KEY") || isSet("OPENAI_API_KEY") || isSet("GOOGLE_GENERATIVE_AI_API_KEY"),
+                knowledgeStore: isSet("CONTEXT_FABRICA_DSN"),
+                linear: isSet("LINEAR_API_KEY"),
+                notifications: isSet("MISSION_CONTROL_NOTIFY_WEBHOOK"),
+              },
+              keys: SETTABLE_KEYS,
+            });
+            return;
+          }
+          if (method === "POST" || method === "PATCH") {
+            const body = await parseBody(req);
+            if (!isRecord(body)) {
+              sendJson(res, 400, { error: "Expected a JSON object of settings" });
+              return;
+            }
+            const updates: Record<string, string> = {};
+            const rejected: string[] = [];
+            for (const [key, value] of Object.entries(body)) {
+              if (!SETTABLE_KEYS.includes(key)) {
+                rejected.push(key);
+                continue;
+              }
+              if (typeof value === "string" || typeof value === "number") {
+                updates[key] = String(value);
+              }
+            }
+            if (Object.keys(updates).length === 0) {
+              sendJson(res, 400, { error: "No settable keys provided", rejected, allowed: SETTABLE_KEYS });
+              return;
+            }
+            writeEnvConfig(updates);
+            db.createEvent({
+              type: "settings_updated",
+              message: `Settings updated: ${Object.keys(updates).join(", ")}`,
+            });
+            sendJson(res, 200, { success: true, updated: Object.keys(updates), rejected });
+            return;
+          }
         }
 
         if (segments[0] === "objectives") {
@@ -2274,6 +2323,18 @@ async function handleApiRequest(
           sendJson(res, 413, { error: message });
           return;
         }
+        // Knowledge not set up → guide the user instead of a scary 500.
+        // Mission Control runs fine without it; knowledge memory is opt-in.
+        const setupRequired = (error as { setupRequired?: string })?.setupRequired;
+        if (setupRequired) {
+          sendJson(res, 503, {
+            error: "Knowledge store not available",
+            setupRequired,
+            hint: "Knowledge memory needs Python 3.10+ and PostgreSQL + pgvector. Add them in Settings, or run the core without it.",
+            detail: (error as { detail?: string })?.detail ?? message.slice(0, 300),
+          });
+          return;
+        }
         logger.error(`mission-control routes error: ${message}`);
         sendJson(res, 500, { error: message });
       }
@@ -2344,6 +2405,71 @@ function runClaude(prompt: string, timeout = 120000): Promise<string> {
 
 export async function getConnectionsReport(): Promise<Record<string, unknown>> {
   return runPython([resolveRuntimePath("swarm", "connections.py")]);
+}
+
+// Keys the Settings UI may write to ~/.mission-control/.env. Allowlisted so the
+// endpoint can never set arbitrary environment (e.g. PATH).
+const SETTABLE_KEYS = [
+  "ANTHROPIC_API_KEY",
+  "OPENAI_API_KEY",
+  "GOOGLE_GENERATIVE_AI_API_KEY",
+  "EMBEDDING_PROVIDER",
+  "EMBEDDING_MODEL",
+  "CONTEXT_FABRICA_EMBEDDING_DIMENSIONS",
+  "CONTEXT_FABRICA_DSN",
+  "CONTEXT_FABRICA_SCHEMA",
+  "LINEAR_API_KEY",
+  "MISSION_CONTROL_NOTIFY_WEBHOOK",
+];
+
+function envFilePath(): string {
+  const mcHome = process.env.MC_HOME ?? join(homedir(), ".mission-control");
+  return join(mcHome, ".env");
+}
+
+function readEnvConfig(): Record<string, string> {
+  const out: Record<string, string> = {};
+  try {
+    const path = envFilePath();
+    if (!existsSync(path)) return out;
+    for (const line of readFileSync(path, "utf-8").split("\n")) {
+      const trimmed = line.trim();
+      if (!trimmed || trimmed.startsWith("#") || !trimmed.includes("=")) continue;
+      const eq = trimmed.indexOf("=");
+      out[trimmed.slice(0, eq).trim()] = trimmed.slice(eq + 1).trim();
+    }
+  } catch {
+    // ignore — treated as empty config
+  }
+  return out;
+}
+
+function writeEnvConfig(updates: Record<string, string>): void {
+  const path = envFilePath();
+  mkdirSync(dirname(path), { recursive: true });
+  const lines = existsSync(path) ? readFileSync(path, "utf-8").split("\n") : [];
+  for (const [key, value] of Object.entries(updates)) {
+    const idx = lines.findIndex(l => l.trim().startsWith(`${key}=`));
+    const line = `${key}=${value}`;
+    if (idx >= 0) lines[idx] = line;
+    else lines.push(line);
+  }
+  writeFileSync(path, lines.filter(l => l.trim() !== "").join("\n") + "\n", { mode: 0o600 });
+}
+
+// Knowledge memory is optional (needs Python 3.10+ + PostgreSQL + context-fabrica).
+// Any failure here means "not set up yet" — tag it so the API returns a helpful
+// 503 instead of a scary 500/traceback. The core runs fine without it.
+async function runKnowledgePython(args: string[]): Promise<Record<string, unknown>> {
+  try {
+    return await runPython(args);
+  } catch (err) {
+    const detail = err instanceof Error ? err.message : String(err);
+    const tagged = new Error("Knowledge store not available");
+    (tagged as Error & { setupRequired?: string; detail?: string }).setupRequired = "knowledge_store";
+    (tagged as Error & { setupRequired?: string; detail?: string }).detail = detail.slice(0, 400);
+    throw tagged;
+  }
 }
 
 function runPython(args: string[]): Promise<Record<string, unknown>> {

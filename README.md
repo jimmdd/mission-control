@@ -474,7 +474,32 @@ real time and lets them coordinate:
 
 ## Setup
 
-### Prerequisites
+Mission Control starts with **zero configuration** — `npm install && npm start`
+gives you the dashboard, tasks, board, checkpoints, agent coordination, and the
+autopilot/objectives flow on a local SQLite database, no keys or services
+required. Optional features are enabled from the dashboard **Settings** panel
+(⚙) or `./mc setup` when you want them:
+
+| Feature | Needs | How to enable |
+|---|---|---|
+| Core (tasks, board, objectives, checkpoints) | nothing | works out of the box |
+| Embeddings | nothing (FastEmbed, local) | default; `pip install fastembed` |
+| Autopilot / triage **generation** | one LLM key (or local Ollama) | paste a key in Settings |
+| Knowledge memory (cross-session recall) | Python 3.10+ · PostgreSQL + pgvector · context-fabrica | add the DSN in Settings |
+| Agent runtimes (Claude/Codex/Pi) | the CLI installed + logged in | `./mc setup` |
+
+If an optional dependency is missing, the related endpoints return a friendly
+"set this up" response (HTTP 503) instead of failing — the rest keeps working.
+
+### Quick start (zero-config)
+
+```bash
+npm install
+npm start
+# open http://localhost:18900  → click ⚙ SETTINGS to add a model key when ready
+```
+
+### Full prerequisites (for knowledge memory + the swarm runtime)
 
 - Node.js 22+
 - PostgreSQL 17 + pgvector
