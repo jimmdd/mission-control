@@ -1,9 +1,10 @@
 #!/usr/bin/env node
 
 import { execFile, spawn } from "node:child_process";
-import { existsSync, readFileSync } from "node:fs";
+import { existsSync, readFileSync, writeFileSync, mkdirSync } from "node:fs";
 import { homedir } from "node:os";
-import { join } from "node:path";
+import { join, dirname } from "node:path";
+import { fileURLToPath } from "node:url";
 import { createInterface } from "node:readline/promises";
 import { stdin as input, stdout as outputStream } from "node:process";
 
@@ -944,6 +945,7 @@ Commands:
   checkpoints resolve <id> --decision approve|reject|answer [--response TEXT]
 
   connections                  # agent runtime auth + connected sources
+  setup                        # interactive: fill missing keys / log in runtimes
 
   objectives create "<goal>" [--max-rounds N] [--max-subtasks N]   # autopilot
   objectives list [--status STATUS]
@@ -1358,6 +1360,90 @@ async function handleObjectives(args: ParsedArgs, jsonMode: boolean): Promise<vo
   }
 }
 
+function setEnvVar(key: string, value: string): void {
+  const envPath = join(MC_HOME, ".env");
+  mkdirSync(MC_HOME, { recursive: true });
+  const lines = existsSync(envPath) ? readFileSync(envPath, "utf-8").split("\n") : [];
+  const idx = lines.findIndex(l => l.startsWith(`${key}=`));
+  if (idx >= 0) lines[idx] = `${key}=${value}`;
+  else lines.push(`${key}=${value}`);
+  writeFileSync(envPath, lines.filter(l => l.trim() !== "").join("\n") + "\n");
+}
+
+async function runProbe(): Promise<Record<string, unknown>> {
+  const repoRoot = join(dirname(fileURLToPath(import.meta.url)), "..");
+  const script = join(repoRoot, "swarm", "connections.py");
+  const py = process.env.MC_PYTHON_BIN ?? "python3";
+  const out = await execFileText(py, [script], 60000);
+  return JSON.parse(out);
+}
+
+function loginCommand(runtime: string): string[] | null {
+  if (runtime === "claude") return ["claude", "auth", "login"];
+  if (runtime === "codex") return ["codex", "login"];
+  if (runtime === "pi") return ["pi", "config"];
+  return null;
+}
+
+async function handleSetup(): Promise<void> {
+  if (!input.isTTY || !outputStream.isTTY) {
+    throw new Error("mc setup is interactive — run it in a terminal.");
+  }
+  console.log("Mission Control setup — checking what's ready…\n");
+  let report: Record<string, unknown>;
+  try {
+    report = await runProbe();
+  } catch (e) {
+    throw new Error(`Could not run the readiness probe: ${e instanceof Error ? e.message : String(e)}`);
+  }
+
+  const runtimes = asArray(report.runtimes);
+  console.log("Agent runtimes:");
+  for (const r of runtimes) {
+    const ok = r.installed && r.authenticated;
+    console.log(`  ${ok ? "✓" : "✗"} ${r.name}: ${r.detail || (r.installed ? "" : "not installed")}`);
+    if (r.installed && !r.authenticated) {
+      const cmd = loginCommand(String(r.name));
+      if (cmd) {
+        const yes = await askChoice(`    log in with \`${cmd.join(" ")}\` now?`, ["yes", "no"], "yes");
+        if (yes === "yes") await runInteractive(cmd[0], cmd.slice(1)).catch(err => console.error(`    failed: ${err.message}`));
+      }
+    }
+  }
+
+  console.log("\nSources:");
+  for (const s of asArray(report.sources)) {
+    if (s.status === "connected") {
+      console.log(`  ✓ ${s.name}: ${s.detail ?? ""}`);
+      continue;
+    }
+    const fix = s.fix ? ` — ${s.fix}` : "";
+    console.log(`  ✗ ${s.name}: ${s.detail || s.status}${fix}`);
+    if (s.name === "Linear") {
+      if (await askChoice("    set LINEAR_API_KEY now?", ["yes", "no"], "no") === "yes") {
+        const k = await ask("    LINEAR_API_KEY");
+        if (k) { setEnvVar("LINEAR_API_KEY", k); console.log("    saved to ~/.mission-control/.env"); }
+      }
+    } else if (s.name === "GitHub") {
+      if (await askChoice("    run `gh auth login` now?", ["yes", "no"], "no") === "yes") {
+        await runInteractive("gh", ["auth", "login"]).catch(err => console.error(`    failed: ${err.message}`));
+      }
+    } else if (s.kind === "mcp") {
+      console.log(`    → connect in Claude (e.g. \`claude mcp add …\`) or authenticate the ${s.name} MCP server.`);
+    }
+  }
+
+  console.log("\nText generation (triage / planner / autopilot) needs an LLM key, or a local Ollama model.");
+  const gen = await askChoice("Set a generation key now?", ["anthropic", "openai", "gemini", "skip"], "skip");
+  const genKey: Record<string, string> = { anthropic: "ANTHROPIC_API_KEY", openai: "OPENAI_API_KEY", gemini: "GOOGLE_GENERATIVE_AI_API_KEY" };
+  if (gen in genKey) {
+    const k = await ask(`  ${genKey[gen]}`);
+    if (k) { setEnvVar(genKey[gen], k); console.log("  saved to ~/.mission-control/.env"); }
+  }
+
+  console.log("\nSetup complete. Verify any time with `mc connections`.");
+}
+
 async function run(): Promise<void> {
   const args = parseArgs(process.argv.slice(2));
   const jsonMode = hasFlag(args, "json");
@@ -1422,6 +1508,9 @@ async function run(): Promise<void> {
       return;
     case "connections":
       outputValue(await mcFetch("GET", `${API_PREFIX}/connections`), jsonMode, "connections");
+      return;
+    case "setup":
+      await handleSetup();
       return;
     case "objectives":
       await handleObjectives(subArgs, jsonMode);

@@ -569,10 +569,12 @@ It detects:
   from `claude mcp list`, plus API-key/CLI integrations (Linear, GitHub).
 
 See the full picture any time with `./mc connections` or `GET /api/connections`.
-Connecting a source is done where it lives — log in with the runtime CLI
-(`claude auth login`), add an MCP server (`claude mcp add …`), or set an API key
-(`LINEAR_API_KEY`) — and Mission Control reflects it. Set
-`MISSION_CONTROL_SKIP_READINESS=1` to skip the startup probe.
+
+Run **`./mc setup`** for an interactive walkthrough that fills the gaps: it
+probes readiness, then offers to log in each runtime (`claude auth login`, etc.),
+paste missing API keys (written to `~/.mission-control/.env`), and points you at
+MCP sources to connect. Set `MISSION_CONTROL_SKIP_READINESS=1` to skip the
+startup probe.
 
 Mission Control binds to `127.0.0.1` by default. For normal local use, no token
 is required. If you expose it beyond localhost, set one shared token:

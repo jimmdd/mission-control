@@ -109,7 +109,7 @@ server.listen(PORT, HOST, () => {
         const connected = sources.filter((s) => s.status === "connected").length;
         console.log(`[mc] readiness: runtimes ${ready}/${runtimes.length} (${rt}) · sources ${connected}/${sources.length} connected`);
         const needs = sources.filter((s) => s.status !== "connected").map((s) => s.name);
-        if (needs.length) console.log(`[mc] not connected: ${needs.join(", ")} — run \`mc connections\` for details`);
+        if (needs.length) console.log(`[mc] not connected: ${needs.join(", ")} — run \`mc setup\` to fix`);
       })
       .catch(() => {
         console.log("[mc] readiness check skipped (connections probe unavailable)");
