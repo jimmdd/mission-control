@@ -99,11 +99,26 @@ def _source(name, kind, status, detail="", fix=""):
 #   "claude.ai Notion: https://mcp.notion.com/mcp - ✔ Connected"
 #   "claude.ai Google Drive: https://... - ! Needs authentication"
 #   "pencil: /path/to/server --flag - ✘ Failed to connect"
+#   "plugin:posthog:posthog: https://mcp.posthog.com/mcp (HTTP) - ! Needs authentication"
+def _friendly_mcp_name(name_part):
+    """Turn a raw server id into a readable name. Plugin servers come through as
+    `plugin:<plugin>:<server>`; show the server segment (e.g. 'posthog')."""
+    name = re.sub(r"^claude\.ai\s+", "", name_part.strip())
+    if name.startswith("plugin:"):
+        segments = [s for s in name.split(":") if s and s != "plugin"]
+        if segments:
+            return segments[-1]
+    return name
+
+
 def parse_mcp_line(line):
     line = line.strip()
-    if not line or ":" not in line or " - " not in line:
+    # The name/value separator before the URL or command is ": " (colon-space);
+    # split on that rather than the first ":", since names can contain colons
+    # (e.g. "plugin:posthog:posthog").
+    if not line or ": " not in line or " - " not in line:
         return None
-    name_part, rest = line.split(":", 1)
+    name_part, rest = line.split(": ", 1)
     _, _, status_text = rest.rpartition(" - ")
     status_text = status_text.strip()
     low = status_text.lower()
@@ -115,8 +130,7 @@ def parse_mcp_line(line):
         status = "error"
     else:
         status = "unknown"
-    name = re.sub(r"^claude\.ai\s+", "", name_part.strip())
-    return _source(name, "mcp", status, detail=status_text)
+    return _source(_friendly_mcp_name(name_part), "mcp", status, detail=status_text)
 
 
 def parse_mcp_list(output):
@@ -222,6 +236,8 @@ def _selftest():
         "claude.ai Google Drive: https://drivemcp.googleapis.com/mcp/v1 - ! Needs authentication\n"
         "claude.ai Notion: https://mcp.notion.com/mcp - ✔ Connected\n"
         "pencil: /path/to/server --app x - ✘ Failed to connect\n"
+        "plugin:posthog:posthog: https://mcp.posthog.com/mcp (HTTP) - ! Needs authentication\n"
+        "plugin:linear:linear: https://mcp.linear.app/mcp (HTTP) - ✔ Connected\n"
     )
     parsed = parse_mcp_list(sample)
     by_name = {s["name"]: s["status"] for s in parsed}
@@ -229,6 +245,8 @@ def _selftest():
         "Google Drive": "needs_auth",
         "Notion": "connected",
         "pencil": "error",
+        "posthog": "needs_auth",
+        "linear": "connected",
     }, by_name
     print("selftest OK")
 
