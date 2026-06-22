@@ -2279,6 +2279,8 @@
 .mc-set-field { margin-bottom: 10px; }
 .mc-set-field label { display: block; font-size: 11px; color: var(--text-secondary, #aaa); margin-bottom: 4px; }
 .mc-set-row { display: flex; gap: 6px; }
-.mc-set-row input { flex: 1; background: var(--bg-card, #14141c); border: 1px solid var(--border-color, #2a2a35); color: var(--text-primary, #eee); border-radius: 4px; padding: 6px 8px; font-size: 12px; }
+.mc-set-row input, .mc-set-row select { flex: 1; min-width: 0; background: var(--bg-card, #14141c); border: 1px solid var(--border-color, #2a2a35); color: var(--text-primary, #eee); border-radius: 4px; padding: 6px 8px; font-size: 12px; }
+.mc-set-row select { appearance: none; -webkit-appearance: none; cursor: pointer; padding-right: 26px; background-image: linear-gradient(45deg, transparent 50%, var(--text-secondary, #aaa) 50%), linear-gradient(135deg, var(--text-secondary, #aaa) 50%, transparent 50%); background-position: calc(100% - 14px) 52%, calc(100% - 9px) 52%; background-size: 5px 5px, 5px 5px; background-repeat: no-repeat; }
+.mc-set-row select option { background: var(--bg-card, #14141c); color: var(--text-primary, #eee); }
 .mc-set-btn { background: rgba(0,224,199,0.12); color: var(--accent, #00e0c7); border: 1px solid var(--accent, #00e0c7); border-radius: 4px; padding: 6px 12px; cursor: pointer; font-size: 12px; }
 .mc-set-empty { color: var(--text-secondary, #888); font-size: 12px; }
