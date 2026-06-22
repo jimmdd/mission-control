@@ -101,14 +101,16 @@ def _source(name, kind, status, detail="", fix=""):
 #   "pencil: /path/to/server --flag - ✘ Failed to connect"
 #   "plugin:posthog:posthog: https://mcp.posthog.com/mcp (HTTP) - ! Needs authentication"
 def _friendly_mcp_name(name_part):
-    """Turn a raw server id into a readable name. Plugin servers come through as
-    `plugin:<plugin>:<server>`; show the server segment (e.g. 'posthog')."""
+    """Turn a raw server id into a readable, clearly-sourced name. These all come
+    from `claude mcp list`, so prefix `claude mcp/` to distinguish them from
+    Mission Control's own sources (e.g. the native Linear API-key integration).
+    Plugin servers arrive as `plugin:<plugin>:<server>`; show the server segment."""
     name = re.sub(r"^claude\.ai\s+", "", name_part.strip())
     if name.startswith("plugin:"):
         segments = [s for s in name.split(":") if s and s != "plugin"]
         if segments:
-            return segments[-1]
-    return name
+            name = segments[-1]
+    return f"claude mcp/{name}"
 
 
 def parse_mcp_line(line):
@@ -242,11 +244,11 @@ def _selftest():
     parsed = parse_mcp_list(sample)
     by_name = {s["name"]: s["status"] for s in parsed}
     assert by_name == {
-        "Google Drive": "needs_auth",
-        "Notion": "connected",
-        "pencil": "error",
-        "posthog": "needs_auth",
-        "linear": "connected",
+        "claude mcp/Google Drive": "needs_auth",
+        "claude mcp/Notion": "connected",
+        "claude mcp/pencil": "error",
+        "claude mcp/posthog": "needs_auth",
+        "claude mcp/linear": "connected",
     }, by_name
     print("selftest OK")
 
