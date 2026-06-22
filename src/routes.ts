@@ -2066,8 +2066,10 @@ async function handleApiRequest(
             // return secret values) plus the feature each unlocks.
             const env = readEnvConfig();
             const isSet = (key: string) => Boolean((env[key] ?? process.env[key] ?? "").trim());
+            const valueOf = (key: string) => (env[key] ?? process.env[key] ?? "").trim();
             sendJson(res, 200, {
               configured: Object.fromEntries(SETTABLE_KEYS.map(k => [k, isSet(k)])),
+              values: Object.fromEntries(VALUE_KEYS.map(k => [k, valueOf(k)])),
               features: {
                 generation: isSet("ANTHROPIC_API_KEY") || isSet("OPENAI_API_KEY") || isSet("GOOGLE_GENERATIVE_AI_API_KEY") || isSet("OPENROUTER_API_KEY"),
                 knowledgeStore: isSet("CONTEXT_FABRICA_DSN"),
@@ -2420,8 +2422,13 @@ const SETTABLE_KEYS = [
   "CONTEXT_FABRICA_DSN",
   "CONTEXT_FABRICA_SCHEMA",
   "LINEAR_API_KEY",
+  "LINEAR_INTERACTION",
   "MISSION_CONTROL_NOTIFY_WEBHOOK",
 ];
+
+// Non-secret settings whose current value is safe to return to the UI (so a
+// dropdown can show the active selection). Secret keys never expose values.
+const VALUE_KEYS = ["LINEAR_INTERACTION"];
 
 function envFilePath(): string {
   const mcHome = process.env.MC_HOME ?? join(homedir(), ".mission-control");

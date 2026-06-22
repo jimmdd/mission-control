@@ -56,7 +56,7 @@ def load_linear_config() -> Dict[str, str]:
 
     linear = data.get("linear", {})
     if isinstance(linear, dict):
-        for key in ("label", "triageLabel", "mentionTag", "botName"):
+        for key in ("label", "triageLabel", "mentionTag", "botName", "interaction"):
             value = linear.get(key)
             if isinstance(value, str) and value.strip():
                 config[key] = value.strip()
@@ -68,6 +68,24 @@ LINEAR_LABEL = LINEAR_CONFIG["label"]
 LINEAR_TRIAGE_LABEL = LINEAR_CONFIG.get("triageLabel", "")
 LINEAR_MENTION_TAG = LINEAR_CONFIG["mentionTag"]
 LINEAR_BOT_NAME = LINEAR_CONFIG["botName"]
+
+# How much Mission Control is allowed to write back to Linear. Reads/intake
+# (importing labeled issues as tasks) always happen; this only gates writes.
+#   intake  — one-way import only; never post to Linear  (safe default)
+#   updates — also post progress / "done" comments back to the issue
+#   full    — also reply to @mention questions in issue threads
+# Resolved from LINEAR_INTERACTION env (UI Settings) → swarm-config linear.interaction → "intake".
+INTERACTION_INTAKE, INTERACTION_UPDATES, INTERACTION_FULL = 0, 1, 2
+_INTERACTION_ALIASES = {
+    "intake": 0, "read_only": 0, "readonly": 0, "import": 0, "off": 0,
+    "updates": 1, "update": 1, "comment": 1, "comments": 1,
+    "full": 2, "all": 2,
+}
+
+
+def _interaction_level() -> int:
+    raw = os.environ.get("LINEAR_INTERACTION") or LINEAR_CONFIG.get("interaction") or "intake"
+    return _INTERACTION_ALIASES.get(str(raw).strip().lower(), INTERACTION_INTAKE)
 BOT_REPLY_PREFIX = f"{LINEAR_MENTION_TAG} **{LINEAR_BOT_NAME}**"
 
 
@@ -130,10 +148,18 @@ def save_state(state: dict):
 
 
 def linear_query(query: str, variables: Optional[dict] = None) -> dict:
-    """Execute a Linear GraphQL query."""
+    """Execute a Linear GraphQL query.
+
+    Write mutations are suppressed below the "updates" interaction level, so an
+    "intake"-only configuration can never post comments or modify Linear.
+    """
     api_key = os.environ.get("LINEAR_API_KEY", "")
     if not api_key:
         raise RuntimeError("LINEAR_API_KEY not set")
+
+    if query.lstrip().lower().startswith("mutation") and _interaction_level() < INTERACTION_UPDATES:
+        logging.info("  [linear interaction=intake] skipping write-back to Linear")
+        return {}
 
     payload = json.dumps({"query": query, "variables": variables or {}}).encode()
     req = urllib.request.Request(
@@ -779,6 +805,9 @@ def _gather_librarian_context(question: str) -> str:
 def answer_question(issue_id: str, comment: dict, issue_title: str,
                     state: dict) -> bool:
     """Two-tier answer: simple → Gemini Pro inline, complex → spawned research agent."""
+    if _interaction_level() < INTERACTION_FULL:
+        logging.info("  [linear interaction<full] skipping @mention reply")
+        return False
     api_key = os.environ.get("GOOGLE_GENERATIVE_AI_API_KEY", "")
     if not api_key:
         logging.warning("  No Gemini API key — cannot answer mention-tagged question")

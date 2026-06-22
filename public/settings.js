@@ -56,6 +56,12 @@
       title: "Integrations (optional)",
       fields: [
         { key: "LINEAR_API_KEY", label: "Linear API key", secret: true },
+        { key: "LINEAR_INTERACTION", label: "Linear interaction level", type: "select", default: "intake",
+          options: [
+            { value: "intake", label: "Intake only — import issues, never write back" },
+            { value: "updates", label: "Updates — also post progress / done comments" },
+            { value: "full", label: "Full — also reply to @mention questions" },
+          ] },
         { key: "MISSION_CONTROL_NOTIFY_WEBHOOK", label: "Notification webhook URL", secret: false },
       ],
     },
@@ -106,9 +112,25 @@
       readiness = rows.join("");
     }
 
+    const values = (state.settings && state.settings.values) || {};
+
     const sections = SECTIONS.map((sec) => {
       const fields = sec.fields.map((f) => {
         const isSet = configured[f.key];
+        if (f.type === "select") {
+          const current = values[f.key] || f.default || (f.options[0] && f.options[0].value);
+          const opts = f.options.map((o) =>
+            `<option value="${esc(o.value)}"${o.value === current ? " selected" : ""}>${esc(o.label)}</option>`
+          ).join("");
+          return `
+          <div class="mc-set-field">
+            <label>● ${esc(f.label)}</label>
+            <div class="mc-set-row">
+              <select id="mc-set-${esc(f.key)}">${opts}</select>
+              <button class="mc-set-btn" data-save="${esc(f.key)}">Save</button>
+            </div>
+          </div>`;
+        }
         return `
           <div class="mc-set-field">
             <label>${isSet ? "● " : "○ "}${esc(f.label)}</label>
