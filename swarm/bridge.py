@@ -34,6 +34,7 @@ from planner import (
     _get_config as get_planner_config,
     _call_openrouter,
     call_openrouter_fallback,
+    _post_json_with_retry,
 )
 from gsd_backend import (
     backend_label,
@@ -559,14 +560,15 @@ def call_gemini(prompt: str, max_tokens: int = 2048, model: Optional[str] = None
         headers={"Content-Type": "application/json", "x-goog-api-key": api_key},
     )
 
-    try:
-        with urllib.request.urlopen(req, timeout=120) as resp:
-            data = json.loads(resp.read())
+    # Retry Gemini on rate-limit/transient errors before paying for OpenRouter.
+    data = _post_json_with_retry(req, label=f"Gemini triage ({model})")
+    if data is not None:
+        try:
             return data["candidates"][0]["content"]["parts"][0]["text"]
-    except Exception as e:
-        logging.error(f"Gemini API error ({model}): {e}")
-        # Gemini failed — fall back to OpenRouter (returns None if unavailable).
-        return call_openrouter_fallback(prompt, model=model, max_tokens=max_tokens)
+        except (KeyError, IndexError) as e:
+            logging.error(f"Gemini triage ({model}) unexpected response shape: {e}")
+    # Gemini exhausted retries — fall back to OpenRouter (None if unavailable).
+    return call_openrouter_fallback(prompt, model=model, max_tokens=max_tokens)
 
 
 # === Librarian ===

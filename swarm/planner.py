@@ -16,6 +16,7 @@ import json
 import logging
 import os
 import re
+import time
 import urllib.error
 import urllib.request
 from datetime import datetime, timezone
@@ -108,6 +109,39 @@ ANTHROPIC_API_URL = "https://api.anthropic.com/v1/messages"
 GEMINI_API_URL = "https://generativelanguage.googleapis.com/v1beta"
 OPENROUTER_API_URL = "https://openrouter.ai/api/v1/chat/completions"
 
+# Transient/rate-limit HTTP codes worth retrying before giving up on a provider.
+_RETRYABLE_HTTP = {408, 429, 500, 502, 503, 504}
+
+
+def _post_json_with_retry(req, *, timeout: int = 120, label: str = "LLM",
+                          max_retries: int = 3, base_delay: float = 2.0) -> Optional[dict]:
+    """POST a urllib Request with exponential backoff on rate-limit/transient
+    errors (so we exhaust the free provider before falling back). Returns the
+    parsed JSON dict, or None once retries are spent (caller then falls back)."""
+    delay = base_delay
+    for attempt in range(max_retries + 1):
+        try:
+            with urllib.request.urlopen(req, timeout=timeout) as resp:
+                return json.loads(resp.read())
+        except urllib.error.HTTPError as e:
+            retryable = e.code in _RETRYABLE_HTTP
+            if retryable and attempt < max_retries:
+                logging.warning(f"{label} HTTP {e.code} — retry {attempt + 1}/{max_retries} in {delay:.0f}s")
+                time.sleep(delay)
+                delay = min(delay * 2, 30)
+                continue
+            logging.error(f"{label} HTTP {e.code}: {e}")
+            return None
+        except Exception as e:  # timeouts, connection resets, etc.
+            if attempt < max_retries:
+                logging.warning(f"{label} error ({e}) — retry {attempt + 1}/{max_retries} in {delay:.0f}s")
+                time.sleep(delay)
+                delay = min(delay * 2, 30)
+                continue
+            logging.error(f"{label} failed: {e}")
+            return None
+    return None
+
 
 def _call_openrouter(prompt: str, model: str = "", system: str = "", max_tokens: int = 4096) -> Optional[str]:
     """Call a model via OpenRouter (OpenAI-compatible chat completions API)."""
@@ -142,12 +176,13 @@ def _call_openrouter(prompt: str, model: str = "", system: str = "", max_tokens:
         },
     )
 
+    data = _post_json_with_retry(req, label=f"OpenRouter ({model})")
+    if data is None:
+        return None
     try:
-        with urllib.request.urlopen(req, timeout=120) as resp:
-            data = json.loads(resp.read())
-            return data["choices"][0]["message"]["content"]
-    except Exception as e:
-        logging.error(f"OpenRouter API call failed ({model}): {e}")
+        return data["choices"][0]["message"]["content"]
+    except (KeyError, IndexError) as e:
+        logging.error(f"OpenRouter ({model}) unexpected response shape: {e}")
         return None
 
 
@@ -248,12 +283,13 @@ def _call_gemini(prompt: str, model: str = "", system: str = "", max_tokens: int
         headers={"Content-Type": "application/json", "x-goog-api-key": api_key},
     )
 
+    data = _post_json_with_retry(req, label=f"Gemini ({model})")
+    if data is None:
+        return None
     try:
-        with urllib.request.urlopen(req, timeout=120) as resp:
-            data = json.loads(resp.read())
-            return data["candidates"][0]["content"]["parts"][0]["text"]
-    except Exception as e:
-        logging.error(f"Gemini API call failed ({model}): {e}")
+        return data["candidates"][0]["content"]["parts"][0]["text"]
+    except (KeyError, IndexError) as e:
+        logging.error(f"Gemini ({model}) unexpected response shape: {e}")
         return None
 
 

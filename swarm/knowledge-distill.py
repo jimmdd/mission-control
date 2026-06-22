@@ -38,7 +38,7 @@ from context_fabrica_config import (
     make_context_fabrica_adapter,
 )
 from gsd_backend import planning_dir_name as gsd_planning_dir_name
-from planner import _call_openrouter, call_openrouter_fallback
+from planner import _call_openrouter, call_openrouter_fallback, _post_json_with_retry
 
 # === Config ===
 
@@ -116,26 +116,24 @@ def call_gemini(prompt: str, api_key: str) -> str:
     # Route to OpenRouter when configured, keeping all distill call sites unchanged.
     if _distill_provider() == "openrouter":
         return _call_openrouter(prompt, model=model, max_tokens=4096) or ""
-    # Gemini primary, with OpenRouter as automatic backup on any failure.
-    try:
-        url = f"{GEMINI_API_BASE}/models/{model}:generateContent"
-        payload = json.dumps({
-            "contents": [{"parts": [{"text": prompt}]}],
-            "generationConfig": {"temperature": 0.2, "maxOutputTokens": 4096},
-        }).encode()
-
-        req = urllib.request.Request(
-            url, data=payload,
-            headers={"Content-Type": "application/json", "x-goog-api-key": api_key},
-            method="POST",
-        )
-
-        with urllib.request.urlopen(req, timeout=60) as resp:
-            data = json.loads(resp.read())
-        return data["candidates"][0]["content"]["parts"][0]["text"]
-    except Exception as e:
-        logging.warning(f"Gemini distill call failed: {e}")
-        return call_openrouter_fallback(prompt, model=model, max_tokens=4096) or ""
+    # Gemini primary (with backoff retry), OpenRouter as automatic backup.
+    url = f"{GEMINI_API_BASE}/models/{model}:generateContent"
+    payload = json.dumps({
+        "contents": [{"parts": [{"text": prompt}]}],
+        "generationConfig": {"temperature": 0.2, "maxOutputTokens": 4096},
+    }).encode()
+    req = urllib.request.Request(
+        url, data=payload,
+        headers={"Content-Type": "application/json", "x-goog-api-key": api_key},
+        method="POST",
+    )
+    data = _post_json_with_retry(req, label=f"Gemini distill ({model})")
+    if data is not None:
+        try:
+            return data["candidates"][0]["content"]["parts"][0]["text"]
+        except (KeyError, IndexError) as e:
+            logging.warning(f"Gemini distill ({model}) unexpected response shape: {e}")
+    return call_openrouter_fallback(prompt, model=model, max_tokens=4096) or ""
 
 
 # === Complexity Detection ===

@@ -105,12 +105,14 @@ def call_gemini(prompt: str, api_key: str, max_tokens: int = 4096, model: str = 
         data=payload,
         headers={"Content-Type": "application/json", "x-goog-api-key": api_key},
     )
+    from planner import _post_json_with_retry  # shared backoff retry
+    data = _post_json_with_retry(req, label=f"Gemini ({model})")
+    if data is None:
+        return None
     try:
-        with urllib.request.urlopen(req, timeout=120) as resp:
-            data = json.loads(resp.read())
-            return data["candidates"][0]["content"]["parts"][0]["text"]
-    except Exception as e:
-        logging.error(f"Gemini API error: {e}")
+        return data["candidates"][0]["content"]["parts"][0]["text"]
+    except (KeyError, IndexError) as e:
+        logging.error(f"Gemini ({model}) unexpected response shape: {e}")
         return None
 
 
