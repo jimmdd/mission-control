@@ -42,6 +42,7 @@
         { key: "ANTHROPIC_API_KEY", label: "Anthropic API key", secret: true },
         { key: "OPENAI_API_KEY", label: "OpenAI API key", secret: true },
         { key: "GOOGLE_GENERATIVE_AI_API_KEY", label: "Gemini API key", secret: true },
+        { key: "OPENROUTER_API_KEY", label: "OpenRouter API key", secret: true },
       ],
     },
     {

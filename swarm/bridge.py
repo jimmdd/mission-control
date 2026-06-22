@@ -32,6 +32,8 @@ from planner import (
     update_step_progress, get_next_steps, build_step_prompt,
     get_completed_steps_summary, is_plan_complete, classify_step,
     _get_config as get_planner_config,
+    _call_openrouter,
+    call_openrouter_fallback,
 )
 from gsd_backend import (
     backend_label,
@@ -295,6 +297,7 @@ def _load_triage_config() -> dict:
     defaults = {
         "triage_model": "gemini-2.5-flash",
         "triage_model_deep": "gemini-2.5-pro",
+        "triage_provider": "gemini",          # gemini | openrouter
         "embedding_model": "gemini-embedding-001",
     }
     if SWARM_CONFIG_PATH.exists():
@@ -534,9 +537,13 @@ def recall_knowledge(repos: List[dict], query: str, top_k: int = KNOWLEDGE_MAX_R
 def call_gemini(prompt: str, max_tokens: int = 2048, model: Optional[str] = None) -> Optional[str]:
     if model is None:
         model = _triage_model()
+    # Route to OpenRouter when configured, keeping all triage call sites unchanged.
+    if _load_triage_config().get("triage_provider") == "openrouter":
+        return _call_openrouter(prompt, model=model, max_tokens=max_tokens)
     api_key = os.environ.get("GOOGLE_GENERATIVE_AI_API_KEY", "")
     if not api_key:
-        return None
+        # No Gemini key — try the OpenRouter backup before giving up.
+        return call_openrouter_fallback(prompt, model=model, max_tokens=max_tokens)
 
     url = (
         "https://generativelanguage.googleapis.com/v1beta/"
@@ -558,7 +565,8 @@ def call_gemini(prompt: str, max_tokens: int = 2048, model: Optional[str] = None
             return data["candidates"][0]["content"]["parts"][0]["text"]
     except Exception as e:
         logging.error(f"Gemini API error ({model}): {e}")
-        return None
+        # Gemini failed — fall back to OpenRouter (returns None if unavailable).
+        return call_openrouter_fallback(prompt, model=model, max_tokens=max_tokens)
 
 
 # === Librarian ===

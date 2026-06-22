@@ -2069,7 +2069,7 @@ async function handleApiRequest(
             sendJson(res, 200, {
               configured: Object.fromEntries(SETTABLE_KEYS.map(k => [k, isSet(k)])),
               features: {
-                generation: isSet("ANTHROPIC_API_KEY") || isSet("OPENAI_API_KEY") || isSet("GOOGLE_GENERATIVE_AI_API_KEY"),
+                generation: isSet("ANTHROPIC_API_KEY") || isSet("OPENAI_API_KEY") || isSet("GOOGLE_GENERATIVE_AI_API_KEY") || isSet("OPENROUTER_API_KEY"),
                 knowledgeStore: isSet("CONTEXT_FABRICA_DSN"),
                 linear: isSet("LINEAR_API_KEY"),
                 notifications: isSet("MISSION_CONTROL_NOTIFY_WEBHOOK"),
@@ -2413,6 +2413,7 @@ const SETTABLE_KEYS = [
   "ANTHROPIC_API_KEY",
   "OPENAI_API_KEY",
   "GOOGLE_GENERATIVE_AI_API_KEY",
+  "OPENROUTER_API_KEY",
   "EMBEDDING_PROVIDER",
   "EMBEDDING_MODEL",
   "CONTEXT_FABRICA_EMBEDDING_DIMENSIONS",

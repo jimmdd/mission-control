@@ -106,6 +106,49 @@ def _step_categories() -> dict:
 
 ANTHROPIC_API_URL = "https://api.anthropic.com/v1/messages"
 GEMINI_API_URL = "https://generativelanguage.googleapis.com/v1beta"
+OPENROUTER_API_URL = "https://openrouter.ai/api/v1/chat/completions"
+
+
+def _call_openrouter(prompt: str, model: str = "", system: str = "", max_tokens: int = 4096) -> Optional[str]:
+    """Call a model via OpenRouter (OpenAI-compatible chat completions API)."""
+    api_key = os.environ.get("OPENROUTER_API_KEY", "")
+    if not api_key:
+        logging.error("OPENROUTER_API_KEY not set")
+        return None
+
+    cfg = _get_config()
+    model = model or cfg["planning_model"]
+
+    messages = []
+    if system:
+        messages.append({"role": "system", "content": system})
+    messages.append({"role": "user", "content": prompt})
+
+    payload = json.dumps({
+        "model": model,
+        "messages": messages,
+        "max_tokens": max_tokens,
+        "temperature": 0.2,
+    }).encode()
+
+    req = urllib.request.Request(
+        OPENROUTER_API_URL,
+        data=payload,
+        headers={
+            "Content-Type": "application/json",
+            "Authorization": f"Bearer {api_key}",
+            "HTTP-Referer": "https://github.com/jimmdd/mission-control",
+            "X-Title": "Mission Control",
+        },
+    )
+
+    try:
+        with urllib.request.urlopen(req, timeout=120) as resp:
+            data = json.loads(resp.read())
+            return data["choices"][0]["message"]["content"]
+    except Exception as e:
+        logging.error(f"OpenRouter API call failed ({model}): {e}")
+        return None
 
 
 def _call_ollama(prompt: str, model: str = "", system: str = "", max_tokens: int = 2048) -> Optional[str]:
@@ -214,24 +257,81 @@ def _call_gemini(prompt: str, model: str = "", system: str = "", max_tokens: int
         return None
 
 
+def _load_fallback_config() -> dict:
+    """Top-level `llm_fallback` block from swarm-config.json.
+
+    Default: enabled, route failed primary calls through OpenRouter using
+    google/gemini-2.5-flash. Set {"enabled": false} to turn the safety net off.
+    """
+    cfg = {"enabled": True, "model": "google/gemini-2.5-flash"}
+    if SWARM_CONFIG_PATH.exists():
+        try:
+            full = json.loads(SWARM_CONFIG_PATH.read_text())
+            cfg.update(full.get("llm_fallback", {}))
+        except Exception:
+            pass
+    return cfg
+
+
+def _to_openrouter_model(model: str) -> str:
+    """Best-effort map a bare provider model name to an OpenRouter slug."""
+    if not model or "/" in model:
+        return model
+    m = model.lower()
+    if m.startswith("gemini"):
+        return f"google/{model}"
+    if m.startswith("claude"):
+        return f"anthropic/{model}"
+    if m.startswith(("gpt", "o1", "o3", "o4")):
+        return f"openai/{model}"
+    return model
+
+
+def call_openrouter_fallback(prompt: str, model: str = "", system: str = "", max_tokens: int = 4096) -> Optional[str]:
+    """Retry a failed primary LLM call via OpenRouter — the universal backup.
+
+    Returns None when the fallback is disabled or no OPENROUTER_API_KEY is set,
+    so callers can treat None as "no result". `model` is the primary model name;
+    it is mapped to an OpenRouter slug, else the configured default is used.
+    """
+    fb = _load_fallback_config()
+    if not fb.get("enabled", True):
+        return None
+    if not os.environ.get("OPENROUTER_API_KEY"):
+        return None
+    fb_model = _to_openrouter_model(model) or fb.get("model", "google/gemini-2.5-flash")
+    logging.warning(f"Primary LLM call failed — falling back to OpenRouter ({fb_model})")
+    return _call_openrouter(prompt, model=fb_model, system=system, max_tokens=max_tokens)
+
+
 def _call_llm(prompt: str, role: str = "planning", system: str = "", max_tokens: int = 4096) -> Optional[str]:
     """Universal LLM caller. Routes to the right provider based on config.
 
     role: "planning" | "routing" | "verification" — determines which model/provider to use.
+    Falls back to OpenRouter when the configured provider fails (see llm_fallback).
     """
     cfg = _get_config()
     model = cfg.get(f"{role}_model", cfg["planning_model"])
     provider = cfg.get(f"{role}_provider", "anthropic")
 
     if provider == "ollama":
-        return _call_ollama(prompt, model=model, system=system, max_tokens=max_tokens)
+        result = _call_ollama(prompt, model=model, system=system, max_tokens=max_tokens)
     elif provider == "anthropic":
-        return _call_anthropic(prompt, model=model, system=system, max_tokens=max_tokens)
+        result = _call_anthropic(prompt, model=model, system=system, max_tokens=max_tokens)
     elif provider == "gemini":
-        return _call_gemini(prompt, model=model, system=system, max_tokens=max_tokens)
+        result = _call_gemini(prompt, model=model, system=system, max_tokens=max_tokens)
+    elif provider == "openrouter":
+        result = _call_openrouter(prompt, model=model, system=system, max_tokens=max_tokens)
     else:
         logging.error(f"Unknown provider '{provider}' for role '{role}'")
         return None
+
+    # Auto-fallback to OpenRouter when the primary provider returned nothing.
+    if result is None and provider != "openrouter":
+        fb = call_openrouter_fallback(prompt, model=model, system=system, max_tokens=max_tokens)
+        if fb is not None:
+            return fb
+    return result
 
 
 def _parse_json_response(text: Optional[str]) -> Optional[dict]:

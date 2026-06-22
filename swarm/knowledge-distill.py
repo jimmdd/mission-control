@@ -38,6 +38,7 @@ from context_fabrica_config import (
     make_context_fabrica_adapter,
 )
 from gsd_backend import planning_dir_name as gsd_planning_dir_name
+from planner import _call_openrouter, call_openrouter_fallback
 
 # === Config ===
 
@@ -73,6 +74,17 @@ def _load_distill_model() -> str:
     return default
 
 
+def _distill_provider() -> str:
+    """Provider for distillation calls: gemini (default) | openrouter."""
+    if SWARM_CONFIG_PATH.exists():
+        try:
+            cfg = json.loads(SWARM_CONFIG_PATH.read_text())
+            return cfg.get("knowledge", {}).get("distill_provider", "gemini")
+        except Exception:
+            pass
+    return "gemini"
+
+
 def get_gemini_key() -> str:
     key = os.environ.get("GOOGLE_GENERATIVE_AI_API_KEY", "")
     if not key:
@@ -101,21 +113,29 @@ def embed_text(text: str, api_key: str = "") -> List[float]:
 
 def call_gemini(prompt: str, api_key: str) -> str:
     model = _load_distill_model()
-    url = f"{GEMINI_API_BASE}/models/{model}:generateContent"
-    payload = json.dumps({
-        "contents": [{"parts": [{"text": prompt}]}],
-        "generationConfig": {"temperature": 0.2, "maxOutputTokens": 4096},
-    }).encode()
+    # Route to OpenRouter when configured, keeping all distill call sites unchanged.
+    if _distill_provider() == "openrouter":
+        return _call_openrouter(prompt, model=model, max_tokens=4096) or ""
+    # Gemini primary, with OpenRouter as automatic backup on any failure.
+    try:
+        url = f"{GEMINI_API_BASE}/models/{model}:generateContent"
+        payload = json.dumps({
+            "contents": [{"parts": [{"text": prompt}]}],
+            "generationConfig": {"temperature": 0.2, "maxOutputTokens": 4096},
+        }).encode()
 
-    req = urllib.request.Request(
-        url, data=payload,
-        headers={"Content-Type": "application/json", "x-goog-api-key": api_key},
-        method="POST",
-    )
+        req = urllib.request.Request(
+            url, data=payload,
+            headers={"Content-Type": "application/json", "x-goog-api-key": api_key},
+            method="POST",
+        )
 
-    with urllib.request.urlopen(req, timeout=60) as resp:
-        data = json.loads(resp.read())
-    return data["candidates"][0]["content"]["parts"][0]["text"]
+        with urllib.request.urlopen(req, timeout=60) as resp:
+            data = json.loads(resp.read())
+        return data["candidates"][0]["content"]["parts"][0]["text"]
+    except Exception as e:
+        logging.warning(f"Gemini distill call failed: {e}")
+        return call_openrouter_fallback(prompt, model=model, max_tokens=4096) or ""
 
 
 # === Complexity Detection ===

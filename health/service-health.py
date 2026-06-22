@@ -56,8 +56,10 @@ def check_http_service(name, url, timeout=5):
     return result
 
 
-def check_launchd_service(name, label):
-    """Check a launchd service via launchctl list."""
+def check_launchd_service(name, label, proc_pattern=None):
+    """Check a launchd service via launchctl list. Falls back to matching a
+    running process when the service is not installed under launchd (e.g. the
+    daemon was started manually with nohup/tmux instead of a launchd plist)."""
     result = {"name": name, "status": "down", "pid": None, "uptime": None, "last_check": now_iso(), "details": ""}
     try:
         out = subprocess.run(
@@ -88,13 +90,39 @@ def check_launchd_service(name, label):
         result["details"] = f"Label '{label}' not found in launchctl list"
     except Exception as e:
         result["details"] = str(e)[:200]
+
+    # Fallback: a manually-started daemon (nohup/tmux) still counts as up.
+    if result["status"] != "up" and proc_pattern:
+        try:
+            ps = subprocess.run(
+                ["pgrep", "-f", proc_pattern],
+                capture_output=True, text=True, timeout=3
+            )
+            pids = ps.stdout.strip().splitlines()
+            if pids:
+                pid = int(pids[0])
+                result["pid"] = pid
+                result["status"] = "up"
+                result["uptime"] = get_process_uptime(pid)
+                result["details"] = f"PID {pid} (running process, not under launchd)"
+        except Exception:
+            pass
     return result
 
 
 def check_postgresql():
     """Check PostgreSQL via pg_isready."""
     result = {"name": "PostgreSQL", "status": "down", "pid": None, "uptime": None, "last_check": now_iso(), "details": ""}
-    pg_isready = "/opt/homebrew/opt/postgresql@17/bin/pg_isready"
+    pg_isready = shutil.which("pg_isready") or next(
+        (p for p in (
+            "/opt/homebrew/opt/postgresql@18/bin/pg_isready",
+            "/opt/homebrew/opt/postgresql@17/bin/pg_isready",
+        ) if Path(p).exists()),
+        None,
+    )
+    if not pg_isready:
+        result["details"] = "pg_isready not found in PATH"
+        return result
     try:
         out = subprocess.run(
             [pg_isready],
@@ -149,6 +177,11 @@ def check_env(name, *keys):
 def check_knowledge_doctor():
     result = {"name": "Knowledge Doctor", "status": "down", "pid": None, "uptime": None, "last_check": now_iso(), "details": ""}
     script = MC_HOME / "swarm" / "knowledge-manage.py"
+    if not script.exists():
+        # Fall back to the copy shipped in the repo (health/ sits beside swarm/).
+        repo_script = Path(__file__).resolve().parent.parent / "swarm" / "knowledge-manage.py"
+        if repo_script.exists():
+            script = repo_script
     python_bin = Path(os.environ.get("MC_PYTHON_BIN", str(MC_HOME / "venv-3.12" / "bin" / "python3")))
     if not script.exists():
         result["details"] = f"{script} not found"
@@ -196,12 +229,12 @@ def main():
 
     # 2-5. Core launchd services
     launchd_services = [
-        ("Bridge", "ai.mission-control.bridge"),
-        ("Check Agents", "ai.mission-control.check-agents"),
-        ("Repo Watcher", "ai.mission-control.repo-watcher"),
+        ("Bridge", "ai.mission-control.bridge", "bridge.py --daemon"),
+        ("Check Agents", "ai.mission-control.check-agents", "check-agents.sh"),
+        ("Repo Watcher", "ai.mission-control.repo-watcher", "repo-watcher.py"),
     ]
-    for name, label in launchd_services:
-        services.append(check_launchd_service(name, label))
+    for name, label, pattern in launchd_services:
+        services.append(check_launchd_service(name, label, pattern))
 
     # 6. PostgreSQL
     services.append(check_postgresql())
@@ -216,8 +249,13 @@ def main():
     ]:
         services.append(check_command(name, command))
 
-    services.append(check_env("Gemini API Key", "GOOGLE_GENERATIVE_AI_API_KEY"))
-    services.append(check_env("Planner API Key", "ANTHROPIC_API_KEY", "GOOGLE_GENERATIVE_AI_API_KEY"))
+    # Any one generation provider is enough — Mission Control routes planning,
+    # triage, and distillation through whichever key is set (OpenRouter covers
+    # all models in this setup).
+    services.append(check_env(
+        "Generation API Key",
+        "OPENROUTER_API_KEY", "ANTHROPIC_API_KEY", "GOOGLE_GENERATIVE_AI_API_KEY", "OPENAI_API_KEY",
+    ))
     services.append(check_knowledge_doctor())
 
     # Determine overall status

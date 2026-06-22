@@ -14,9 +14,9 @@ from typing import Dict, List, Optional
 from mc_explore_common import (
     GITPROJECTS,
     SWARM_DIR,
-    call_gemini,
+    call_gemini as _call_gemini_native,
     embed_text,
-    get_gemini_key,
+    get_gemini_key as _get_gemini_key_native,
     git,
     load_env,
     make_adapter,
@@ -28,12 +28,59 @@ from mc_explore_common import (
     identify_key_files,
     read_key_files,
 )
+# OpenRouter routing (same single-key path the planner/triage/distill use).
+from planner import _call_openrouter, call_openrouter_fallback
 
 # === Config ===
 
 STATE_FILE = SWARM_DIR / "repo-watcher-state.json"
 LOG_FILE = SWARM_DIR / "logs" / "repo-watcher.log"
+SWARM_CONFIG_PATH = SWARM_DIR / "swarm-config.json"
 MAX_CHANGED_CONTENT = 40_000  # 40KB cap on changed file contents
+
+
+def _repo_watcher_config() -> dict:
+    """Read the `repo_watcher` section of swarm-config.json (provider/model)."""
+    if SWARM_CONFIG_PATH.exists():
+        try:
+            return json.loads(SWARM_CONFIG_PATH.read_text()).get("repo_watcher", {})
+        except Exception:
+            pass
+    return {}
+
+
+def _provider() -> str:
+    """LLM provider for knowledge extraction: gemini (default) | openrouter."""
+    return _repo_watcher_config().get("provider", "gemini")
+
+
+def _model() -> str:
+    cfg = _repo_watcher_config()
+    if "model" in cfg:
+        return cfg["model"]
+    return "google/gemini-2.5-flash" if _provider() == "openrouter" else "gemini-2.5-flash"
+
+
+def get_gemini_key() -> str:
+    """Return the key for the configured provider. Kept named for call-site parity."""
+    if _provider() == "openrouter":
+        return os.environ.get("OPENROUTER_API_KEY", "")
+    return _get_gemini_key_native()
+
+
+def call_gemini(prompt: str, api_key: str, max_tokens: int = 4096) -> str:
+    """Route extraction calls through OpenRouter when configured; else Gemini
+    primary with OpenRouter as automatic backup on any failure."""
+    if _provider() == "openrouter":
+        return _call_openrouter(prompt, model=_model(), max_tokens=max_tokens) or ""
+    try:
+        out = _call_gemini_native(prompt, api_key, max_tokens=max_tokens)
+    except Exception as e:
+        logging.warning(f"Gemini call failed: {e}")
+        out = None
+    if not out:
+        out = call_openrouter_fallback(prompt, model=_model(), max_tokens=max_tokens)
+    return out or ""
 
 NON_ARCH_PATTERNS = [
     "*.lock",
@@ -430,7 +477,8 @@ def main():
     load_env()
     api_key = get_gemini_key()
     if not api_key:
-        logging.error("No GOOGLE_GENERATIVE_AI_API_KEY found")
+        key_name = "OPENROUTER_API_KEY" if _provider() == "openrouter" else "GOOGLE_GENERATIVE_AI_API_KEY"
+        logging.error(f"No {key_name} found for provider '{_provider()}'")
         sys.exit(1)
 
     # Load state

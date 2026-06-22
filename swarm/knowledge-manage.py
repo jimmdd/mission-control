@@ -184,7 +184,7 @@ def cmd_inject(args):
     source = args.source or "human"
     domain = scope_to_domain(scope)
 
-    vector = embed_text(args.text, api_key)
+    vector = embed_text(args.text)
 
     record_id = str(uuid4())
     now = datetime.now(timezone.utc)
@@ -306,7 +306,7 @@ def cmd_reembed(args):
     records = adapter.list_records(limit=args.limit or 100000)
     rebuilt_chunks: list[tuple[str, str, list[float], int]] = []
     for rec in records:
-        vector = embed_text(rec.text or "", api_key)
+        vector = embed_text(rec.text or "")
         rebuilt_chunks.append((rec.record_id, rec.text or "", vector, 0))
 
     actual = _embedding_column_dimension(adapter)

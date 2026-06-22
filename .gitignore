@@ -16,3 +16,7 @@ swarm/state-snapshots/
 swarm/pr-review-state/
 swarm/agents-default.json
 .env
+
+# Python bytecode
+__pycache__/
+*.pyc
