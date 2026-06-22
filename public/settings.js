@@ -31,7 +31,7 @@
     .replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;")
     .replace(/"/g, "&quot;").replace(/'/g, "&#39;");
 
-  let state = { open: false, settings: null, conn: null };
+  let state = { open: false, settings: null, conn: null, linearMeta: null };
 
   // Editable settings grouped into sections. `secret` masks the input.
   const SECTIONS = [
@@ -57,10 +57,10 @@
       fields: [
         { key: "LINEAR_API_KEY", label: "Linear API key", secret: true },
         { key: "__linear_pull", type: "action" },
-        { key: "LINEAR_LABEL", label: "Linear label to watch (e.g. mission-control)", secret: false },
-        { key: "LINEAR_TRIAGE_LABEL", label: "Linear triage label (optional)", secret: false },
-        { key: "LINEAR_TEAM_KEYS", label: "Linear teams — keys, comma-separated (optional)", secret: false },
-        { key: "LINEAR_ASSIGNEES", label: "Linear assignees — emails, comma-separated (optional)", secret: false },
+        { key: "LINEAR_LABEL", label: "Linear labels to watch", type: "multiselect", source: "labels" },
+        { key: "LINEAR_TRIAGE_LABEL", label: "Linear triage labels (optional)", type: "multiselect", source: "labels" },
+        { key: "LINEAR_TEAM_KEYS", label: "Linear teams (optional)", type: "multiselect", source: "teams" },
+        { key: "LINEAR_ASSIGNEES", label: "Linear assignees (optional)", type: "multiselect", source: "assignees" },
         { key: "LINEAR_INTERACTION", label: "Linear interaction level", type: "select", default: "intake",
           options: [
             { value: "intake", label: "Intake only — import issues, never write back" },
@@ -80,7 +80,38 @@
   async function refresh() {
     try { state.settings = await get("/settings"); } catch { state.settings = null; }
     try { state.conn = await get("/connections"); } catch { state.conn = null; }
+    const linearReady = state.settings && state.settings.configured && state.settings.configured.LINEAR_API_KEY;
+    if (linearReady && !state.linearMeta) {
+      try { state.linearMeta = await get("/linear/meta"); }
+      catch (e) { state.linearMeta = { error: e.message }; }
+    }
     render();
+  }
+
+  async function reloadLinearMeta() {
+    state.linearMeta = null;
+    await refresh();
+  }
+
+  // Build {value,text} options for a multiselect from the pulled Linear meta.
+  function metaOptions(source) {
+    const m = state.linearMeta || {};
+    if (source === "labels") return (m.labels || []).map((l) => ({ value: l, text: l }));
+    if (source === "teams") return (m.teams || []).map((t) => ({ value: t.key, text: `${t.key} · ${t.name}` }));
+    if (source === "assignees") return (m.assignees || []).map((a) => ({ value: a.email, text: a.name ? `${a.name} <${a.email}>` : a.email }));
+    return [];
+  }
+
+  async function saveMulti(key) {
+    const panel = document.getElementById(`mc-ms-panel-${key}`);
+    if (!panel) return;
+    const vals = Array.from(panel.querySelectorAll("input[type=checkbox]:checked")).map((c) => c.value);
+    try {
+      await post("/settings", { [key]: vals.join(",") });
+      await refresh();
+    } catch (e) {
+      alert("Save failed: " + e.message);
+    }
   }
 
   async function save(key) {
@@ -123,10 +154,47 @@
       const fields = sec.fields.map((f) => {
         const isSet = configured[f.key];
         if (f.type === "action") {
+          const st = !configured.LINEAR_API_KEY ? "Add a Linear API key to enable pickers."
+            : state.linearMeta && state.linearMeta.error ? `Linear pull failed: ${state.linearMeta.error}`
+            : state.linearMeta ? `Pulled ${(state.linearMeta.labels || []).length} labels · ${(state.linearMeta.teams || []).length} teams · ${(state.linearMeta.assignees || []).length} people`
+            : "Loading…";
           return `
           <div class="mc-set-field">
-            <button class="mc-set-btn" id="mc-linear-pull" style="width:100%">↻ Pull labels / teams / people from Linear</button>
-            <div id="mc-linear-meta" class="mc-set-note"></div>
+            <button class="mc-set-btn" id="mc-linear-pull" style="width:100%"${configured.LINEAR_API_KEY ? "" : " disabled"}>↻ Refresh labels / teams / people from Linear</button>
+            <div class="mc-set-note">${esc(st)}</div>
+          </div>`;
+        }
+        if (f.type === "multiselect") {
+          const selected = (values[f.key] || "").split(",").map((s) => s.trim()).filter(Boolean);
+          // No data pulled yet (no key / failed) → plain text fallback so it still works.
+          if (!state.linearMeta || state.linearMeta.error) {
+            return `
+          <div class="mc-set-field">
+            <label>${selected.length ? "● " : "○ "}${esc(f.label)}</label>
+            <div class="mc-set-row">
+              <input id="mc-set-${esc(f.key)}" type="text" value="${esc(selected.join(", "))}"
+                     placeholder="set Linear API key, then Refresh — or type comma-separated" />
+              <button class="mc-set-btn" data-save="${esc(f.key)}">Save</button>
+            </div>
+          </div>`;
+          }
+          const opts = metaOptions(f.source);
+          const known = new Set(opts.map((o) => o.value));
+          selected.forEach((v) => { if (!known.has(v)) opts.push({ value: v, text: `${v} (not in workspace)` }); });
+          const summary = selected.length ? selected.join(", ") : "— none —";
+          const checks = opts.length
+            ? opts.map((o) => `<label class="mc-ms-opt"><input type="checkbox" value="${esc(o.value)}"${selected.includes(o.value) ? " checked" : ""}/> ${esc(o.text)}</label>`).join("")
+            : '<div class="mc-set-note">No options found.</div>';
+          return `
+          <div class="mc-set-field">
+            <label>${selected.length ? "● " : "○ "}${esc(f.label)}</label>
+            <div class="mc-set-row">
+              <div class="mc-ms">
+                <div class="mc-ms-toggle" data-ms-toggle="${esc(f.key)}">${esc(summary)}</div>
+                <div class="mc-ms-panel" id="mc-ms-panel-${esc(f.key)}" hidden>${checks}</div>
+              </div>
+              <button class="mc-set-btn" data-save-ms="${esc(f.key)}">Save</button>
+            </div>
           </div>`;
         }
         if (f.type === "select") {
@@ -177,65 +245,15 @@
 
     root.querySelector("#mc-set-close").onclick = () => { state.open = false; render(); };
     root.querySelectorAll("[data-save]").forEach((el) => { el.onclick = () => save(el.dataset.save); });
+    root.querySelectorAll("[data-save-ms]").forEach((el) => { el.onclick = () => saveMulti(el.dataset.saveMs); });
+    root.querySelectorAll("[data-ms-toggle]").forEach((el) => {
+      el.onclick = () => {
+        const p = document.getElementById(`mc-ms-panel-${el.dataset.msToggle}`);
+        if (p) p.hidden = !p.hidden;
+      };
+    });
     const pull = root.querySelector("#mc-linear-pull");
-    if (pull) pull.onclick = loadLinearMeta;
-  }
-
-  function setFieldValue(key, val) {
-    const el = document.getElementById(`mc-set-${key}`);
-    if (el) el.value = val;
-  }
-  function addToCsvField(key, val) {
-    const el = document.getElementById(`mc-set-${key}`);
-    if (!el) return;
-    const parts = el.value.split(",").map((s) => s.trim()).filter(Boolean);
-    if (!parts.includes(val)) parts.push(val);
-    el.value = parts.join(", ");
-  }
-
-  async function loadLinearMeta() {
-    const box = document.getElementById("mc-linear-meta");
-    if (box) box.textContent = "Loading from Linear…";
-    let meta;
-    try { meta = await get("/linear/meta"); }
-    catch (e) { if (box) box.textContent = "Failed to reach Linear: " + e.message; return; }
-    if (meta && meta.error) { if (box) box.textContent = "Linear error: " + meta.error; return; }
-    renderLinearMeta(meta || {});
-  }
-
-  function renderLinearMeta(meta) {
-    const box = document.getElementById("mc-linear-meta");
-    if (!box) return;
-    box.innerHTML = "";
-    const groups = [
-      { title: "Labels — click to set the watch label", err: meta.labelsError,
-        items: (meta.labels || []).map((l) => ({ text: l, on: () => setFieldValue("LINEAR_LABEL", l) })) },
-      { title: "Teams — click to add", err: meta.teamsError,
-        items: (meta.teams || []).map((t) => ({ text: `${t.key} · ${t.name}`, on: () => addToCsvField("LINEAR_TEAM_KEYS", t.key) })) },
-      { title: "People — click to add as assignee", err: meta.assigneesError,
-        items: (meta.assignees || []).map((a) => ({ text: a.name || a.email, title: a.email, on: () => addToCsvField("LINEAR_ASSIGNEES", a.email) })) },
-    ];
-    for (const g of groups) {
-      const h = document.createElement("div");
-      h.className = "mc-meta-head";
-      h.textContent = g.err ? `${g.title} — ${g.err}` : `${g.title} (${g.items.length})`;
-      box.appendChild(h);
-      const wrap = document.createElement("div");
-      wrap.className = "mc-chips";
-      g.items.forEach((it) => {
-        const b = document.createElement("button");
-        b.className = "mc-chip";
-        b.textContent = it.text;
-        if (it.title) b.title = it.title;
-        b.onclick = it.on;
-        wrap.appendChild(b);
-      });
-      box.appendChild(wrap);
-    }
-    const hint = document.createElement("div");
-    hint.className = "mc-meta-head";
-    hint.textContent = "Click fills the field above — then press its Save button.";
-    box.appendChild(hint);
+    if (pull) pull.onclick = reloadLinearMeta;
   }
 
   function mountButton() {

@@ -77,6 +77,21 @@ def _apply_linear_env_overrides():
     LINEAR_LABEL = os.environ.get("LINEAR_LABEL") or LINEAR_LABEL
     LINEAR_TRIAGE_LABEL = os.environ.get("LINEAR_TRIAGE_LABEL") or LINEAR_TRIAGE_LABEL
 
+
+def _csv(value: str) -> List[str]:
+    return [v.strip() for v in (value or "").split(",") if v.strip()]
+
+
+def _watch_labels() -> List[str]:
+    """Implementation labels to watch (LINEAR_LABEL, comma-separated), minus the
+    unconfigured placeholder."""
+    return [l for l in _csv(LINEAR_LABEL) if l and l != "your-label"]
+
+
+def _triage_labels() -> List[str]:
+    """Triage labels (LINEAR_TRIAGE_LABEL, comma-separated)."""
+    return _csv(LINEAR_TRIAGE_LABEL)
+
 # How much Mission Control is allowed to write back to Linear. Reads/intake
 # (importing labeled issues as tasks) always happen; this only gates writes.
 #   intake  — one-way import only; never post to Linear  (safe default)
@@ -289,9 +304,8 @@ def fetch_labeled_issues() -> List[dict]:
     assignees = get_linear_assignees()
     team_scopes: List[Optional[str]] = team_keys if team_keys else [None]
 
-    label = (LINEAR_LABEL or "").strip()
-    has_real_label = bool(label) and label != "your-label"
-    triage = (LINEAR_TRIAGE_LABEL or "").strip()
+    labels = _watch_labels()
+    triage = _triage_labels()
 
     issues: List[dict] = []
     seen_ids: set = set()
@@ -303,23 +317,23 @@ def fetch_labeled_issues() -> List[dict]:
                 seen_ids.add(issue["id"])
 
     for team_key in team_scopes:
-        if has_real_label:
-            _add(_fetch_issues_by_label(label, team_key=team_key))
-        if triage:
-            _add(_fetch_issues_by_label(triage, team_key=team_key))
+        for lb in labels:
+            _add(_fetch_issues_by_label(lb, team_key=team_key))
+        for tlb in triage:
+            _add(_fetch_issues_by_label(tlb, team_key=team_key))
         if assignees:
             _add(_fetch_issues_by_assignee(assignees, team_key=team_key))
 
     filters = []
-    if has_real_label:
-        filters.append(f"label='{label}'")
+    if labels:
+        filters.append(f"labels={','.join(labels)}")
     if triage:
-        filters.append(f"triage='{triage}'")
+        filters.append(f"triage={','.join(triage)}")
     if assignees:
         filters.append(f"assignees={','.join(assignees)}")
     if team_keys:
         filters.append(f"teams={','.join(team_keys)}")
-    if not (has_real_label or triage or assignees):
+    if not (labels or triage or assignees):
         logging.warning("No Linear filters configured (set a label or assignees) — nothing to import")
     else:
         logging.info(f"Linear filters: {' · '.join(filters)} → {len(issues)} issue(s)")
@@ -372,7 +386,8 @@ def _get_target_workspace_id() -> str:
 
 def _resolve_task_type(issue: dict) -> str:
     label_names = [l.get("name", "") for l in issue.get("labels", {}).get("nodes", [])]
-    if LINEAR_TRIAGE_LABEL and LINEAR_TRIAGE_LABEL in label_names:
+    triage = set(_triage_labels())
+    if triage and any(t in label_names for t in triage):
         return "investigation"
     return "implementation"
 
@@ -475,8 +490,7 @@ def _is_bot_comment(body: str) -> bool:
 def _has_mention_tag(body: str) -> bool:
     trigger_patterns = [re.escape(LINEAR_MENTION_TAG)]
 
-    triage_label = (LINEAR_TRIAGE_LABEL or "").strip()
-    if triage_label:
+    for triage_label in _triage_labels():
         trigger_patterns.append(re.escape(f"[{triage_label}]"))
         trigger_patterns.append(rf"(?<!\w){re.escape(triage_label)}(?!\w)")
 
