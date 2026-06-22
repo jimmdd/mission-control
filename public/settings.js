@@ -56,6 +56,7 @@
       title: "Integrations (optional)",
       fields: [
         { key: "LINEAR_API_KEY", label: "Linear API key", secret: true },
+        { key: "__linear_pull", type: "action" },
         { key: "LINEAR_LABEL", label: "Linear label to watch (e.g. mission-control)", secret: false },
         { key: "LINEAR_TRIAGE_LABEL", label: "Linear triage label (optional)", secret: false },
         { key: "LINEAR_TEAM_KEYS", label: "Linear teams — keys, comma-separated (optional)", secret: false },
@@ -121,6 +122,13 @@
     const sections = SECTIONS.map((sec) => {
       const fields = sec.fields.map((f) => {
         const isSet = configured[f.key];
+        if (f.type === "action") {
+          return `
+          <div class="mc-set-field">
+            <button class="mc-set-btn" id="mc-linear-pull" style="width:100%">↻ Pull labels / teams / people from Linear</button>
+            <div id="mc-linear-meta" class="mc-set-note"></div>
+          </div>`;
+        }
         if (f.type === "select") {
           const current = values[f.key] || f.default || (f.options[0] && f.options[0].value);
           const opts = f.options.map((o) =>
@@ -169,6 +177,65 @@
 
     root.querySelector("#mc-set-close").onclick = () => { state.open = false; render(); };
     root.querySelectorAll("[data-save]").forEach((el) => { el.onclick = () => save(el.dataset.save); });
+    const pull = root.querySelector("#mc-linear-pull");
+    if (pull) pull.onclick = loadLinearMeta;
+  }
+
+  function setFieldValue(key, val) {
+    const el = document.getElementById(`mc-set-${key}`);
+    if (el) el.value = val;
+  }
+  function addToCsvField(key, val) {
+    const el = document.getElementById(`mc-set-${key}`);
+    if (!el) return;
+    const parts = el.value.split(",").map((s) => s.trim()).filter(Boolean);
+    if (!parts.includes(val)) parts.push(val);
+    el.value = parts.join(", ");
+  }
+
+  async function loadLinearMeta() {
+    const box = document.getElementById("mc-linear-meta");
+    if (box) box.textContent = "Loading from Linear…";
+    let meta;
+    try { meta = await get("/linear/meta"); }
+    catch (e) { if (box) box.textContent = "Failed to reach Linear: " + e.message; return; }
+    if (meta && meta.error) { if (box) box.textContent = "Linear error: " + meta.error; return; }
+    renderLinearMeta(meta || {});
+  }
+
+  function renderLinearMeta(meta) {
+    const box = document.getElementById("mc-linear-meta");
+    if (!box) return;
+    box.innerHTML = "";
+    const groups = [
+      { title: "Labels — click to set the watch label", err: meta.labelsError,
+        items: (meta.labels || []).map((l) => ({ text: l, on: () => setFieldValue("LINEAR_LABEL", l) })) },
+      { title: "Teams — click to add", err: meta.teamsError,
+        items: (meta.teams || []).map((t) => ({ text: `${t.key} · ${t.name}`, on: () => addToCsvField("LINEAR_TEAM_KEYS", t.key) })) },
+      { title: "People — click to add as assignee", err: meta.assigneesError,
+        items: (meta.assignees || []).map((a) => ({ text: a.name || a.email, title: a.email, on: () => addToCsvField("LINEAR_ASSIGNEES", a.email) })) },
+    ];
+    for (const g of groups) {
+      const h = document.createElement("div");
+      h.className = "mc-meta-head";
+      h.textContent = g.err ? `${g.title} — ${g.err}` : `${g.title} (${g.items.length})`;
+      box.appendChild(h);
+      const wrap = document.createElement("div");
+      wrap.className = "mc-chips";
+      g.items.forEach((it) => {
+        const b = document.createElement("button");
+        b.className = "mc-chip";
+        b.textContent = it.text;
+        if (it.title) b.title = it.title;
+        b.onclick = it.on;
+        wrap.appendChild(b);
+      });
+      box.appendChild(wrap);
+    }
+    const hint = document.createElement("div");
+    hint.className = "mc-meta-head";
+    hint.textContent = "Click fills the field above — then press its Save button.";
+    box.appendChild(hint);
   }
 
   function mountButton() {

@@ -1442,12 +1442,43 @@ def sync():
     logging.info(f"=== Sync complete: {created} created, {skipped} skipped, {comments_synced} comments synced ===")
 
 
+def discover() -> dict:
+    """Fetch teams, labels, and active members from Linear for UI pickers.
+    Errors per-section are returned inline so the rest still renders."""
+    out: dict = {"teams": [], "labels": [], "assignees": []}
+    try:
+        d = linear_query("{ teams(first: 250) { nodes { key name } } }")
+        out["teams"] = [{"key": t["key"], "name": t["name"]} for t in d["teams"]["nodes"]]
+    except Exception as e:
+        out["teamsError"] = str(e)[:160]
+    try:
+        d = linear_query("{ issueLabels(first: 250) { nodes { name } } }")
+        out["labels"] = sorted({l["name"] for l in d["issueLabels"]["nodes"] if l.get("name")})
+    except Exception as e:
+        out["labelsError"] = str(e)[:160]
+    try:
+        d = linear_query("{ users(first: 250) { nodes { name email active } } }")
+        out["assignees"] = [
+            {"name": u.get("name", ""), "email": u["email"]}
+            for u in d["users"]["nodes"]
+            if u.get("email") and u.get("active", True)
+        ]
+    except Exception as e:
+        out["assigneesError"] = str(e)[:160]
+    return out
+
+
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Linear → Mission Control sync")
     parser.add_argument("--dry-run", action="store_true", help="Show what would sync without creating tasks")
+    parser.add_argument("--discover", action="store_true", help="Print Linear teams/labels/members as JSON (for the UI)")
     args = parser.parse_args()
 
-    if args.dry_run:
+    if args.discover:
+        # No setup_logging() here — keep stdout pure JSON for the API caller.
+        load_env()
+        print(json.dumps(discover()))
+    elif args.dry_run:
         setup_logging()
         load_env()
         _apply_linear_env_overrides()

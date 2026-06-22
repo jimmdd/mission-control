@@ -2111,6 +2111,17 @@ async function handleApiRequest(
           }
         }
 
+        if (segments[0] === "linear" && segments[1] === "meta" && segments.length === 2 && method === "GET") {
+          // Pull teams/labels/members from Linear so the UI can offer pickers.
+          try {
+            const result = await runPython([resolveRuntimePath("integrations", "linear", "linear-sync.py"), "--discover"]);
+            sendJson(res, 200, result);
+          } catch (e) {
+            sendJson(res, 502, { error: e instanceof Error ? e.message : String(e) });
+          }
+          return;
+        }
+
         if (segments[0] === "objectives") {
           if (segments.length === 1 && method === "GET") {
             sendJson(res, 200, db.listObjectives(url.searchParams.get("status") ?? undefined));
