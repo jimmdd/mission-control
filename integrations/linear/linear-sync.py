@@ -69,6 +69,14 @@ LINEAR_TRIAGE_LABEL = LINEAR_CONFIG.get("triageLabel", "")
 LINEAR_MENTION_TAG = LINEAR_CONFIG["mentionTag"]
 LINEAR_BOT_NAME = LINEAR_CONFIG["botName"]
 
+
+def _apply_linear_env_overrides():
+    """After .env is loaded, let env vars (set via the UI Settings panel)
+    override swarm-config label values. Call right after load_env()."""
+    global LINEAR_LABEL, LINEAR_TRIAGE_LABEL
+    LINEAR_LABEL = os.environ.get("LINEAR_LABEL") or LINEAR_LABEL
+    LINEAR_TRIAGE_LABEL = os.environ.get("LINEAR_TRIAGE_LABEL") or LINEAR_TRIAGE_LABEL
+
 # How much Mission Control is allowed to write back to Linear. Reads/intake
 # (importing labeled issues as tasks) always happen; this only gates writes.
 #   intake  — one-way import only; never post to Linear  (safe default)
@@ -98,6 +106,12 @@ def _parse_csv_env(name: str) -> List[str]:
 
 def get_linear_team_keys() -> List[str]:
     return [key.upper() for key in _parse_csv_env("LINEAR_TEAM_KEYS")]
+
+
+def get_linear_assignees() -> List[str]:
+    """Assignee emails to monitor (LINEAR_ASSIGNEES, CSV). Issues assigned to any
+    of these are imported regardless of label."""
+    return _parse_csv_env("LINEAR_ASSIGNEES")
 
 PRIORITY_MAP = {
     0: "normal",   # No priority
@@ -213,17 +227,8 @@ def verify_workspace() -> bool:
     return True
 
 
-def _fetch_issues_by_label(label: str, team_key: Optional[str] = None) -> List[dict]:
-    team_filter = f", team: {{ key: {{ eq: \"{team_key}\" }} }}" if team_key else ""
-    query = f"""
-    query LabeledIssues($after: String) {{
-      issues(
-        filter: {{ labels: {{ name: {{ eq: "{label}" }} }}{team_filter} }}
-        first: 50
-        after: $after
-        orderBy: createdAt
-      ) {{
-        nodes {{
+_ISSUE_NODE_FIELDS = """
+        nodes {
           id
           identifier
           title
@@ -233,62 +238,91 @@ def _fetch_issues_by_label(label: str, team_key: Optional[str] = None) -> List[d
           url
           createdAt
           updatedAt
-          state {{ name type }}
-          assignee {{ name email }}
-          project {{ name }}
-          team {{ name key }}
-          labels {{ nodes {{ name }} }}
-        }}
-        pageInfo {{
-          hasNextPage
-          endCursor
-        }}
-      }}
-    }}
-    """
+          state { name type }
+          assignee { name email }
+          project { name }
+          team { name key }
+          labels { nodes { name } }
+        }
+        pageInfo { hasNextPage endCursor }
+"""
 
+
+def _team_filter(team_key: Optional[str]) -> str:
+    return f", team: {{ key: {{ eq: \"{team_key}\" }} }}" if team_key else ""
+
+
+def _fetch_issues(filter_inner: str) -> List[dict]:
+    """Run the paginated issues query with the given GraphQL filter body."""
+    query = (
+        "query Issues($after: String) {\n"
+        f"  issues(filter: {{ {filter_inner} }} first: 50 after: $after orderBy: createdAt) {{\n"
+        f"{_ISSUE_NODE_FIELDS}"
+        "  }\n"
+        "}\n"
+    )
     all_issues: List[dict] = []
     cursor = None
-
     while True:
         data = linear_query(query, {"after": cursor})
         issues = data["issues"]
         all_issues.extend(issues["nodes"])
-
         if not issues["pageInfo"]["hasNextPage"]:
             break
         cursor = issues["pageInfo"]["endCursor"]
-
     return all_issues
 
 
+def _fetch_issues_by_label(label: str, team_key: Optional[str] = None) -> List[dict]:
+    return _fetch_issues(f'labels: {{ name: {{ eq: "{label}" }} }}{_team_filter(team_key)}')
+
+
+def _fetch_issues_by_assignee(emails: List[str], team_key: Optional[str] = None) -> List[dict]:
+    email_list = ", ".join(json.dumps(e) for e in emails)
+    return _fetch_issues(f'assignee: {{ email: {{ in: [{email_list}] }} }}{_team_filter(team_key)}')
+
+
 def fetch_labeled_issues() -> List[dict]:
-    """Fetch issues with either the implementation label or triage label."""
+    """Fetch issues to import: implementation label, triage label, and/or any
+    watched assignee — unioned and deduped, optionally scoped to teams."""
     team_keys = get_linear_team_keys()
+    assignees = get_linear_assignees()
+    team_scopes: List[Optional[str]] = team_keys if team_keys else [None]
 
-    if team_keys:
-        issues: List[dict] = []
-        for team_key in team_keys:
-            issues.extend(_fetch_issues_by_label(LINEAR_LABEL, team_key=team_key))
-    else:
-        issues = _fetch_issues_by_label(LINEAR_LABEL)
+    label = (LINEAR_LABEL or "").strip()
+    has_real_label = bool(label) and label != "your-label"
+    triage = (LINEAR_TRIAGE_LABEL or "").strip()
 
-    if LINEAR_TRIAGE_LABEL:
-        triage_issues: List[dict] = []
-        if team_keys:
-            for team_key in team_keys:
-                triage_issues.extend(_fetch_issues_by_label(LINEAR_TRIAGE_LABEL, team_key=team_key))
-        else:
-            triage_issues = _fetch_issues_by_label(LINEAR_TRIAGE_LABEL)
+    issues: List[dict] = []
+    seen_ids: set = set()
 
-        seen_ids = {i["id"] for i in issues}
-        for issue in triage_issues:
+    def _add(batch: List[dict]):
+        for issue in batch:
             if issue["id"] not in seen_ids:
                 issues.append(issue)
                 seen_ids.add(issue["id"])
 
+    for team_key in team_scopes:
+        if has_real_label:
+            _add(_fetch_issues_by_label(label, team_key=team_key))
+        if triage:
+            _add(_fetch_issues_by_label(triage, team_key=team_key))
+        if assignees:
+            _add(_fetch_issues_by_assignee(assignees, team_key=team_key))
+
+    filters = []
+    if has_real_label:
+        filters.append(f"label='{label}'")
+    if triage:
+        filters.append(f"triage='{triage}'")
+    if assignees:
+        filters.append(f"assignees={','.join(assignees)}")
     if team_keys:
-        logging.info(f"Team filter enabled: {', '.join(team_keys)}")
+        filters.append(f"teams={','.join(team_keys)}")
+    if not (has_real_label or triage or assignees):
+        logging.warning("No Linear filters configured (set a label or assignees) — nothing to import")
+    else:
+        logging.info(f"Linear filters: {' · '.join(filters)} → {len(issues)} issue(s)")
 
     return issues
 
@@ -1308,6 +1342,7 @@ def sync_comments_to_mc(issue: dict, mc_task: dict, state: dict) -> int:
 def sync():
     setup_logging()
     load_env()
+    _apply_linear_env_overrides()
     logging.info("=== Linear sync started ===")
 
     if not verify_workspace():
@@ -1415,6 +1450,7 @@ if __name__ == "__main__":
     if args.dry_run:
         setup_logging()
         load_env()
+        _apply_linear_env_overrides()
         if not verify_workspace():
             sys.exit(1)
         issues = fetch_labeled_issues()

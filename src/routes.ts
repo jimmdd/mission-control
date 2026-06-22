@@ -2423,12 +2423,16 @@ const SETTABLE_KEYS = [
   "CONTEXT_FABRICA_SCHEMA",
   "LINEAR_API_KEY",
   "LINEAR_INTERACTION",
+  "LINEAR_LABEL",
+  "LINEAR_TRIAGE_LABEL",
+  "LINEAR_TEAM_KEYS",
+  "LINEAR_ASSIGNEES",
   "MISSION_CONTROL_NOTIFY_WEBHOOK",
 ];
 
 // Non-secret settings whose current value is safe to return to the UI (so a
-// dropdown can show the active selection). Secret keys never expose values.
-const VALUE_KEYS = ["LINEAR_INTERACTION"];
+// dropdown or text field can show the active value). Secret keys never expose values.
+const VALUE_KEYS = ["LINEAR_INTERACTION", "LINEAR_LABEL", "LINEAR_TRIAGE_LABEL", "LINEAR_TEAM_KEYS", "LINEAR_ASSIGNEES"];
 
 function envFilePath(): string {
   const mcHome = process.env.MC_HOME ?? join(homedir(), ".mission-control");

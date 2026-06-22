@@ -56,6 +56,10 @@
       title: "Integrations (optional)",
       fields: [
         { key: "LINEAR_API_KEY", label: "Linear API key", secret: true },
+        { key: "LINEAR_LABEL", label: "Linear label to watch (e.g. mission-control)", secret: false },
+        { key: "LINEAR_TRIAGE_LABEL", label: "Linear triage label (optional)", secret: false },
+        { key: "LINEAR_TEAM_KEYS", label: "Linear teams — keys, comma-separated (optional)", secret: false },
+        { key: "LINEAR_ASSIGNEES", label: "Linear assignees — emails, comma-separated (optional)", secret: false },
         { key: "LINEAR_INTERACTION", label: "Linear interaction level", type: "select", default: "intake",
           options: [
             { value: "intake", label: "Intake only — import issues, never write back" },
@@ -131,11 +135,15 @@
             </div>
           </div>`;
         }
+        // Non-secret fields prefill their current value so it's visible/editable;
+        // secret fields never echo back.
+        const current = !f.secret && values[f.key] ? values[f.key] : "";
         return `
           <div class="mc-set-field">
             <label>${isSet ? "● " : "○ "}${esc(f.label)}</label>
             <div class="mc-set-row">
               <input id="mc-set-${esc(f.key)}" type="${f.secret ? "password" : "text"}"
+                     value="${esc(current)}"
                      placeholder="${isSet ? "configured — paste to replace" : "not set"}" />
               <button class="mc-set-btn" data-save="${esc(f.key)}">Save</button>
             </div>
