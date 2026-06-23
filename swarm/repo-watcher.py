@@ -157,13 +157,25 @@ def save_state(state: Dict) -> None:
 
 # === Repo Discovery ===
 
+def _repo_root() -> Path:
+    return Path(os.environ.get("REPO_WATCH_ROOT") or GITPROJECTS)
+
+
+def _repo_allowlist() -> set:
+    """Optional allowlist of `group/repo` domains (REPO_WATCH_REPOS, CSV).
+    Empty → watch every discovered repo."""
+    return {r.strip() for r in os.environ.get("REPO_WATCH_REPOS", "").split(",") if r.strip()}
+
+
 def discover_repos() -> List[Dict]:
-    """Walk ~/GitProjects/*/* looking for .git dirs."""
+    """Walk <root>/*/* for .git dirs, filtered by the optional allowlist."""
     repos = []
-    if not GITPROJECTS.is_dir():
-        logging.warning(f"GitProjects directory not found: {GITPROJECTS}")
+    root = _repo_root()
+    allow = _repo_allowlist()
+    if not root.is_dir():
+        logging.warning(f"Repo root not found: {root}")
         return repos
-    for project_dir in sorted(GITPROJECTS.iterdir()):
+    for project_dir in sorted(root.iterdir()):
         if not project_dir.is_dir():
             continue
         project = project_dir.name
@@ -171,11 +183,14 @@ def discover_repos() -> List[Dict]:
             if not repo_dir.is_dir():
                 continue
             if (repo_dir / ".git").is_dir():
+                domain = f"{project}/{repo_dir.name}"
+                if allow and domain not in allow:
+                    continue
                 repos.append({
                     "project": project,
                     "repo": repo_dir.name,
                     "path": repo_dir,
-                    "domain": f"{project}/{repo_dir.name}",
+                    "domain": domain,
                 })
     return repos
 

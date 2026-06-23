@@ -31,7 +31,7 @@
     .replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;")
     .replace(/"/g, "&quot;").replace(/'/g, "&#39;");
 
-  let state = { open: false, settings: null, conn: null, linearMeta: null };
+  let state = { open: false, settings: null, conn: null, linearMeta: null, repoMeta: null };
 
   // Editable settings grouped into sections. `secret` masks the input.
   const SECTIONS = [
@@ -53,10 +53,20 @@
       ],
     },
     {
+      title: "Repo watcher (optional)",
+      note: "Repos whose architectural changes feed the knowledge store. Leave repos empty to watch all under the root.",
+      fields: [
+        { key: "REPO_WATCH_ROOT", label: "Repo root folder (default ~/GitProjects)", secret: false },
+        { key: "__repo_pull", type: "action", action: "repos" },
+        { key: "REPO_WATCH_REPOS", label: "Repos to watch (empty = all discovered)", type: "multiselect", source: "repos" },
+        { key: "__repo_scan", type: "action", action: "repo_scan" },
+      ],
+    },
+    {
       title: "Integrations (optional)",
       fields: [
         { key: "LINEAR_API_KEY", label: "Linear API key", secret: true },
-        { key: "__linear_pull", type: "action" },
+        { key: "__linear_pull", type: "action", action: "linear" },
         { key: "LINEAR_LABEL", label: "Linear labels to watch", type: "multiselect", source: "labels" },
         { key: "LINEAR_TRIAGE_LABEL", label: "Linear triage labels (optional)", type: "multiselect", source: "labels" },
         { key: "LINEAR_TEAM_KEYS", label: "Linear teams (optional)", type: "multiselect", source: "teams" },
@@ -85,6 +95,10 @@
       try { state.linearMeta = await get("/linear/meta"); }
       catch (e) { state.linearMeta = { error: e.message }; }
     }
+    if (!state.repoMeta) {
+      try { state.repoMeta = await get("/repos/meta"); }
+      catch (e) { state.repoMeta = { error: e.message }; }
+    }
     render();
   }
 
@@ -92,13 +106,31 @@
     state.linearMeta = null;
     await refresh();
   }
+  async function reloadRepoMeta() {
+    state.repoMeta = null;
+    await refresh();
+  }
+  async function buildKnowledgeNow(btn) {
+    if (btn) { btn.disabled = true; btn.textContent = "Scanning… (this can take a minute)"; }
+    try {
+      const r = await post("/repos/scan", {});
+      alert("Knowledge scan complete:\n\n" + (r.output || "done"));
+    } catch (e) {
+      alert("Scan failed: " + e.message);
+    }
+    await refresh();
+  }
 
-  // Build {value,text} options for a multiselect from the pulled Linear meta.
+  // Which pulled-meta object backs a multiselect source.
+  function metaFor(source) { return source === "repos" ? state.repoMeta : state.linearMeta; }
+
+  // Build {value,text} options for a multiselect from the pulled meta.
   function metaOptions(source) {
-    const m = state.linearMeta || {};
+    const m = metaFor(source) || {};
     if (source === "labels") return (m.labels || []).map((l) => ({ value: l, text: l }));
     if (source === "teams") return (m.teams || []).map((t) => ({ value: t.key, text: `${t.key} · ${t.name}` }));
     if (source === "assignees") return (m.assignees || []).map((a) => ({ value: a.email, text: a.name ? `${a.name} <${a.email}>` : a.email }));
+    if (source === "repos") return (m.repos || []).map((r) => ({ value: r.domain, text: r.domain }));
     return [];
   }
 
@@ -153,6 +185,24 @@
     const sections = SECTIONS.map((sec) => {
       const fields = sec.fields.map((f) => {
         const isSet = configured[f.key];
+        if (f.type === "action" && f.action === "repos") {
+          const rm = state.repoMeta;
+          const st = rm && rm.error ? `Repo scan failed: ${rm.error}`
+            : rm ? `Found ${(rm.repos || []).length} repos under ${rm.root || "~/GitProjects"}`
+            : "Loading…";
+          return `
+          <div class="mc-set-field">
+            <button class="mc-set-btn" id="mc-repo-pull" style="width:100%">↻ Scan repos folder</button>
+            <div class="mc-set-note">${esc(st)}</div>
+          </div>`;
+        }
+        if (f.type === "action" && f.action === "repo_scan") {
+          return `
+          <div class="mc-set-field">
+            <button class="mc-set-btn" id="mc-repo-scan" style="width:100%">⚙ Build knowledge now (scan watched repos)</button>
+            <div class="mc-set-note">Runs extraction over the watched repos and stores facts in the knowledge base. First scan of a repo is a full index.</div>
+          </div>`;
+        }
         if (f.type === "action") {
           const st = !configured.LINEAR_API_KEY ? "Add a Linear API key to enable pickers."
             : state.linearMeta && state.linearMeta.error ? `Linear pull failed: ${state.linearMeta.error}`
@@ -166,8 +216,9 @@
         }
         if (f.type === "multiselect") {
           const selected = (values[f.key] || "").split(",").map((s) => s.trim()).filter(Boolean);
+          const fmeta = metaFor(f.source);
           // No data pulled yet (no key / failed) → plain text fallback so it still works.
-          if (!state.linearMeta || state.linearMeta.error) {
+          if (!fmeta || fmeta.error) {
             return `
           <div class="mc-set-field">
             <label>${selected.length ? "● " : "○ "}${esc(f.label)}</label>
@@ -254,6 +305,10 @@
     });
     const pull = root.querySelector("#mc-linear-pull");
     if (pull) pull.onclick = reloadLinearMeta;
+    const repoPull = root.querySelector("#mc-repo-pull");
+    if (repoPull) repoPull.onclick = reloadRepoMeta;
+    const repoScan = root.querySelector("#mc-repo-scan");
+    if (repoScan) repoScan.onclick = () => buildKnowledgeNow(repoScan);
   }
 
   function mountButton() {

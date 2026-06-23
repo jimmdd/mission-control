@@ -2122,6 +2122,20 @@ async function handleApiRequest(
           return;
         }
 
+        if (segments[0] === "repos" && segments[1] === "meta" && segments.length === 2 && method === "GET") {
+          // Discover git repos under the watch root for the Settings picker.
+          sendJson(res, 200, discoverRepos());
+          return;
+        }
+
+        if (segments[0] === "repos" && segments[1] === "scan" && segments.length === 2 && method === "POST") {
+          // Run repo-watcher once now to seed the knowledge store from watched repos.
+          const result = await runPythonRaw([resolveRuntimePath("swarm", "repo-watcher.py")]);
+          db.createEvent({ type: "repo_scan", message: `Repo knowledge scan: ${result.ok ? "ok" : "failed"}` });
+          sendJson(res, result.ok ? 200 : 502, result);
+          return;
+        }
+
         if (segments[0] === "objectives") {
           if (segments.length === 1 && method === "GET") {
             sendJson(res, 200, db.listObjectives(url.searchParams.get("status") ?? undefined));
@@ -2438,12 +2452,14 @@ const SETTABLE_KEYS = [
   "LINEAR_TRIAGE_LABEL",
   "LINEAR_TEAM_KEYS",
   "LINEAR_ASSIGNEES",
+  "REPO_WATCH_ROOT",
+  "REPO_WATCH_REPOS",
   "MISSION_CONTROL_NOTIFY_WEBHOOK",
 ];
 
 // Non-secret settings whose current value is safe to return to the UI (so a
 // dropdown or text field can show the active value). Secret keys never expose values.
-const VALUE_KEYS = ["LINEAR_INTERACTION", "LINEAR_LABEL", "LINEAR_TRIAGE_LABEL", "LINEAR_TEAM_KEYS", "LINEAR_ASSIGNEES"];
+const VALUE_KEYS = ["LINEAR_INTERACTION", "LINEAR_LABEL", "LINEAR_TRIAGE_LABEL", "LINEAR_TEAM_KEYS", "LINEAR_ASSIGNEES", "REPO_WATCH_ROOT", "REPO_WATCH_REPOS"];
 
 function envFilePath(): string {
   const mcHome = process.env.MC_HOME ?? join(homedir(), ".mission-control");
@@ -2510,4 +2526,38 @@ function runPython(args: string[]): Promise<Record<string, unknown>> {
       }
     });
   });
+}
+
+// Run a Python helper that logs (not JSON) and return its tail + exit status.
+function runPythonRaw(args: string[], timeoutMs = 600000): Promise<{ ok: boolean; output: string }> {
+  return new Promise((resolve) => {
+    const pythonBin = resolvePythonBin();
+    execFile(pythonBin, args, { timeout: timeoutMs }, (err, stdout, stderr) => {
+      const combined = `${stdout || ""}${stderr || ""}`.trim();
+      const tail = combined.split("\n").slice(-6).join("\n");
+      resolve({ ok: !err, output: tail });
+    });
+  });
+}
+
+// Discover git repos under the repo-watcher root (group/repo with a .git dir),
+// for the Settings picker. Lists all repos — the allowlist is applied at scan time.
+function discoverRepos(): { repos: { domain: string }[]; root: string } {
+  const env = readEnvConfig();
+  const root = (env.REPO_WATCH_ROOT || process.env.REPO_WATCH_ROOT || join(homedir(), "GitProjects")).trim();
+  const repos: { domain: string }[] = [];
+  try {
+    for (const group of readdirSync(root, { withFileTypes: true })) {
+      if (!group.isDirectory()) continue;
+      const gpath = join(root, group.name);
+      try {
+        for (const repo of readdirSync(gpath, { withFileTypes: true })) {
+          if (repo.isDirectory() && existsSync(join(gpath, repo.name, ".git"))) {
+            repos.push({ domain: `${group.name}/${repo.name}` });
+          }
+        }
+      } catch { /* unreadable group dir */ }
+    }
+  } catch { /* root missing/unreadable */ }
+  return { repos, root };
 }
