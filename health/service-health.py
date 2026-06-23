@@ -232,6 +232,7 @@ def main():
         ("Bridge", "ai.mission-control.bridge", "bridge.py --daemon"),
         ("Check Agents", "ai.mission-control.check-agents", "check-agents.sh"),
         ("Repo Watcher", "ai.mission-control.repo-watcher", "repo-watcher.py"),
+        ("Linear Sync", "ai.mission-control.linear-sync", "linear-sync.py"),
     ]
     for name, label, pattern in launchd_services:
         services.append(check_launchd_service(name, label, pattern))
