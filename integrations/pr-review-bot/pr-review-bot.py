@@ -197,6 +197,8 @@ def review_with_codex(repo, num):
     out = (proc.stdout or "").strip()
     if not out:
         raise RuntimeError(f"codex review produced no output (rc={proc.returncode}): {proc.stderr.strip()[:200]}")
+    # codex cites absolute paths in the local clone; make them repo-relative.
+    out = out.replace(str(d) + os.sep, "").replace(str(d), "")
     return out
 
 
@@ -256,8 +258,9 @@ def main():
     parser = argparse.ArgumentParser(description="meta-bot-ship PR review bot")
     parser.add_argument("--loop", type=int, default=0, help="poll every N seconds (0 = run once)")
     args = parser.parse_args()
+    engine_desc = f"codex/{CODEX_EFFORT}" if ENGINE == "codex" else f"llm:{PROVIDER}/{MODEL}"
     if args.loop > 0:
-        log(f"PR review bot started (loop {args.loop}s) — bot={BOT_USER} repos={REPOS} provider={PROVIDER}/{MODEL}")
+        log(f"PR review bot started (loop {args.loop}s) — bot={BOT_USER} repos={REPOS} engine={engine_desc}")
         while True:
             try:
                 run_once()
