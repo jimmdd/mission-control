@@ -1135,6 +1135,22 @@ async function handleApiRequest(
               }
             }
 
+            if (segments.length === 3 && segments[2] === "reset-triage" && method === "POST") {
+              const task = db.resetTriage(taskId);
+              if (!task) {
+                sendJson(res, 404, { error: "Task not found" });
+                return;
+              }
+              db.createActivity({
+                task_id: taskId,
+                activity_type: "updated",
+                message: "Triage reset — task returned to inbox for re-triage.",
+              });
+              events.emit("triage_reset", { taskId });
+              sendJson(res, 200, task);
+              return;
+            }
+
             if (segments.length === 3 && segments[2] === "deliverables") {
               if (method === "GET") {
                 sendJson(res, 200, db.listDeliverables(taskId));

@@ -1113,6 +1113,12 @@
                 return;
             }
 
+            const resetFooterHtml = state.readOnly
+                ? ''
+                : `<div style="margin-top: 8px; padding-top: 16px; border-top: 1px solid rgba(255,255,255,0.05); display: flex; justify-content: flex-end;">
+                       <button class="btn-send" style="padding: 8px 16px; background: transparent; border: 1px solid rgba(255,255,255,0.15); color: var(--text-secondary);" onclick="resetTriage(event, '${task.id}')">Reset triage</button>
+                   </div>`;
+
             try {
                 const triageState = typeof task.triage_state === 'string' ? JSON.parse(task.triage_state) : task.triage_state;
                 if (triageState && triageState.questions) {
@@ -1146,11 +1152,31 @@
                                 `}
                             </div>
                         `;
-                    }).join('');
+                    }).join('') + resetFooterHtml;
                 }
             } catch (e) {
                 console.error('Failed to parse triage_state', e);
                 contentEl.innerHTML = '<div style="color: var(--status-error);">Failed to load triage questions.</div>';
+            }
+        };
+
+        window.resetTriage = async (event, taskId) => {
+            event.stopPropagation();
+            if (state.readOnly) {
+                alert('Read-only mode: editing is disabled.');
+                return;
+            }
+            if (!confirm('Reset triage? This clears the triage questions/answers and sends the task back to the inbox for the bridge to re-triage. Activity history is kept.')) {
+                return;
+            }
+            try {
+                const res = await fetch(getApiUrl(`/tasks/${taskId}/reset-triage`), { method: 'POST' });
+                if (!res.ok) throw new Error(`Reset failed (${res.status})`);
+                closeTriageModal();
+                await fetchTasks();
+            } catch (err) {
+                console.error('Error resetting triage:', err);
+                alert('Failed to reset triage: ' + err.message);
             }
         };
 

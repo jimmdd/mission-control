@@ -1313,6 +1313,28 @@ export class MissionControlDB {
     return next;
   }
 
+  resetTriage(taskId: string): TaskRecord | undefined {
+    const existing = this.getTask(taskId);
+    if (!existing) {
+      return undefined;
+    }
+    // Clear the triage state and any active bridge lease, and send the task back
+    // to the inbox so the bridge re-triages it from scratch. Activity history is
+    // intentionally preserved as an audit trail.
+    this.db
+      .prepare(
+        `UPDATE tasks
+         SET triage_state = NULL,
+             status = 'inbox',
+             processing_owner = NULL,
+             processing_expires_at = NULL,
+             updated_at = ?
+         WHERE id = ?`
+      )
+      .run(new Date().toISOString(), taskId);
+    return this.getTask(taskId);
+  }
+
   replaceTriageState(taskId: string, data: Record<string, unknown>): Record<string, unknown> {
     let triageStateJson: string;
     try {
