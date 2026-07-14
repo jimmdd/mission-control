@@ -580,6 +580,18 @@ def read_manifest() -> str:
     return ""
 
 
+def _available_repo_options(limit: int = 20) -> List[str]:
+    """List 'project/repo' labels from the librarian indexes, for repo-selection prompts."""
+    options = []
+    indexes_dir = LIBRARIAN_DIR / "indexes"
+    if indexes_dir.exists():
+        for idx_file in sorted(indexes_dir.glob("*/*.md")):
+            options.append(f"{idx_file.parent.name}/{idx_file.stem}")
+            if len(options) >= limit:
+                break
+    return options
+
+
 def read_repo_index(project: str, repo: str) -> str:
     index_file = LIBRARIAN_DIR / "indexes" / project / f"{repo}.md"
     if index_file.exists():
@@ -824,22 +836,26 @@ Rules:
 
 def post_planning_questions(task_id: str, questions: List[dict], triage_result: Optional[dict] = None):
     """Post planning questions as activity and save structured triage state."""
-    lines = ["**Needs clarification before work can begin:**\n"]
-    for i, q in enumerate(questions, 1):
-        lines.append(f"{i}. **[{q.get('category', 'scope')}]** {q['question']}")
-        if q.get("options"):
-            for opt in q["options"]:
-                lines.append(f"   - {opt}")
-            if not any("other" in o.lower() for o in q["options"]):
-                lines.append(f"   - Other (please specify)")
-        lines.append("")
-    message = "\n".join(lines)
+    # Only surface questions that still need an answer — a follow-up round shouldn't
+    # re-list questions the user has already answered.
+    display_qs = [q for q in questions if not q.get("answer")]
+    if display_qs:
+        lines = ["**Needs clarification before work can begin:**\n"]
+        for i, q in enumerate(display_qs, 1):
+            lines.append(f"{i}. **[{q.get('category', 'scope')}]** {q['question']}")
+            if q.get("options"):
+                for opt in q["options"]:
+                    lines.append(f"   - {opt}")
+                if not any("other" in o.lower() for o in q["options"]):
+                    lines.append(f"   - Other (please specify)")
+            lines.append("")
+        message = "\n".join(lines)
 
-    try:
-        mc_log_activity(task_id, "planning_questions", message)
-        logging.info(f"  Posted {len(questions)} questions as MC activity")
-    except Exception as e:
-        logging.warning(f"Failed to post questions to MC: {e}")
+        try:
+            mc_log_activity(task_id, "planning_questions", message)
+            logging.info(f"  Posted {len(display_qs)} question(s) as MC activity")
+        except Exception as e:
+            logging.warning(f"Failed to post questions to MC: {e}")
 
     now = datetime.now(timezone.utc).isoformat()
 
@@ -862,7 +878,7 @@ def post_planning_questions(task_id: str, questions: List[dict], triage_result: 
                 "question_type": q.get("question_type", "text"),
                 "options": q.get("options"),
                 "answer": q.get("answer"),
-                "answered_at": None,
+                "answered_at": q.get("answered_at"),
                 "answered_by": q.get("answered_by"),
             }
             for i, q in enumerate(questions, 1)
@@ -2074,6 +2090,8 @@ BRIDGE_COMMENT_MARKERS = [
     "Self-answered",
     "All questions answered — spawning agents",
     "Triage could not identify target repos",
+    "posted a repo-selection follow-up",
+    "Could not identify target repos even after",
     "Repo not found on disk",
     "Multi-repo task detected",
     "Spawned agents across",
@@ -2208,12 +2226,22 @@ def process_planning_tasks():
         except Exception:
             pass
 
-        logging.info(f"Answers found for: {title} ({task_id[:8]}) — proceeding to spawn agents")
-
+        # Load structured triage state once; reused for the all-answered gate and repo routing.
         try:
             state = mc_request("GET", f"/api/tasks/{task_id}/triage-state")
         except Exception:
             state = None
+
+        # Only proceed once EVERY structured question is answered. This is also what makes a
+        # follow-up question (posted below) cause the task to wait here until it's answered,
+        # rather than us re-processing on partial answers every cycle.
+        if state and state.get("questions"):
+            unanswered = [q for q in state["questions"] if not q.get("answer")]
+            if unanswered:
+                logging.info(f"  {task_id[:8]} has {len(unanswered)} unanswered question(s) — waiting")
+                continue
+
+        logging.info(f"Answers found for: {title} ({task_id[:8]}) — proceeding to spawn agents")
 
         repos = state.get("triage_repos", []) if state else []
 
@@ -2226,8 +2254,32 @@ def process_planning_tasks():
             logging.info(f"  No repos in triage state — identified {len(repos)} from manifest + answers")
 
         if not repos:
-            logging.warning(f"  Cannot identify target repos for {task_id[:8]}")
-            mc_log_activity(task_id, "updated", "All questions answered but could not identify target repos. Manual intervention needed.")
+            existing_qs = state.get("questions", []) if state else []
+            already_asked_repo = any(q.get("id") == "repo_selection" for q in existing_qs)
+            if already_asked_repo:
+                # We already asked which repo to target and got an answer, but still can't
+                # route — this genuinely needs a human.
+                logging.warning(f"  Cannot identify target repos for {task_id[:8]} even after repo follow-up")
+                mc_log_activity(task_id, "updated",
+                    "Could not identify target repos even after a repo-selection follow-up. Manual intervention needed.")
+                continue
+
+            # Instead of dead-ending, ask a targeted repo-selection follow-up and keep the
+            # task in planning. The all-answered gate above makes it wait until this is answered;
+            # on the next pass the answer is folded into the description for identify_repos.
+            options = _available_repo_options()
+            repo_question = {
+                "id": "repo_selection",
+                "category": "repo",
+                "question": "Which repo(s) should this task target? I couldn't determine this from the task and the answers so far.",
+                "question_type": "multiple_choice" if options else "text",
+                "options": (options + ["Other (please specify)"]) if options else None,
+            }
+            post_planning_questions(task_id, existing_qs + [repo_question],
+                                    triage_result={"repos": [], "reasoning": "repo-selection follow-up"})
+            mc_log_activity(task_id, "updated",
+                "All questions answered but target repo unclear — posted a repo-selection follow-up.")
+            logging.info(f"  Posted repo-selection follow-up for {task_id[:8]}")
             continue
 
         mc_log_activity(task_id, "updated", f"All questions answered — dispatching for {len(repos)} repo(s)")
