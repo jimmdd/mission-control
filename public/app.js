@@ -60,6 +60,8 @@
             drawerDescription: document.getElementById('drawer-description'),
             drawerTriageSection: document.getElementById('drawer-triage-section'),
             drawerTriage: document.getElementById('drawer-triage'),
+            drawerCheckpointsSection: document.getElementById('drawer-checkpoints-section'),
+            drawerCheckpoints: document.getElementById('drawer-checkpoints'),
             drawerTimeline: document.getElementById('drawer-timeline'),
             drawerDeliverablesSection: document.getElementById('drawer-deliverables-section'),
             drawerDeliverables: document.getElementById('drawer-deliverables'),
@@ -345,13 +347,15 @@
                 state.lastActivityId = null;
                 els.drawerTriageSection.style.display = 'none';
                 els.drawerDeliverablesSection.style.display = 'none';
+                if (els.drawerCheckpointsSection) els.drawerCheckpointsSection.style.display = 'none';
             }
 
             try {
-                const [activitiesRes, triageRes, deliverablesRes] = await Promise.all([
+                const [activitiesRes, triageRes, deliverablesRes, checkpointsRes] = await Promise.all([
                     fetch(getApiUrl(`/tasks/${taskId}/activities`)),
                     fetch(getApiUrl(`/tasks/${taskId}/triage-state`)),
-                    fetch(getApiUrl(`/tasks/${taskId}/deliverables`))
+                    fetch(getApiUrl(`/tasks/${taskId}/deliverables`)),
+                    fetch(getApiUrl(`/tasks/${taskId}/checkpoints`))
                 ]);
 
                 if (activitiesRes.ok) {
@@ -359,6 +363,8 @@
                 } else {
                     state.activities = [];
                 }
+
+                state.checkpoints = checkpointsRes.ok ? await checkpointsRes.json() : [];
 
                 if (triageRes.ok) {
                     const triageData = await triageRes.json();
@@ -1370,7 +1376,48 @@
             els.drawer.classList.remove('open');
         };
 
+        const renderDrawerCheckpoints = () => {
+            if (!els.drawerCheckpointsSection) return;
+            const pending = (state.checkpoints || []).filter(c => c.status === 'pending');
+            if (!pending.length || state.readOnly) {
+                els.drawerCheckpointsSection.style.display = 'none';
+                return;
+            }
+            els.drawerCheckpointsSection.style.display = 'block';
+            els.drawerCheckpoints.innerHTML = pending.map(c => {
+                let opts = [];
+                try { opts = c.options ? JSON.parse(c.options) : []; } catch (e) { opts = []; }
+                const buttons = (opts && opts.length)
+                    ? opts.map((o, i) => `<button class="cp-btn" onclick="resolveCheckpoint('${c.id}', 'choose', ${JSON.stringify(o).replace(/"/g, '&quot;')})">${escapeHtml(o)}</button>`).join('')
+                    : `<button class="cp-btn" onclick="resolveCheckpoint('${c.id}', 'approve')">Approve</button>
+                       <button class="cp-btn cp-btn-reject" onclick="resolveCheckpoint('${c.id}', 'reject')">Reject</button>`;
+                return `
+                    <div style="margin-bottom:12px; padding:12px 14px; border:1px solid rgba(255,176,32,0.35); background:rgba(255,176,32,0.06); border-radius:8px;">
+                        <div style="color:var(--text-primary); font-size:13px; white-space:pre-wrap; margin-bottom:10px;">${escapeHtml(c.prompt)}</div>
+                        <div style="display:flex; flex-wrap:wrap; gap:8px;">${buttons}</div>
+                    </div>`;
+            }).join('');
+        };
+
+        window.resolveCheckpoint = async (checkpointId, decision, response) => {
+            if (state.readOnly) { alert('Read-only mode: editing is disabled.'); return; }
+            try {
+                const res = await fetch(getApiUrl(`/checkpoints/${checkpointId}/resolve`), {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ decision, response: response || '' })
+                });
+                if (!res.ok) throw new Error(`Resolve failed (${res.status})`);
+                if (state.selectedTaskId) await fetchTaskDetails(state.selectedTaskId);
+                await fetchTasks();
+            } catch (err) {
+                console.error('Error resolving checkpoint:', err);
+                alert('Failed to submit decision: ' + err.message);
+            }
+        };
+
         const renderDrawerDetails = () => {
+            renderDrawerCheckpoints();
             // Render Triage State
             if (state.triageState && state.triageState.questions && state.triageState.questions.length > 0) {
                 els.drawerTriageSection.style.display = 'block';

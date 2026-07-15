@@ -2290,3 +2290,22 @@
 .mc-ms-opt:hover { background: rgba(0,224,199,0.10); }
 .mc-ms-opt input { margin: 0; accent-color: var(--accent, #00e0c7); }
 .mc-set-empty { color: var(--text-secondary, #888); font-size: 12px; }
+
+/* Checkpoint decision buttons (drawer "Needs your decision" section) */
+.cp-btn {
+    padding: 7px 14px;
+    font-family: var(--font-body, inherit);
+    font-size: 12px;
+    color: var(--text-primary, #eee);
+    background: rgba(255,176,32,0.12);
+    border: 1px solid rgba(255,176,32,0.45);
+    border-radius: 6px;
+    cursor: pointer;
+    transition: background 0.15s ease;
+}
+.cp-btn:hover { background: rgba(255,176,32,0.22); }
+.cp-btn-reject {
+    background: rgba(239,68,68,0.10);
+    border-color: rgba(239,68,68,0.45);
+}
+.cp-btn-reject:hover { background: rgba(239,68,68,0.20); }

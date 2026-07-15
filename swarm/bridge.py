@@ -1401,7 +1401,7 @@ def _gh_bin() -> str:
 def _gh_pr_list(repo_path: Path, extra_args: List[str]) -> List[dict]:
     try:
         out = subprocess.run(
-            [_gh_bin(), "pr", "list", "--json", "number,title,url,isDraft,headRefName", *extra_args],
+            [_gh_bin(), "pr", "list", "--json", "number,title,url,isDraft,headRefName,body", *extra_args],
             cwd=str(repo_path), capture_output=True, text=True, timeout=30)
         if out.returncode != 0:
             return []
@@ -1451,32 +1451,32 @@ def _linear_pr_for_task(task: dict) -> Optional[dict]:
 
 
 def _find_existing_pr(task: dict, repos: List[dict]) -> Optional[dict]:
-    """Detect a PR that already covers this task, to avoid conflicting with prior work.
-    Checks Linear attachments first, then falls back to gh (by the target worktree's
-    branch — the most reliable signal — then by ticket id)."""
+    """Detect a PR that already covers THIS task, to avoid conflicting with prior work.
+
+    Must be ticket-precise: a worktree/branch can host a PR for an unrelated task
+    (e.g. many tasks share one 'new-ui' branch), so matching any open PR on the
+    branch causes false positives. We only match when the link is issue-specific:
+      1) a GitHub PR attached to this task's Linear issue, or
+      2) a PR whose title/body/branch actually references the ticket id (MET-123).
+    """
     pr = _linear_pr_for_task(task)
     if pr:
         return pr
     ticket = _extract_ticket_id(task.get("title", ""))
+    if not ticket or ticket == "TICKET":
+        return None
+    tl = ticket.lower()
     for r in repos:
         repo_path = find_repo_path(r["project"], r["repo"])
         if not repo_path:
             continue
-        branch = ""
-        try:
-            br = subprocess.run(["git", "branch", "--show-current"],
-                                cwd=str(repo_path), capture_output=True, text=True, timeout=15)
-            branch = br.stdout.strip()
-        except Exception:
-            branch = ""
-        prs = _gh_pr_list(repo_path, ["--state", "open", "--head", branch]) if branch else []
-        if not prs and ticket and ticket != "TICKET":
-            prs = [p for p in _gh_pr_list(repo_path, ["--state", "open", "--search", ticket])
-                   if ticket.lower() in (p.get("title", "") + " " + p.get("headRefName", "")).lower()]
-        if prs:
-            p = prs[0]
-            return {"url": p["url"], "is_draft": bool(p.get("isDraft")),
-                    "number": p.get("number"), "branch": p.get("headRefName"), "source": "gh"}
+        # gh's --search matches PR title/body; also accept the ticket in the branch name.
+        candidates = _gh_pr_list(repo_path, ["--state", "open", "--search", ticket])
+        for p in candidates:
+            hay = f"{p.get('title', '')} {p.get('headRefName', '')} {p.get('body', '')}".lower()
+            if tl in hay:
+                return {"url": p["url"], "is_draft": bool(p.get("isDraft")),
+                        "number": p.get("number"), "branch": p.get("headRefName"), "source": "gh"}
     return None
 
 
