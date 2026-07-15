@@ -453,7 +453,10 @@ def sync_status_back(mc_task: dict, issue_id: str):
 
 
 # MC status -> the Linear (type=started) state name it should reflect.
-IN_PROGRESS_MC_STATUSES = {"assigned", "in_progress", "testing"}
+# Once a task leaves the inbox — triage (planning), dispatch, or execution — the
+# Linear ticket should read In Progress. (inbox = not started; on_hold = paused;
+# done handled separately.)
+IN_PROGRESS_MC_STATUSES = {"pending_dispatch", "planning", "assigned", "in_progress", "testing"}
 REVIEW_MC_STATUSES = {"review"}
 
 # (team key, state name) -> Linear workflow-state id (resolved lazily, cached per run).
