@@ -2214,11 +2214,21 @@ def process_planning_tasks():
         if not answers:
             continue
 
-        # Skip if already processed (avoid re-logging every cycle)
+        # Skip if we already acted on the CURRENT triage round (avoid re-logging every
+        # cycle). Scope this to activities since the latest planning_questions marker —
+        # a re-triage or "Reset triage" starts a fresh round, and a terminal marker from
+        # a previous round must not permanently wedge the task.
         try:
             existing_acts = mc_request("GET", f"/api/tasks/{task_id}/activities")
+            round_start = ""
+            for a in existing_acts:
+                if a.get("activity_type") == "planning_questions":
+                    ts = a.get("created_at", "")
+                    if ts > round_start:
+                        round_start = ts
             already_handled = any(
-                "spawning agents" in a.get("message", "") or "Manual intervention needed" in a.get("message", "")
+                ("spawning agents" in a.get("message", "") or "Manual intervention needed" in a.get("message", ""))
+                and a.get("created_at", "") >= round_start
                 for a in existing_acts
             )
             if already_handled:
