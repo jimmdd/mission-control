@@ -878,7 +878,11 @@ async function handleApiRequest(
               const oldTask = (needsTriageCheck || needsPriorityCheck) ? db.getTask(taskId) : null;
 
               if (needsPriorityCheck && oldTask) {
-                const stalled = ["on_hold", "inbox", "planning"];
+                // Escalating priority fast-tracks a parked task back to the inbox for
+                // immediate dispatch. "planning" is deliberately excluded: such a task is
+                // mid-triage (often with answered questions), and moving it to inbox makes
+                // the bridge re-triage from scratch and discard that work.
+                const stalled = ["on_hold", "inbox"];
                 if (stalled.includes(oldTask.status) && !["urgent", "high"].includes(oldTask.priority)) {
                   body.status = "inbox";
                 }
