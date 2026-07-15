@@ -452,18 +452,19 @@ def sync_status_back(mc_task: dict, issue_id: str):
         logging.warning(f"  Failed to sync back to Linear: {e}")
 
 
-# MC statuses that mean triage is done and the swarm is actively working the task.
-ACTIVE_MC_STATUSES = {"assigned", "in_progress", "testing", "review"}
+# MC status -> the Linear (type=started) state name it should reflect.
+IN_PROGRESS_MC_STATUSES = {"assigned", "in_progress", "testing"}
+REVIEW_MC_STATUSES = {"review"}
 
-# team key -> Linear "In Progress" workflow-state id (resolved lazily, cached per run).
-_IN_PROGRESS_STATE_CACHE: Dict[str, Optional[str]] = {}
+# (team key, state name) -> Linear workflow-state id (resolved lazily, cached per run).
+_STARTED_STATE_CACHE: Dict[tuple, Optional[str]] = {}
 
 
-def _get_in_progress_state_id(team_key: str) -> Optional[str]:
-    """Resolve a team's 'In Progress' (type=started) workflow-state id, preferring a
-    state literally named 'In Progress'."""
-    if team_key in _IN_PROGRESS_STATE_CACHE:
-        return _IN_PROGRESS_STATE_CACHE[team_key]
+def _get_started_state_id(team_key: str, prefer_name: str) -> Optional[str]:
+    """Resolve a team's type=started workflow-state id, preferring one named prefer_name."""
+    ck = (team_key, prefer_name.lower())
+    if ck in _STARTED_STATE_CACHE:
+        return _STARTED_STATE_CACHE[ck]
     query = """
     query($key: String!) {
       workflowStates(filter: { team: { key: { eq: $key } }, type: { eq: "started" } }) {
@@ -475,27 +476,26 @@ def _get_in_progress_state_id(team_key: str) -> Optional[str]:
     try:
         data = linear_query(query, {"key": team_key})
         nodes = data["workflowStates"]["nodes"]
-        preferred = next((n for n in nodes if n.get("name", "").strip().lower() == "in progress"), None)
+        preferred = next((n for n in nodes if n.get("name", "").strip().lower() == prefer_name.lower()), None)
         chosen = preferred or (nodes[0] if nodes else None)
         state_id = chosen["id"] if chosen else None
     except Exception as e:
-        logging.warning(f"  Failed to resolve In Progress state for team {team_key}: {e}")
-    _IN_PROGRESS_STATE_CACHE[team_key] = state_id
+        logging.warning(f"  Failed to resolve '{prefer_name}' state for team {team_key}: {e}")
+    _STARTED_STATE_CACHE[ck] = state_id
     return state_id
 
 
-def move_issue_to_in_progress(issue: dict):
-    """Move a Linear issue to its team's In Progress state (idempotent — skips if the
-    issue is already started, terminal, or on hold)."""
-    state_type = issue.get("state", {}).get("type", "")
-    if state_type in ("started", "completed", "cancelled"):
+def move_issue_to_state(issue: dict, prefer_name: str):
+    """Move a Linear issue to a team's type=started state named prefer_name. Idempotent —
+    skips if already in that state, or if the issue is terminal or on hold."""
+    if is_on_hold_state(issue) or is_terminal_state(issue):
         return
-    if is_on_hold_state(issue):
+    if issue.get("state", {}).get("name", "").strip().lower() == prefer_name.lower():
         return
     team_key = (issue.get("team") or {}).get("key")
     if not team_key:
         return
-    state_id = _get_in_progress_state_id(team_key)
+    state_id = _get_started_state_id(team_key, prefer_name)
     if not state_id:
         return
     mutation = """
@@ -505,9 +505,9 @@ def move_issue_to_in_progress(issue: dict):
     """
     try:
         linear_query(mutation, {"id": issue["id"], "stateId": state_id})
-        logging.info(f"  Moved Linear {issue.get('identifier', issue['id'][:8])} to In Progress (swarm working task)")
+        logging.info(f"  Moved Linear {issue.get('identifier', issue['id'][:8])} to {prefer_name}")
     except Exception as e:
-        logging.warning(f"  Failed to move {issue.get('identifier', '?')} to In Progress: {e}")
+        logging.warning(f"  Failed to move {issue.get('identifier', '?')} to {prefer_name}: {e}")
 
 
 def is_terminal_state(issue: dict) -> bool:
@@ -1490,10 +1490,12 @@ def sync():
                 except Exception as e:
                     logging.warning(f"  Failed to restore {mc_task_id[:8]} from on_hold: {e}")
 
-            # Once triage is done and the swarm is working the task, reflect that back to
-            # Linear by moving the issue to In Progress (idempotent, skips on-hold/terminal).
-            if mc_task.get("status") in ACTIVE_MC_STATUSES:
-                move_issue_to_in_progress(issue)
+            # Reflect the MC task's working state back to Linear (idempotent).
+            mc_status = mc_task.get("status")
+            if mc_status in REVIEW_MC_STATUSES:
+                move_issue_to_state(issue, "In Review")
+            elif mc_status in IN_PROGRESS_MC_STATUSES:
+                move_issue_to_state(issue, "In Progress")
 
             if _check_description_changed(issue, mc_task, state):
                 skipped += 1

@@ -1048,6 +1048,13 @@
                     }
                 }
 
+                // A pending checkpoint means a human decision is needed (e.g. an existing
+                // draft PR, or an agent escalation) — flag it prominently.
+                let needsHumanBadge = '';
+                if (!isDone && (task.pending_checkpoints || 0) > 0) {
+                    needsHumanBadge = `<div class="badge" title="Awaiting your decision — open the task to respond" style="background: rgba(255,176,32,0.18); color:#ffb020; font-size:9px; padding:1px 6px; font-weight:600;">⚠ NEEDS YOU</div>`;
+                }
+
                 return `
                     <div class="task-card ${isExpanded} ${isDone ? 'task-done' : ''} ${priorityClass}" id="card-${task.id}" style="--card-status-color: ${statusColor}">
                         <div class="card-header" onclick="${isExpandable ? `toggleChildren(event, '${task.id}')` : `handleTaskClick(event, '${task.id}')`}">
@@ -1059,6 +1066,7 @@
                             </div>
                             <div class="card-subtitle">
                                 <div class="badge badge-status ${task.status}">${task.status.replace('_', ' ')}</div>
+                                ${needsHumanBadge}
                                 ${progressBadgeHtml}
                                 ${task.task_type === 'investigation'
                                     ? '<div class="badge" style="background: rgba(147, 130, 255, 0.15); color: #9382ff; font-size: 9px; padding: 1px 6px;">INVESTIGATION</div>'

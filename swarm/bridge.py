@@ -18,6 +18,7 @@ import logging
 import os
 import subprocess
 import shlex
+import shutil
 import socket
 import sys
 import time
@@ -1348,11 +1349,139 @@ def _build_triage_context(task_id: str) -> str:
     return "\n\n".join(sections)
 
 
+def _gh_bin() -> str:
+    return shutil.which("gh") or "/opt/homebrew/bin/gh"
+
+
+def _gh_pr_list(repo_path: Path, extra_args: List[str]) -> List[dict]:
+    try:
+        out = subprocess.run(
+            [_gh_bin(), "pr", "list", "--json", "number,title,url,isDraft,headRefName", *extra_args],
+            cwd=str(repo_path), capture_output=True, text=True, timeout=30)
+        if out.returncode != 0:
+            return []
+        return json.loads(out.stdout or "[]")
+    except Exception:
+        return []
+
+
+def _gh_pr_from_url(url: str) -> Optional[dict]:
+    try:
+        out = subprocess.run([_gh_bin(), "pr", "view", url, "--json", "url,isDraft,state"],
+                             capture_output=True, text=True, timeout=30)
+        if out.returncode != 0:
+            return None
+        pr = json.loads(out.stdout or "{}")
+        if (pr.get("state") or "OPEN") != "OPEN":
+            return None  # merged/closed — not blocking
+        return {"url": pr.get("url", url), "is_draft": bool(pr.get("isDraft")), "source": "linear"}
+    except Exception:
+        return None
+
+
+def _linear_pr_for_task(task: dict) -> Optional[dict]:
+    """Look for a GitHub PR attached to the task's Linear issue."""
+    issue_id = task.get("external_id")
+    if not issue_id or task.get("source") != "linear":
+        return None
+    key = os.environ.get("LINEAR_API_KEY", "").strip()
+    if not key:
+        return None
+    query = '{ issue(id: "%s") { attachments { nodes { url } } } }' % issue_id
+    try:
+        req = urllib.request.Request(
+            "https://api.linear.app/graphql",
+            data=json.dumps({"query": query}).encode(),
+            headers={"Authorization": key, "Content-Type": "application/json"}, method="POST")
+        with urllib.request.urlopen(req, timeout=15) as resp:
+            data = json.loads(resp.read())
+        nodes = (((data.get("data") or {}).get("issue") or {}).get("attachments") or {}).get("nodes") or []
+    except Exception:
+        return None
+    for n in nodes:
+        url = n.get("url", "")
+        if "github.com" in url and "/pull/" in url:
+            return _gh_pr_from_url(url)
+    return None
+
+
+def _find_existing_pr(task: dict, repos: List[dict]) -> Optional[dict]:
+    """Detect a PR that already covers this task, to avoid conflicting with prior work.
+    Checks Linear attachments first, then falls back to gh (by the target worktree's
+    branch — the most reliable signal — then by ticket id)."""
+    pr = _linear_pr_for_task(task)
+    if pr:
+        return pr
+    ticket = _extract_ticket_id(task.get("title", ""))
+    for r in repos:
+        repo_path = find_repo_path(r["project"], r["repo"])
+        if not repo_path:
+            continue
+        branch = ""
+        try:
+            br = subprocess.run(["git", "branch", "--show-current"],
+                                cwd=str(repo_path), capture_output=True, text=True, timeout=15)
+            branch = br.stdout.strip()
+        except Exception:
+            branch = ""
+        prs = _gh_pr_list(repo_path, ["--state", "open", "--head", branch]) if branch else []
+        if not prs and ticket and ticket != "TICKET":
+            prs = [p for p in _gh_pr_list(repo_path, ["--state", "open", "--search", ticket])
+                   if ticket.lower() in (p.get("title", "") + " " + p.get("headRefName", "")).lower()]
+        if prs:
+            p = prs[0]
+            return {"url": p["url"], "is_draft": bool(p.get("isDraft")),
+                    "number": p.get("number"), "branch": p.get("headRefName"), "source": "gh"}
+    return None
+
+
+def _pr_guard(task: dict, repos: List[dict]) -> bool:
+    """Before dispatching agents, check for an existing PR. Returns True to proceed,
+    False if dispatch was intercepted (open PR -> review; draft PR -> ask the human)."""
+    if os.environ.get("ENABLE_PR_CHECK", "1") != "1":
+        return True
+    task_id = task["id"]
+    try:
+        pr = _find_existing_pr(task, repos)
+    except Exception as e:
+        logging.warning(f"  PR check errored for {task_id[:8]} (proceeding): {e}")
+        return True
+    if not pr:
+        return True
+
+    url = pr.get("url", "")
+    if pr.get("is_draft"):
+        logging.info(f"  Draft PR {url} already exists for {task_id[:8]} — asking human, not dispatching")
+        try:
+            mc_request("POST", f"/api/tasks/{task_id}/checkpoints", {
+                "kind": "choice",
+                "prompt": f"A draft PR already exists for this task:\n{url}\n\nThe swarm won't touch it automatically. How do you want to proceed?",
+                "options": [
+                    "Move to review (I'll finish the PR myself)",
+                    "Let an agent continue on top of this PR",
+                    "Ignore it and dispatch a fresh agent",
+                ],
+                "pause": False,  # keep the task in progress, just ask
+            })
+        except Exception as e:
+            logging.warning(f"  Failed to raise draft-PR checkpoint for {task_id[:8]}: {e}")
+        mc_log_activity(task_id, "updated", f"Draft PR already exists ({url}) — raised a checkpoint for your decision before dispatching.")
+        return False
+
+    logging.info(f"  Open PR {url} already exists for {task_id[:8]} — moving to review, not dispatching")
+    mc_update_task(task_id, {"status": "review"})
+    mc_log_activity(task_id, "status_changed", f"Open PR already exists ({url}) — moved to review instead of dispatching an agent.")
+    return False
+
+
 def _spawn_for_repos(task: dict, repos: List[dict]):
     task_id = task["id"]
     title = task["title"]
     description = task.get("description", "")
     task_type = task.get("task_type", "implementation")
+
+    if task_type == "implementation" and not _pr_guard(task, repos):
+        return
 
     if task_type == "implementation":
         activities = fetch_task_activities(task_id)
@@ -1476,6 +1605,9 @@ def _plan_and_dispatch(task: dict, repos: List[dict]):
     task_id = task["id"]
     title = task["title"]
     description = task.get("description", "")
+
+    if task.get("task_type", "implementation") == "implementation" and not _pr_guard(task, repos):
+        return
 
     # Build context for planner
     repo_indexes: Dict[str, str] = {}
