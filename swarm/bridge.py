@@ -1232,6 +1232,21 @@ def detect_base_branch(repo_path: Path) -> str:
     return "origin/main"
 
 
+def _resolve_base_branch(task: dict, repo_path: Path) -> str:
+    """Base branch for the worktree + PR target. Honors an explicit per-task
+    override (triage_state.base_branch, e.g. 'coda/new-ui') so feature-branch work
+    branches off and merges back into the right branch; else the repo default."""
+    try:
+        raw = task.get("triage_state")
+        state = json.loads(raw) if isinstance(raw, str) and raw.strip() else (raw if isinstance(raw, dict) else {})
+        bb = ((state or {}).get("base_branch") or "").strip()
+        if bb:
+            return bb if bb.startswith("origin/") else f"origin/{bb}"
+    except Exception:
+        pass
+    return detect_base_branch(repo_path)
+
+
 def _infer_branch_prefix(title: str) -> str:
     import re
     lower = title.lower()
@@ -1243,19 +1258,29 @@ def _infer_branch_prefix(title: str) -> str:
 def spawn_agent(task_id: str, task_label: str, repo_path: Path, prompt_content: str,
                 agent_type: str = "claude", mc_task_id: str = "", base_branch: str = "",
                 task_title: str = "") -> bool:
-    prompt_dir = SWARM_DIR / "prompts"
-    prompt_dir.mkdir(parents=True, exist_ok=True)
-    prompt_file = prompt_dir / f"{task_label}.md"
-    prompt_file.write_text(prompt_content)
-
     prefix = _infer_branch_prefix(task_title or task_label)
     branch_name = f"{prefix}/{task_label}"
     if not base_branch:
         base_branch = detect_base_branch(repo_path)
 
+    # PR must target the same branch we based off (e.g. a feature branch like
+    # coda/new-ui), not the repo default. gh's --base wants the bare branch name.
+    pr_base = base_branch.split("/", 1)[1] if base_branch.startswith("origin/") else base_branch
+
+    prompt_dir = SWARM_DIR / "prompts"
+    prompt_dir.mkdir(parents=True, exist_ok=True)
+    prompt_file = prompt_dir / f"{task_label}.md"
+    prompt_file.write_text(
+        prompt_content
+        + f"\n\n---\n## Branch & PR target\n"
+        f"Your work is based on `{pr_base}`. When you open the pull request, it MUST "
+        f"target that branch:\n\n```\ngh pr create --base {pr_base} --title \"[...] ...\" --body \"...\"\n```\n"
+    )
+
     env = os.environ.copy()
     env["MC_TASK_ID"] = mc_task_id or task_id
     env["BASE_BRANCH"] = base_branch
+    env["PR_BASE_BRANCH"] = pr_base
 
     try:
         result = subprocess.run(
@@ -1600,7 +1625,8 @@ def _spawn_for_repos(task: dict, repos: List[dict]):
         prompt = generate_investigation_prompt(task, repo_context, project, repo, knowledge=knowledge)
         task_label = f"{task_id[:8]}-inv-{repo}"
 
-        if spawn_agent(task_id, task_label, repo_path, prompt, mc_task_id=task_id, task_title=title):
+        if spawn_agent(task_id, task_label, repo_path, prompt, mc_task_id=task_id, task_title=title,
+                       base_branch=_resolve_base_branch(task, repo_path)):
             mc_update_task(task_id, {"status": "in_progress"})
             mc_log_activity(task_id, "spawned", f"Investigation agent spawned for {project}/{repo}")
         else:
@@ -1621,7 +1647,8 @@ def _spawn_for_repos(task: dict, repos: List[dict]):
         prompt = generate_prompt(task, repo_context, project, repo, knowledge=knowledge)
         task_label = f"{task_id[:8]}-{repo}"
 
-        if spawn_agent(task_id, task_label, repo_path, prompt, mc_task_id=task_id, task_title=title):
+        if spawn_agent(task_id, task_label, repo_path, prompt, mc_task_id=task_id, task_title=title,
+                       base_branch=_resolve_base_branch(task, repo_path)):
             mc_update_task(task_id, {"status": "in_progress"})
             mc_log_activity(task_id, "spawned", f"Agent spawned for {project}/{repo}")
         else:
@@ -1811,6 +1838,11 @@ def _dispatch_next_steps(task: dict, plan: dict, repos: List[dict]):
                 prefix = _infer_branch_prefix(title or dep_label)
                 step_base_branch = f"{prefix}/{dep_label}"
                 break
+
+        # First step in a repo (no in-repo dependency) → base off the task's chosen
+        # base branch (feature-branch override or repo default).
+        if not step_base_branch and target_repo:
+            step_base_branch = _resolve_base_branch(task, target_repo)
 
         update_step_progress(task_id, step_num, {
             "status": "in_progress",
