@@ -1384,19 +1384,24 @@
                 return;
             }
             els.drawerCheckpointsSection.style.display = 'block';
+            // Build with data-* attributes only (no interpolated inline JS) and wire
+            // handlers via a delegated listener below — avoids XSS from prompt/option text.
             els.drawerCheckpoints.innerHTML = pending.map(c => {
                 let opts = [];
                 try { opts = c.options ? JSON.parse(c.options) : []; } catch (e) { opts = []; }
-                const buttons = (opts && opts.length)
-                    ? opts.map((o, i) => `<button class="cp-btn" onclick="resolveCheckpoint('${c.id}', 'choose', ${JSON.stringify(o).replace(/"/g, '&quot;')})">${escapeHtml(o)}</button>`).join('')
-                    : `<button class="cp-btn" onclick="resolveCheckpoint('${c.id}', 'approve')">Approve</button>
-                       <button class="cp-btn cp-btn-reject" onclick="resolveCheckpoint('${c.id}', 'reject')">Reject</button>`;
+                const buttons = (Array.isArray(opts) && opts.length)
+                    ? opts.map((o) => `<button class="cp-btn" data-cp-id="${escapeHtml(c.id)}" data-cp-decision="choose" data-cp-response="${escapeHtml(String(o))}">${escapeHtml(String(o))}</button>`).join('')
+                    : `<button class="cp-btn" data-cp-id="${escapeHtml(c.id)}" data-cp-decision="approve">Approve</button>
+                       <button class="cp-btn cp-btn-reject" data-cp-id="${escapeHtml(c.id)}" data-cp-decision="reject">Reject</button>`;
                 return `
                     <div style="margin-bottom:12px; padding:12px 14px; border:1px solid rgba(255,176,32,0.35); background:rgba(255,176,32,0.06); border-radius:8px;">
                         <div style="color:var(--text-primary); font-size:13px; white-space:pre-wrap; margin-bottom:10px;">${escapeHtml(c.prompt)}</div>
                         <div style="display:flex; flex-wrap:wrap; gap:8px;">${buttons}</div>
                     </div>`;
             }).join('');
+            els.drawerCheckpoints.querySelectorAll('.cp-btn').forEach((btn) => {
+                btn.onclick = () => resolveCheckpoint(btn.dataset.cpId, btn.dataset.cpDecision, btn.dataset.cpResponse);
+            });
         };
 
         window.resolveCheckpoint = async (checkpointId, decision, response) => {
