@@ -192,7 +192,7 @@ esac
 # string), so values may contain quotes, spaces, or shell metacharacters
 # without breaking out — and secrets never appear on a process command line.
 TMUX_ENV_ARGS=()
-add_session_env() { [ -n "${2:-}" ] && TMUX_ENV_ARGS+=( -e "$1=$2" ); }
+add_session_env() { if [ -n "${2:-}" ]; then TMUX_ENV_ARGS+=( -e "$1=$2" ); fi; }
 add_session_env MAX_BUDGET_USD     "${MAX_BUDGET_USD:-}"
 add_session_env MAX_TURNS          "${MAX_TURNS:-}"
 add_session_env FALLBACK_MODEL     "${FALLBACK_MODEL:-}"
