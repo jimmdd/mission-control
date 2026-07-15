@@ -1384,35 +1384,50 @@
                 return;
             }
             els.drawerCheckpointsSection.style.display = 'block';
+            // Collapse identical pending checkpoints (same prompt+options) into one card
+            // — the earlier loop bug could leave several duplicates. Resolving the card
+            // resolves every checkpoint in the group.
+            const groups = [];
+            const byKey = {};
+            pending.forEach(c => {
+                const key = (c.prompt || '') + '||' + (c.options || '');
+                if (!byKey[key]) { byKey[key] = { prompt: c.prompt, options: c.options, ids: [] }; groups.push(byKey[key]); }
+                byKey[key].ids.push(c.id);
+            });
             // Build with data-* attributes only (no interpolated inline JS) and wire
-            // handlers via a delegated listener below — avoids XSS from prompt/option text.
-            els.drawerCheckpoints.innerHTML = pending.map(c => {
+            // handlers via dataset below — avoids XSS from prompt/option text.
+            els.drawerCheckpoints.innerHTML = groups.map(g => {
                 let opts = [];
-                try { opts = c.options ? JSON.parse(c.options) : []; } catch (e) { opts = []; }
+                try { opts = g.options ? JSON.parse(g.options) : []; } catch (e) { opts = []; }
+                const idsAttr = escapeHtml(g.ids.join(','));
+                const dupNote = g.ids.length > 1 ? ` <span style="opacity:0.6; font-weight:400;">(${g.ids.length} duplicates — resolves all)</span>` : '';
                 const buttons = (Array.isArray(opts) && opts.length)
-                    ? opts.map((o) => `<button class="cp-btn" data-cp-id="${escapeHtml(c.id)}" data-cp-decision="choose" data-cp-response="${escapeHtml(String(o))}">${escapeHtml(String(o))}</button>`).join('')
-                    : `<button class="cp-btn" data-cp-id="${escapeHtml(c.id)}" data-cp-decision="approve">Approve</button>
-                       <button class="cp-btn cp-btn-reject" data-cp-id="${escapeHtml(c.id)}" data-cp-decision="reject">Reject</button>`;
+                    ? opts.map((o) => `<button class="cp-btn" data-cp-ids="${idsAttr}" data-cp-decision="choose" data-cp-response="${escapeHtml(String(o))}">${escapeHtml(String(o))}</button>`).join('')
+                    : `<button class="cp-btn" data-cp-ids="${idsAttr}" data-cp-decision="approve">Approve</button>
+                       <button class="cp-btn cp-btn-reject" data-cp-ids="${idsAttr}" data-cp-decision="reject">Reject</button>`;
                 return `
                     <div style="margin-bottom:12px; padding:12px 14px; border:1px solid rgba(255,176,32,0.35); background:rgba(255,176,32,0.06); border-radius:8px;">
-                        <div style="color:var(--text-primary); font-size:13px; white-space:pre-wrap; margin-bottom:10px;">${escapeHtml(c.prompt)}</div>
+                        <div style="color:var(--text-primary); font-size:13px; white-space:pre-wrap; margin-bottom:10px;">${escapeHtml(g.prompt)}${dupNote}</div>
                         <div style="display:flex; flex-wrap:wrap; gap:8px;">${buttons}</div>
                     </div>`;
             }).join('');
             els.drawerCheckpoints.querySelectorAll('.cp-btn').forEach((btn) => {
-                btn.onclick = () => resolveCheckpoint(btn.dataset.cpId, btn.dataset.cpDecision, btn.dataset.cpResponse);
+                btn.onclick = () => resolveCheckpoint((btn.dataset.cpIds || '').split(',').filter(Boolean), btn.dataset.cpDecision, btn.dataset.cpResponse);
             });
         };
 
-        window.resolveCheckpoint = async (checkpointId, decision, response) => {
+        window.resolveCheckpoint = async (checkpointIds, decision, response) => {
             if (state.readOnly) { alert('Read-only mode: editing is disabled.'); return; }
+            const ids = Array.isArray(checkpointIds) ? checkpointIds : [checkpointIds];
             try {
-                const res = await fetch(getApiUrl(`/checkpoints/${checkpointId}/resolve`), {
-                    method: 'POST',
-                    headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify({ decision, response: response || '' })
-                });
-                if (!res.ok) throw new Error(`Resolve failed (${res.status})`);
+                for (const id of ids) {
+                    const res = await fetch(getApiUrl(`/checkpoints/${id}/resolve`), {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify({ decision, response: response || '' })
+                    });
+                    if (!res.ok && res.status !== 409) throw new Error(`Resolve failed (${res.status})`);
+                }
                 if (state.selectedTaskId) await fetchTaskDetails(state.selectedTaskId);
                 await fetchTasks();
             } catch (err) {
