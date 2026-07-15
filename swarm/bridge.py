@@ -2474,9 +2474,12 @@ def process_planning_tasks():
         # a previous round must not permanently wedge the task.
         try:
             existing_acts = mc_request("GET", f"/api/tasks/{task_id}/activities")
+            # A new round starts at the latest planning_questions OR the latest human
+            # action (resolving a checkpoint) — so a "Manual intervention needed" marker
+            # from a prior attempt stops blocking once the human has acted on it.
             round_start = ""
             for a in existing_acts:
-                if a.get("activity_type") == "planning_questions":
+                if a.get("activity_type") in ("planning_questions", "checkpoint_resolved"):
                     ts = a.get("created_at", "")
                     if ts > round_start:
                         round_start = ts
