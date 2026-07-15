@@ -819,7 +819,16 @@ async function handleApiRequest(
           limit: limitParam ? parseInt(limitParam, 10) : undefined,
           offset: offsetParam ? parseInt(offsetParam, 10) : undefined,
         });
-        sendJson(res, 200, tasks);
+        // Enrich with the small per-task signals the board cards render (live progress
+        // and pending human checkpoints) — both come from single grouped queries.
+        const progressMap = db.getProgressMap();
+        const checkpointCounts = db.getPendingCheckpointCounts();
+        const enriched = tasks.map((t) => ({
+          ...t,
+          progress: progressMap[t.id] ?? null,
+          pending_checkpoints: checkpointCounts[t.id] ?? 0,
+        }));
+        sendJson(res, 200, enriched);
         return;
       }
 

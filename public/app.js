@@ -1156,7 +1156,7 @@
                                 <button class="btn-send" style="padding: 8px 20px;" onclick="closeTriageModal()">Done</button>
                             </div>
                         </div>` : '';
-                    contentEl.innerHTML = completeBannerHtml + triageState.questions.map((q, idx) => {
+                    contentEl.innerHTML = triageState.questions.map((q, idx) => {
                         const isAnswered = q.answered || q.answer;
                         const hasOptions = q.options && q.options.length > 0;
                         const isOther = (opt) => /other\s*\(/i.test(opt);
@@ -1186,7 +1186,7 @@
                                 `}
                             </div>
                         `;
-                    }).join('') + resetFooterHtml;
+                    }).join('') + completeBannerHtml + resetFooterHtml;
                 }
             } catch (e) {
                 console.error('Failed to parse triage_state', e);

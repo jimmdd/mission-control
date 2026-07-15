@@ -1496,8 +1496,26 @@ def _pr_guard(task: dict, repos: List[dict]) -> bool:
 
     url = pr.get("url", "")
     if pr.get("is_draft"):
-        logging.info(f"  Draft PR {url} already exists for {task_id[:8]} — asking human, not dispatching")
+        # Dedup: only raise the checkpoint (and announce) once — otherwise every
+        # bridge cycle that re-dispatches this task would stack another checkpoint.
         try:
+            existing = mc_request("GET", f"/api/tasks/{task_id}/checkpoints") or []
+            has_pending = any(c.get("status") == "pending" for c in existing)
+        except Exception:
+            has_pending = False
+        if has_pending:
+            # Already asked. Make sure the task is parked so the planning loop stops
+            # re-dispatching it (older checkpoints may have been raised without pausing).
+            try:
+                if task.get("status") != "on_hold":
+                    mc_update_task(task_id, {"status": "on_hold"})
+            except Exception:
+                pass
+            return False
+        logging.info(f"  Draft PR {url} already exists for {task_id[:8]} — raising checkpoint, pausing")
+        try:
+            # pause=True parks the task (on_hold) until you decide, which also stops the
+            # planning loop from re-dispatching it every cycle.
             mc_request("POST", f"/api/tasks/{task_id}/checkpoints", {
                 "kind": "choice",
                 "prompt": f"A draft PR already exists for this task:\n{url}\n\nThe swarm won't touch it automatically. How do you want to proceed?",
@@ -1506,11 +1524,11 @@ def _pr_guard(task: dict, repos: List[dict]) -> bool:
                     "Let an agent continue on top of this PR",
                     "Ignore it and dispatch a fresh agent",
                 ],
-                "pause": False,  # keep the task in progress, just ask
+                "pause": True,
             })
         except Exception as e:
             logging.warning(f"  Failed to raise draft-PR checkpoint for {task_id[:8]}: {e}")
-        mc_log_activity(task_id, "updated", f"Draft PR already exists ({url}) — raised a checkpoint for your decision before dispatching.")
+        mc_log_activity(task_id, "updated", f"Draft PR already exists ({url}) — paused for your decision before dispatching.")
         return False
 
     logging.info(f"  Open PR {url} already exists for {task_id[:8]} — moving to review, not dispatching")
