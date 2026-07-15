@@ -2339,7 +2339,8 @@ def process_planning_tasks():
             }
             post_planning_questions(task_id, existing_qs + [repo_question],
                                     triage_result={"repos": [], "reasoning": "repo-selection follow-up"})
-            mc_log_activity(task_id, "updated",
+            # Dedicated activity type so the server emits a notification for the new question.
+            mc_log_activity(task_id, "new_triage_question",
                 "All questions answered but target repo unclear — posted a repo-selection follow-up.")
             logging.info(f"  Posted repo-selection follow-up for {task_id[:8]}")
             continue

@@ -964,11 +964,24 @@
                             const total = triageState.questions.length;
                             const answered = triageState.questions.filter(q => q.answered || q.answer).length;
                             const allDone = answered === total;
+                            // A follow-up question appeared after earlier ones were answered
+                            // (e.g. the bridge's repo-selection follow-up) — flag it as NEW.
+                            const hasNew = answered > 0 && answered < total;
+                            const btnStyle = allDone
+                                ? 'style="color: var(--accent); border-color: rgba(0,255,136,0.3);"'
+                                : hasNew
+                                    ? 'style="color: #ffb020; border-color: rgba(255,176,32,0.55); background: rgba(255,176,32,0.08);"'
+                                    : '';
+                            const iconCheck = '<svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="20 6 9 17 4 12"></polyline></svg>';
+                            const iconBell = '<svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M18 8A6 6 0 0 0 6 8c0 7-3 9-3 9h18s-3-2-3-9"></path><path d="M13.73 21a2 2 0 0 1-3.46 0"></path></svg>';
+                            const iconQ = '<svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"></circle><path d="M9.09 9a3 3 0 0 1 5.83 1c0 2-3 3-3 3"></path><line x1="12" y1="17" x2="12.01" y2="17"></line></svg>';
                             triageIndicatorHtml = `
-                                <button class="triage-indicator-btn" data-triage-task="${task.id}" onclick="openTriageModal(event, '${task.id}')" ${allDone ? 'style="color: var(--accent); border-color: rgba(0,255,136,0.3);"' : ''}>
+                                <button class="triage-indicator-btn" data-triage-task="${task.id}" onclick="openTriageModal(event, '${task.id}')" ${btnStyle}>
                                     ${allDone
-                                        ? '<svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="20 6 9 17 4 12"></polyline></svg> TRIAGE ✓'
-                                        : `<svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"></circle><path d="M9.09 9a3 3 0 0 1 5.83 1c0 2-3 3-3 3"></path><line x1="12" y1="17" x2="12.01" y2="17"></line></svg> TRIAGE (${answered}/${total})`
+                                        ? `${iconCheck} TRIAGE ✓`
+                                        : hasNew
+                                            ? `${iconBell} NEW QUESTION (${total - answered})`
+                                            : `${iconQ} TRIAGE (${answered}/${total})`
                                     }
                                 </button>
                             `;

@@ -1104,6 +1104,12 @@ async function handleApiRequest(
                   events.emit("needs_human", { taskId, message: input.message });
                 }
 
+                // A new triage question appeared after earlier ones were answered (e.g. the
+                // bridge's repo-selection follow-up) — surface it as a notification.
+                if (input.activity_type === "new_triage_question") {
+                  events.emit("new_triage_question", { taskId, message: input.message });
+                }
+
                 sendJson(res, 201, activity);
                 return;
               }

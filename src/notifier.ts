@@ -25,7 +25,7 @@ export interface NotifierOptions {
 
 // Events that warrant pinging a human. The agent pinged you — you don't have to
 // be watching the board.
-const HUMAN_RELEVANT = new Set(["needs_human", "awaiting_approval", "agent_exited", "agent_stalled"]);
+const HUMAN_RELEVANT = new Set(["needs_human", "awaiting_approval", "agent_exited", "agent_stalled", "new_triage_question"]);
 
 function describe(event: McEvent): { title: string; message: string } {
   const id = typeof event.taskId === "string" ? event.taskId.slice(0, 8) : "";
@@ -39,6 +39,8 @@ function describe(event: McEvent): { title: string; message: string } {
       return { title: `Agent exited on ${id}`, message: detail || "The agent session ended unexpectedly." };
     case "agent_stalled":
       return { title: `Agent stalled on ${id}`, message: detail || "The agent stopped sending heartbeats." };
+    case "new_triage_question":
+      return { title: `New question on ${id}`, message: detail || "Triage has a new question that needs your answer." };
     default:
       return { title: `Mission Control: ${event.type} (${id})`, message: detail };
   }
