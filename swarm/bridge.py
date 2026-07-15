@@ -573,23 +573,63 @@ def call_gemini(prompt: str, max_tokens: int = 2048, model: Optional[str] = None
 
 # === Librarian ===
 
+# Label used as the "project" for repos that live directly under GITPROJECTS_DIR
+# (flat layout, e.g. ~/GitProjects/backend-new-ui) rather than nested project/repo.
+FLAT_REPO_PROJECT = GITPROJECTS_DIR.name
+
+
+def discover_local_repos() -> List[dict]:
+    """Discover git repos under GITPROJECTS_DIR, supporting both layouts:
+      - flat:   <root>/<repo>            -> project=FLAT_REPO_PROJECT, repo=<repo>
+      - nested: <root>/<project>/<repo>  -> project=<project>, repo=<repo>
+    Returns dicts with project/repo/path/label."""
+    repos: List[dict] = []
+    root = GITPROJECTS_DIR
+    if not root.is_dir():
+        return repos
+    for entry in sorted(root.iterdir()):
+        if not entry.is_dir() or entry.name.startswith("."):
+            continue
+        # .git may be a dir (main clone) or a file (git worktree) — both are valid targets.
+        if (entry / ".git").exists():
+            repos.append({
+                "project": FLAT_REPO_PROJECT,
+                "repo": entry.name,
+                "path": entry,
+                "label": f"{FLAT_REPO_PROJECT}/{entry.name}",
+            })
+            continue
+        # Not a repo itself — look one level deeper for nested project/repo.
+        for sub in sorted(entry.iterdir()):
+            if sub.is_dir() and (sub / ".git").exists():
+                repos.append({
+                    "project": entry.name,
+                    "repo": sub.name,
+                    "path": sub,
+                    "label": f"{entry.name}/{sub.name}",
+                })
+    return repos
+
+
 def read_manifest() -> str:
     manifest = LIBRARIAN_DIR / "MANIFEST.md"
     if manifest.exists():
         return manifest.read_text()
-    return ""
+    # No librarian manifest has been generated — build one from the repos on disk so
+    # repo routing still works (otherwise identify_repos has no repo list and guesses).
+    repos = discover_local_repos()
+    if not repos:
+        return ""
+    lines = ["# Available Repos", ""]
+    for r in repos:
+        lines.append(f"- {r['project']}/{r['repo']}")
+    return "\n".join(lines)
 
 
 def _available_repo_options(limit: int = 20) -> List[str]:
-    """List 'project/repo' labels from the librarian indexes, for repo-selection prompts."""
-    options = []
-    indexes_dir = LIBRARIAN_DIR / "indexes"
-    if indexes_dir.exists():
-        for idx_file in sorted(indexes_dir.glob("*/*.md")):
-            options.append(f"{idx_file.parent.name}/{idx_file.stem}")
-            if len(options) >= limit:
-                break
-    return options
+    """List 'project/repo' labels from the repos on disk, for repo-selection prompts."""
+    options = [r["label"] for r in discover_local_repos()]
+    return options[:limit]
 
 
 def read_repo_index(project: str, repo: str) -> str:
@@ -639,9 +679,21 @@ def extract_api_summary(repo_index: str, repo_label: str) -> str:
 
 
 def find_repo_path(project: str, repo: str) -> Optional[Path]:
-    candidate = GITPROJECTS_DIR / project / repo
-    if candidate.exists() and (candidate / ".git").exists():
-        return candidate
+    """Resolve a repo to a path on disk, tolerant of flat vs nested layout and of
+    however the router split project/repo. Tries nested <root>/<project>/<repo>,
+    then flat <root>/<repo>, then flat <root>/<project>."""
+    project = (project or "").strip().strip("/")
+    repo = (repo or "").strip().strip("/")
+    candidates = []
+    if project and repo:
+        candidates.append(GITPROJECTS_DIR / project / repo)  # nested project/repo
+    if repo:
+        candidates.append(GITPROJECTS_DIR / repo)            # flat, by repo name
+    if project:
+        candidates.append(GITPROJECTS_DIR / project)         # flat, by project name
+    for candidate in candidates:
+        if candidate.exists() and (candidate / ".git").exists():
+            return candidate
     return None
 
 
