@@ -507,8 +507,14 @@ def move_issue_to_state(issue: dict, prefer_name: str):
     }
     """
     try:
-        linear_query(mutation, {"id": issue["id"], "stateId": state_id})
-        logging.info(f"  Moved Linear {issue.get('identifier', issue['id'][:8])} to {prefer_name}")
+        # linear_query returns {} when the mutation is suppressed (interaction < updates);
+        # only claim we moved it when the write actually went through.
+        result = linear_query(mutation, {"id": issue["id"], "stateId": state_id})
+        if result:
+            logging.info(f"  Moved Linear {issue.get('identifier', issue['id'][:8])} to {prefer_name}")
+        else:
+            logging.info(f"  Linear {issue.get('identifier', issue['id'][:8])} would move to {prefer_name}, "
+                         f"but write-back is off (LINEAR_INTERACTION=intake)")
     except Exception as e:
         logging.warning(f"  Failed to move {issue.get('identifier', '?')} to {prefer_name}: {e}")
 
