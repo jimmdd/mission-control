@@ -2148,6 +2148,14 @@ async function handleApiRequest(
           return;
         }
 
+        if (segments[0] === "linear" && segments[1] === "sync" && segments.length === 2 && method === "POST") {
+          // Run a full Linear sync once now, instead of waiting for the scheduled cycle.
+          const result = await runPythonRaw([resolveRuntimePath("integrations", "linear", "linear-sync.py")]);
+          db.createEvent({ type: "linear_sync", message: `Manual Linear sync: ${result.ok ? "ok" : "failed"}` });
+          sendJson(res, result.ok ? 200 : 502, result);
+          return;
+        }
+
         if (segments[0] === "repos" && segments[1] === "meta" && segments.length === 2 && method === "GET") {
           // Discover git repos under the watch root for the Settings picker.
           sendJson(res, 200, discoverRepos());

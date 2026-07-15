@@ -1772,7 +1772,10 @@
                     const nextStage = stages[idx + 1];
                     const conn = document.getElementById(`conn-${stage}-${nextStage}`);
                     if (conn) {
-                        if (counts[stage] > 0 || counts[nextStage] > 0) {
+                        // Animate a connection only when its SOURCE stage has work actually
+                        // flowing forward — otherwise e.g. review→complete would animate
+                        // whenever any task is done, even with nothing in review.
+                        if (counts[stage] > 0) {
                             conn.classList.add('active');
                         } else {
                             conn.classList.remove('active');

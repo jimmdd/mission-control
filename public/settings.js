@@ -77,6 +77,7 @@
             { value: "updates", label: "Updates — also post progress / done comments" },
             { value: "full", label: "Full — also reply to @mention questions" },
           ] },
+        { key: "__linear_sync", type: "action", action: "linear_sync" },
         { key: "MISSION_CONTROL_NOTIFY_WEBHOOK", label: "Notification webhook URL", secret: false },
       ],
     },
@@ -117,6 +118,16 @@
       alert("Knowledge scan complete:\n\n" + (r.output || "done"));
     } catch (e) {
       alert("Scan failed: " + e.message);
+    }
+    await refresh();
+  }
+  async function syncLinearNow(btn) {
+    if (btn) { btn.disabled = true; btn.textContent = "Syncing Linear…"; }
+    try {
+      const r = await post("/linear/sync", {});
+      alert("Linear sync complete:\n\n" + (r.output || "done"));
+    } catch (e) {
+      alert("Linear sync failed: " + e.message);
     }
     await refresh();
   }
@@ -201,6 +212,13 @@
           <div class="mc-set-field">
             <button class="mc-set-btn" id="mc-repo-scan" style="width:100%">⚙ Build knowledge now (scan watched repos)</button>
             <div class="mc-set-note">Runs extraction over the watched repos and stores facts in the knowledge base. First scan of a repo is a full index.</div>
+          </div>`;
+        }
+        if (f.type === "action" && f.action === "linear_sync") {
+          return `
+          <div class="mc-set-field">
+            <button class="mc-set-btn" id="mc-linear-sync" style="width:100%"${configured.LINEAR_API_KEY ? "" : " disabled"}>↻ Sync Linear now</button>
+            <div class="mc-set-note">Pull issues and push status changes now, without waiting for the 5-minute cycle.</div>
           </div>`;
         }
         if (f.type === "action") {
@@ -309,6 +327,8 @@
     if (repoPull) repoPull.onclick = reloadRepoMeta;
     const repoScan = root.querySelector("#mc-repo-scan");
     if (repoScan) repoScan.onclick = () => buildKnowledgeNow(repoScan);
+    const linearSync = root.querySelector("#mc-linear-sync");
+    if (linearSync) linearSync.onclick = () => syncLinearNow(linearSync);
   }
 
   function mountButton() {
