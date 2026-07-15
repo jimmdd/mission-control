@@ -24,6 +24,7 @@
     "context-fabrica"
   ],
   "scripts": {
+    "setup": "bash scripts/setup.sh",
     "build": "tsc --noEmit",
     "test": "node --import tsx --test tests/*.test.mjs",
     "start": "npx tsx server.ts",

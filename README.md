@@ -499,6 +499,23 @@ npm start
 # open http://localhost:18900  → click ⚙ SETTINGS to add a model key when ready
 ```
 
+### One-command setup (bootstrap + background services)
+
+For the full local install — dependencies, the `~/.mission-control` layout, the
+swarm runtime scripts, a config file, and the always-on background services —
+run:
+
+```bash
+npm run setup        # or: bash scripts/setup.sh
+```
+
+It is idempotent (safe to re-run) and prompts before anything invasive (creating
+a Python venv, installing/loading the launchd services). It auto-detects macOS
+for the services step and skips it elsewhere. Flags: `--yes` (assume yes),
+`--no-services` (skip the launchd step). After it finishes, open
+http://127.0.0.1:18900/ and add keys via the ⚙ Settings panel or
+`~/.mission-control/.env`.
+
 ### Full prerequisites (for knowledge memory + the swarm runtime)
 
 - Node.js 22+
