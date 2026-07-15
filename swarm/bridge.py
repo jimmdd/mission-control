@@ -1273,6 +1273,51 @@ def spawn_agent(task_id: str, task_label: str, repo_path: Path, prompt_content: 
         return False
 
 
+def _handle_spawn_failure(task_id: str, what: str, max_attempts: int = 3):
+    """A dispatch spawn failed — never leave the task stranded in 'assigned' (a state
+    no bridge loop re-scans). Return it to 'planning' so the bridge retries transient
+    failures automatically, but after `max_attempts` in one triage round, stop and flag
+    for a human so a permanent failure doesn't tight-loop."""
+    acts = fetch_task_activities(task_id) or []
+    round_start = max((a.get("created_at", "") for a in acts
+                       if a.get("activity_type") == "planning_questions"), default="")
+    prior_fails = sum(1 for a in acts
+                      if "Agent spawn failed" in a.get("message", "")
+                      and a.get("created_at", "") >= round_start)
+    give_up = (prior_fails + 1) >= max_attempts
+
+    logging.warning(f"  Spawn failed for {task_id[:8]} ({what}) — attempt {prior_fails + 1}"
+                    f"{' (giving up, flagging human)' if give_up else ' (will retry)'}")
+    try:
+        mc_update_task(task_id, {"status": "planning"})
+    except Exception:
+        pass
+
+    # Surface it as needing attention (deduped so retries don't spam checkpoints).
+    try:
+        existing = mc_request("GET", f"/api/tasks/{task_id}/checkpoints") or []
+        has_pending = any(c.get("status") == "pending" for c in existing)
+    except Exception:
+        has_pending = False
+    if not has_pending:
+        try:
+            mc_request("POST", f"/api/tasks/{task_id}/checkpoints", {
+                "kind": "approval",
+                "prompt": (f"Couldn't spawn an agent for {what}. Task returned to planning. "
+                           "Check the swarm runtime (spawn-agent.sh in ~/.mission-control/swarm, "
+                           "agent CLI logged in), then re-trigger."),
+                "pause": False,
+            })
+        except Exception:
+            pass
+
+    # After max_attempts, include the guard phrase so process_planning_tasks stops
+    # auto-re-dispatching this round and waits for a human.
+    tail = (" Manual intervention needed — resolve the checkpoint and re-trigger."
+            if give_up else " Will retry on the next cycle.")
+    mc_log_activity(task_id, "updated", f"Agent spawn failed for {what} (attempt {prior_fails + 1}).{tail}")
+
+
 # === Main Processing ===
 
 def fetch_tasks_by_status(status: str) -> List[dict]:
@@ -1540,6 +1585,8 @@ def _spawn_for_repos(task: dict, repos: List[dict]):
         if spawn_agent(task_id, task_label, repo_path, prompt, mc_task_id=task_id, task_title=title):
             mc_update_task(task_id, {"status": "in_progress"})
             mc_log_activity(task_id, "spawned", f"Investigation agent spawned for {project}/{repo}")
+        else:
+            _handle_spawn_failure(task_id, f"{project}/{repo}")
         return
 
     if len(repos) == 1:
@@ -1559,6 +1606,8 @@ def _spawn_for_repos(task: dict, repos: List[dict]):
         if spawn_agent(task_id, task_label, repo_path, prompt, mc_task_id=task_id, task_title=title):
             mc_update_task(task_id, {"status": "in_progress"})
             mc_log_activity(task_id, "spawned", f"Agent spawned for {project}/{repo}")
+        else:
+            _handle_spawn_failure(task_id, f"{project}/{repo}")
     else:
         mc_log_activity(task_id, "updated", f"Multi-repo task detected ({len(repos)} repos). Creating child tasks.")
 
@@ -1595,6 +1644,8 @@ def _spawn_for_repos(task: dict, repos: List[dict]):
             if spawn_agent(child_id, task_label, repo_path, prompt, mc_task_id=child_id, task_title=title):
                 mc_update_task(child_id, {"status": "in_progress"})
                 mc_log_activity(child_id, "spawned", f"Agent spawned for {project}/{repo}")
+            else:
+                _handle_spawn_failure(child_id, f"{project}/{repo}")
 
         mc_update_task(task_id, {"status": "in_progress"})
         mc_log_activity(task_id, "updated", f"Spawned agents across {len(repos)} repos")
@@ -1767,6 +1818,7 @@ def _dispatch_next_steps(task: dict, plan: dict, repos: List[dict]):
             logging.info(f"  Dispatched step {step_num}: {step['title']} → {agent_type} ({category})")
         else:
             update_step_progress(task_id, step_num, {"status": "failed", "outcome": "Spawn failed"})
+            _handle_spawn_failure(task_id, f"step {step_num}: {step.get('title', '')}"[:80])
             logging.error(f"  Failed to spawn agent for step {step_num}")
 
 
