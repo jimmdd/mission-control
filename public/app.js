@@ -1061,6 +1061,12 @@
                     needsHumanBadge = `<div class="badge" title="Awaiting your decision — open the task to respond" style="background: rgba(255,176,32,0.18); color:#ffb020; font-size:9px; padding:1px 6px; font-weight:600;">⚠ NEEDS YOU</div>`;
                 }
 
+                // Link to the PR the agent opened (captured once the task hits review).
+                let prButtonHtml = '';
+                if (task.pr_url) {
+                    prButtonHtml = `<a href="${escapeHtml(task.pr_url)}" target="_blank" rel="noopener" onclick="event.stopPropagation()" class="badge" title="Open pull request on GitHub" style="background: rgba(99,102,241,0.18); color:#a5b4fc; font-size:9px; padding:1px 6px; font-weight:600; text-decoration:none;">↗ PR</a>`;
+                }
+
                 return `
                     <div class="task-card ${isExpanded} ${isDone ? 'task-done' : ''} ${priorityClass}" id="card-${task.id}" style="--card-status-color: ${statusColor}">
                         <div class="card-header" onclick="${isExpandable ? `toggleChildren(event, '${task.id}')` : `handleTaskClick(event, '${task.id}')`}">
@@ -1073,6 +1079,7 @@
                             <div class="card-subtitle">
                                 <div class="badge badge-status ${task.status}">${task.status.replace('_', ' ')}</div>
                                 ${needsHumanBadge}
+                                ${prButtonHtml}
                                 ${progressBadgeHtml}
                                 ${task.task_type === 'investigation'
                                     ? '<div class="badge" style="background: rgba(147, 130, 255, 0.15); color: #9382ff; font-size: 9px; padding: 1px 6px;">INVESTIGATION</div>'
@@ -1466,8 +1473,13 @@
             // Render Deliverables
             if (state.deliverables && state.deliverables.length > 0) {
                 els.drawerDeliverablesSection.style.display = '';
-                const typeIcons = { 'gsd-plan': '\u{1F4CB}', 'gsd-verification': '\u2705', 'gsd-prd': '\u{1F4C4}' };
-                els.drawerDeliverables.innerHTML = state.deliverables.map(d => `
+                const typeIcons = { 'gsd-plan': '\u{1F4CB}', 'gsd-verification': '\u2705', 'gsd-prd': '\u{1F4C4}', 'pr': '\u{1F500}' };
+                const isUrl = (p) => typeof p === 'string' && /^https?:\/\//.test(p);
+                els.drawerDeliverables.innerHTML = state.deliverables.map(d => {
+                    const linkHtml = isUrl(d.path)
+                        ? `<a href="${escapeHtml(d.path)}" target="_blank" rel="noopener" class="cp-btn" style="display:inline-block; margin-top:8px; text-decoration:none;">\u2197 Open ${d.deliverable_type === 'pr' ? 'PR' : 'link'}</a>`
+                        : '';
+                    return `
                     <div class="deliverable-card" onclick="this.classList.toggle('expanded')">
                         <div class="deliverable-header">
                             <span class="deliverable-type-icon">${typeIcons[d.deliverable_type] || '\u{1F4CE}'}</span>
@@ -1476,10 +1488,10 @@
                             <span class="deliverable-chevron">\u25B6</span>
                         </div>
                         <div class="deliverable-body">
-                            <div class="deliverable-body-content">${d.description ? parseMarkdown(d.description) : '<span style="color: var(--text-secondary);">No description.</span>'}</div>
+                            <div class="deliverable-body-content">${d.description ? parseMarkdown(d.description) : (isUrl(d.path) ? '' : '<span style="color: var(--text-secondary);">No description.</span>')}${linkHtml}</div>
                         </div>
-                    </div>
-                `).join('');
+                    </div>`;
+                }).join('');
             } else {
                 els.drawerDeliverablesSection.style.display = 'none';
             }

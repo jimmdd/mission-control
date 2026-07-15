@@ -2773,6 +2773,44 @@ This task is investigation-only. You received new follow-up context/questions.
     mc_log_activity(task_id, "updated", "Investigation follow-up received from Mission Control — re-launching investigation agent")
 
 
+def _capture_pr_for_task(task: dict):
+    """Record the PR an agent opened for this task (once), so the UI can link to it.
+    The agent runs `gh pr create` in its worktree but nothing pulls the URL back —
+    look it up by the task's branch and store it as a 'pr' deliverable."""
+    task_id = task["id"]
+    try:
+        delivs = mc_request("GET", f"/api/tasks/{task_id}/deliverables") or []
+        if any(d.get("deliverable_type") == "pr" for d in delivs):
+            return  # already captured
+    except Exception:
+        return
+    entry = _find_agent_registry_entry(task_id)
+    if not entry:
+        return
+    branch = entry.get("branch", "")
+    worktree = entry.get("worktree", "")
+    repo_path = Path(worktree) if worktree and Path(worktree).exists() else None
+    if not repo_path or not branch:
+        return
+    prs = _gh_pr_list(repo_path, ["--state", "all", "--head", branch])
+    if not prs:
+        return
+    p = prs[0]
+    url = p.get("url", "")
+    if not url:
+        return
+    try:
+        mc_request("POST", f"/api/tasks/{task_id}/deliverables", {
+            "deliverable_type": "pr",
+            "title": f"PR #{p.get('number', '?')}: {p.get('title', '')}"[:120],
+            "path": url,
+        })
+        mc_log_activity(task_id, "updated", f"PR ready for review: {url}")
+        logging.info(f"  Recorded PR for {task_id[:8]}: {url}")
+    except Exception as e:
+        logging.warning(f"  Failed to record PR for {task_id[:8]}: {e}")
+
+
 def process_review_tasks():
     """Watch for Mission Control feedback on tasks in review/testing status."""
     review_tasks = fetch_tasks_by_status("review") + fetch_tasks_by_status("testing")
@@ -2785,6 +2823,8 @@ def process_review_tasks():
         task_id = task["id"]
         title = task["title"]
         task_type = task.get("task_type", "implementation")
+
+        _capture_pr_for_task(task)
 
         dashboard_feedback = _collect_dashboard_feedback(task_id)
         if dashboard_feedback:

@@ -1521,6 +1521,17 @@ export class MissionControlDB {
     return row.n;
   }
 
+  getPrLinks(): Record<string, string> {
+    const rows = this.db
+      .prepare(
+        "SELECT task_id AS tid, path AS url FROM task_deliverables WHERE deliverable_type = 'pr' AND path IS NOT NULL ORDER BY created_at DESC"
+      )
+      .all() as Array<{ tid: string; url: string }>;
+    const map: Record<string, string> = {};
+    for (const row of rows) if (!map[row.tid]) map[row.tid] = row.url; // newest wins
+    return map;
+  }
+
   getPendingCheckpointCounts(): Record<string, number> {
     const rows = this.db
       .prepare("SELECT task_id AS tid, COUNT(*) AS n FROM task_checkpoints WHERE status = 'pending' GROUP BY task_id")

@@ -823,10 +823,12 @@ async function handleApiRequest(
         // and pending human checkpoints) — both come from single grouped queries.
         const progressMap = db.getProgressMap();
         const checkpointCounts = db.getPendingCheckpointCounts();
+        const prLinks = db.getPrLinks();
         const enriched = tasks.map((t) => ({
           ...t,
           progress: progressMap[t.id] ?? null,
           pending_checkpoints: checkpointCounts[t.id] ?? 0,
+          pr_url: prLinks[t.id] ?? null,
         }));
         sendJson(res, 200, enriched);
         return;
