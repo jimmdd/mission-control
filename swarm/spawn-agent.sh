@@ -12,6 +12,10 @@
 #   BASE_BRANCH       — base branch for worktree (default: origin/main)
 set -euo pipefail
 
+# launchd/cron hand us a minimal PATH; make common per-user tool dirs (bun, etc.)
+# discoverable both here and — via the -e PATH passed to the agent session below.
+export PATH="$HOME/.bun/bin:$HOME/.local/bin:/opt/homebrew/bin:/usr/local/bin:$PATH"
+
 TASK_ID=$1
 REPO_PATH=$2
 BRANCH_NAME=$3
@@ -143,6 +147,11 @@ mkdir -p "$WORKTREE_BASE"
 cd "$REPO_PATH"
 git fetch origin
 WORKTREE_BASE_REF="${BASE_BRANCH:-origin/main}"
+# Remove any leftover worktree/branch from a previous failed attempt so a retry
+# doesn't abort on "already exists".
+git worktree remove --force "$WORKTREE_PATH" 2>/dev/null || true
+git branch -D "$BRANCH_NAME" 2>/dev/null || true
+git worktree prune 2>/dev/null || true
 git worktree add "$WORKTREE_PATH" -b "$BRANCH_NAME" "$WORKTREE_BASE_REF"
 
 # Inject MCP config for code-review-graph (if venv exists)
@@ -162,13 +171,16 @@ MCPEOF
   echo "  Injected .mcp.json for code-review-graph"
 fi
 
-# Install dependencies
+# Install dependencies (best-effort — never abort the spawn on a dep hiccup;
+# the agent can install/repair deps itself as its first step).
 if [ -f "pnpm-lock.yaml" ]; then
-  pnpm install
+  pnpm install || echo "  warning: pnpm install failed (agent will handle deps)"
+elif [ -f "bun.lock" ] || [ -f "bun.lockb" ]; then
+  bun install || echo "  warning: bun install failed (agent will handle deps)"
 elif [ -f "yarn.lock" ]; then
-  yarn install
+  yarn install || echo "  warning: yarn install failed (agent will handle deps)"
 elif [ -f "package-lock.json" ]; then
-  npm install
+  npm install || echo "  warning: npm install failed (agent will handle deps)"
 fi
 
 case "$AGENT_LAUNCHER" in
@@ -215,7 +227,7 @@ done < <(echo "$AGENT_ENV_JSON" | jq -c 'to_entries[]?')
 # Pass the launcher path and task id through the session environment too, so
 # the command string below is fully static — nothing dynamic is interpolated
 # into a shell command line.
-TMUX_ENV_ARGS+=( -e "MC_LAUNCHER=$LAUNCHER" -e "MC_TASK_ARG=$TASK_ID" )
+TMUX_ENV_ARGS+=( -e "MC_LAUNCHER=$LAUNCHER" -e "MC_TASK_ARG=$TASK_ID" -e "PATH=$PATH" )
 
 # Spawn tmux session. The command is a fixed literal; MC_LAUNCHER and
 # MC_TASK_ARG are resolved from the session env (set via -e above).

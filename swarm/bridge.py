@@ -1260,7 +1260,7 @@ def spawn_agent(task_id: str, task_label: str, repo_path: Path, prompt_content: 
     try:
         result = subprocess.run(
             [str(SWARM_DIR / "spawn-agent.sh"), task_label, str(repo_path), branch_name, agent_type, task_label],
-            capture_output=True, text=True, timeout=120, env=env,
+            capture_output=True, text=True, timeout=600, env=env,
         )
         if result.returncode == 0:
             logging.info(f"  Spawned {agent_type} agent: {task_label} (mc_task_id={mc_task_id or task_id}, base={base_branch})")
