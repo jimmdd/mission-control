@@ -1122,7 +1122,20 @@
             try {
                 const triageState = typeof task.triage_state === 'string' ? JSON.parse(task.triage_state) : task.triage_state;
                 if (triageState && triageState.questions) {
-                    contentEl.innerHTML = triageState.questions.map((q, idx) => {
+                    const allAnswered = triageState.questions.length > 0
+                        && triageState.questions.every(q => q.answered || q.answer);
+                    const completeBannerHtml = allAnswered ? `
+                        <div style="margin-bottom: 16px; padding: 14px 16px; border: 1px solid rgba(0,255,136,0.3); background: rgba(0,255,136,0.06); border-radius: 8px;">
+                            <div style="display: flex; align-items: center; gap: 8px; color: var(--accent); font-size: 13px; font-weight: 600;">
+                                <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="20 6 9 17 4 12"></polyline></svg>
+                                All questions answered
+                            </div>
+                            <div style="color: var(--text-secondary); font-size: 12px; margin-top: 6px;">The bridge will pick this task up on its next cycle and begin work — no further action needed. You can close this window.</div>
+                            <div style="display: flex; justify-content: flex-end; margin-top: 12px;">
+                                <button class="btn-send" style="padding: 8px 20px;" onclick="closeTriageModal()">Done</button>
+                            </div>
+                        </div>` : '';
+                    contentEl.innerHTML = completeBannerHtml + triageState.questions.map((q, idx) => {
                         const isAnswered = q.answered || q.answer;
                         const hasOptions = q.options && q.options.length > 0;
                         const isOther = (opt) => /other\s*\(/i.test(opt);
