@@ -1234,14 +1234,27 @@ def detect_base_branch(repo_path: Path) -> str:
 
 def _resolve_base_branch(task: dict, repo_path: Path) -> str:
     """Base branch for the worktree + PR target. Honors an explicit per-task
-    override (triage_state.base_branch, e.g. 'coda/new-ui') so feature-branch work
-    branches off and merges back into the right branch; else the repo default."""
+    override so feature-branch work branches off and merges back into the right
+    branch; else the repo default. Override sources, in order:
+      1) triage_state.base_branch
+      2) a 'Base branch: <name>' line in the task description (durable across triage)
+    """
+    def _norm(bb: str) -> str:
+        bb = bb.strip().rstrip("/")
+        return bb if bb.startswith("origin/") else f"origin/{bb}"
     try:
         raw = task.get("triage_state")
         state = json.loads(raw) if isinstance(raw, str) and raw.strip() else (raw if isinstance(raw, dict) else {})
         bb = ((state or {}).get("base_branch") or "").strip()
         if bb:
-            return bb if bb.startswith("origin/") else f"origin/{bb}"
+            return _norm(bb)
+    except Exception:
+        pass
+    try:
+        import re
+        m = re.search(r"(?im)^\s*base[- ]?branch:\s*(\S+)\s*$", task.get("description", "") or "")
+        if m:
+            return _norm(m.group(1))
     except Exception:
         pass
     return detect_base_branch(repo_path)
