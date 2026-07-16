@@ -216,6 +216,28 @@ add_session_env AGENT_PROVIDER     "${AGENT_PROVIDER:-}"
 add_session_env AGENT_THINKING     "${AGENT_THINKING:-}"
 add_session_env AGENT_FALLBACK_MODEL "${AGENT_FALLBACK_MODEL:-}"
 add_session_env AGENT_EFFORT       "${AGENT_EFFORT:-}"
+
+# Optional: give agents a SEPARATE git identity (a bot) so their commits and PRs
+# aren't attributed to your local user. Read only these keys from MC_HOME/.env and
+# pass them into the agent session ONLY — your shell, global git config, and gh
+# login are never touched.
+env_value() {  # env_value KEY -> value of KEY= from .env (strips surrounding quotes)
+  local f="$MC_HOME/.env" line val
+  [ -f "$f" ] || return 0
+  line="$(grep -E "^$1=" "$f" | tail -1 || true)"
+  [ -n "$line" ] || return 0
+  val="${line#*=}"; val="${val%\"}"; val="${val#\"}"
+  printf '%s' "$val"
+}
+BOT_GIT_NAME="$(env_value MC_AGENT_GIT_NAME)"
+BOT_GIT_EMAIL="$(env_value MC_AGENT_GIT_EMAIL)"
+BOT_GH_TOKEN="$(env_value MC_AGENT_GH_TOKEN)"
+add_session_env GIT_AUTHOR_NAME     "$BOT_GIT_NAME"
+add_session_env GIT_AUTHOR_EMAIL    "$BOT_GIT_EMAIL"
+add_session_env GIT_COMMITTER_NAME  "$BOT_GIT_NAME"
+add_session_env GIT_COMMITTER_EMAIL "$BOT_GIT_EMAIL"
+add_session_env GH_TOKEN            "$BOT_GH_TOKEN"
+
 while IFS= read -r entry; do
   [ -z "$entry" ] && continue
   key=$(echo "$entry" | jq -r '.key')
