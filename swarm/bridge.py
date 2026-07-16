@@ -955,6 +955,16 @@ def _extract_ticket_id(title: str) -> str:
     return match.group(0) if match else "TICKET"
 
 
+def _task_ref(task: dict) -> str:
+    """Short reference for branches / worktree labels / PR titles. Prefer the
+    ticket id (e.g. MET-532) so nothing is named after the opaque internal id;
+    fall back to the task-id prefix only when there's no ticket."""
+    ticket = _extract_ticket_id(task.get("title", ""))
+    if ticket and ticket != "TICKET":
+        return ticket
+    return task.get("id", "")[:8] or "task"
+
+
 # === Prompt Generation ===
 
 def generate_prompt(task: dict, repo_context: str, project: str, repo: str,
@@ -1063,7 +1073,7 @@ Read the output. If VERDICT is FAIL:
 Only when GSD verification passes AND review passes (or max iterations reached):
 1. Commit all changes with conventional commit messages
 2. Push your branch
-3. Create a PR with `gh pr create` — title MUST start with `[{_extract_ticket_id(title)}]`
+3. Create a PR with `gh pr create` — title MUST start with `[{_task_ref(task)}]`
 4. Report completion to Mission Control:
    curl -X POST {MC_BASE_URL}/api/webhooks/agent-completion \\
      -H "Content-Type: application/json" \\
@@ -1124,7 +1134,7 @@ resume and proceed accordingly — if rejected, do NOT take the action.
 - Do NOT add new dependencies without justification
 - Follow existing code patterns and conventions
 - Commit messages: conventional commits format
-- PR title MUST start with the ticket ID in brackets (e.g. `[{_extract_ticket_id(title)}] ...`)
+- PR title MUST start with the ticket ID in brackets (e.g. `[{_task_ref(task)}] ...`)
 - GSD verification is the source of truth — review fixes must not break it
 """
     return prompt
@@ -1135,7 +1145,7 @@ def generate_investigation_prompt(task: dict, repo_context: str, project: str, r
     title = task["title"]
     description = task.get("description", "")
     linear_url = task.get("external_url") or task.get("linear_issue_url", "")
-    ticket_id = _extract_ticket_id(title)
+    ticket_id = _task_ref(task)
 
     prompt = f"""# Investigation: {title}
 
@@ -1636,7 +1646,7 @@ def _spawn_for_repos(task: dict, repos: List[dict]):
         repo_context = repo_indexes.get(f"{project}/{repo}", "")
         knowledge = recall_knowledge([r], knowledge_query)
         prompt = generate_investigation_prompt(task, repo_context, project, repo, knowledge=knowledge)
-        task_label = f"{task_id[:8]}-inv-{repo}"
+        task_label = f"{_task_ref(task)}-inv-{repo}"
 
         if spawn_agent(task_id, task_label, repo_path, prompt, mc_task_id=task_id, task_title=title,
                        base_branch=_resolve_base_branch(task, repo_path)):
@@ -1658,7 +1668,7 @@ def _spawn_for_repos(task: dict, repos: List[dict]):
         repo_context = repo_indexes.get(f"{project}/{repo}", "")
         knowledge = recall_knowledge([r], knowledge_query)
         prompt = generate_prompt(task, repo_context, project, repo, knowledge=knowledge)
-        task_label = f"{task_id[:8]}-{repo}"
+        task_label = f"{_task_ref(task)}-{repo}"
 
         if spawn_agent(task_id, task_label, repo_path, prompt, mc_task_id=task_id, task_title=title,
                        base_branch=_resolve_base_branch(task, repo_path)):
@@ -1697,7 +1707,7 @@ def _spawn_for_repos(task: dict, repos: List[dict]):
             knowledge = recall_knowledge([r], knowledge_query)
             prompt = generate_prompt(task, repo_context, project, repo,
                                      sibling_contexts=sibling_contexts, knowledge=knowledge)
-            task_label = f"{child_id[:8]}-{repo}"
+            task_label = f"{_task_ref(child)}-{repo}"
 
             if spawn_agent(child_id, task_label, repo_path, prompt, mc_task_id=child_id, task_title=title):
                 mc_update_task(child_id, {"status": "in_progress"})
@@ -1839,7 +1849,7 @@ def _dispatch_next_steps(task: dict, plan: dict, repos: List[dict]):
 
         step_categories = get_planner_config()["step_categories"]
         agent_type = step_categories.get(category, {}).get("agent", "claude")
-        task_label = f"{task_id[:8]}-s{step_num}-{target_repo_name}"
+        task_label = f"{_task_ref(task)}-s{step_num}-{target_repo_name}"
 
         # Determine base branch: if this step depends on a prior step in the same repo,
         # use that step's branch so we inherit its commits
@@ -1847,7 +1857,7 @@ def _dispatch_next_steps(task: dict, plan: dict, repos: List[dict]):
         for dep_num in step.get("depends_on", []):
             dep_step = next((s for s in plan.get("steps", []) if s["step"] == dep_num), None)
             if dep_step and dep_step.get("repo") == step.get("repo"):
-                dep_label = f"{task_id[:8]}-s{dep_num}-{target_repo_name}"
+                dep_label = f"{_task_ref(task)}-s{dep_num}-{target_repo_name}"
                 prefix = _infer_branch_prefix(title or dep_label)
                 step_base_branch = f"{prefix}/{dep_label}"
                 break
