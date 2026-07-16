@@ -1234,6 +1234,26 @@ def _check_description_changed(issue: dict, mc_task: dict, state: dict) -> bool:
     if current_hash == stored_hash:
         return False
 
+    # Only re-triage a task that hasn't started execution yet. Resetting an
+    # assigned/in_progress/review/done task would orphan a running agent or discard
+    # finished work (this happened to MET-515). Record the new hash so we don't
+    # re-fire, note the change, and let the human fold it in via a change-request note.
+    mc_status = mc_task.get("status", "")
+    if mc_status not in ("inbox", "planning", "on_hold"):
+        logging.info(f"  Description changed for {issue['identifier']} but task is '{mc_status}' — noting, not re-triaging")
+        synced_info["description_hash"] = current_hash
+        state.setdefault("synced_issues", {})[issue_id] = synced_info
+        try:
+            mc_request("POST", f"/api/tasks/{mc_task_id}/activities", {
+                "activity_type": "updated",
+                "message": ("Linear description changed after work started — not re-triaging "
+                            "(would orphan the agent). Add a note here as a change-request if the "
+                            "agent should incorporate it."),
+            })
+        except Exception:
+            pass
+        return False
+
     logging.info(f"  Description changed for {issue['identifier']} — resetting triage")
 
     synced_info["description_hash"] = current_hash
