@@ -1275,20 +1275,60 @@ def _download_task_images(task: dict) -> List[dict]:
     vision-capable agent can actually see them. Linear-hosted uploads need the
     LINEAR_API_KEY. Saved under SWARM_DIR/assets/<task>/; best-effort."""
     import re
+    from urllib.parse import urlparse
     desc = task.get("description", "") or ""
     matches = re.findall(r"!\[([^\]]*)\]\((https?://[^)\s]+)\)", desc)
     if not matches:
         return []
     key = os.environ.get("LINEAR_API_KEY", "").strip()
+    # The description is attacker-influenceable (anyone who can edit the ticket), so:
+    #  - only fetch from an EXACT trusted host over https (blocks SSRF to internal /
+    #    link-local addresses and blocks token leaks to look-alike hosts like
+    #    uploads.linear.app.evil.com — a substring match would have allowed those), and
+    #  - never follow redirects (a redirect could bounce our Authorization header to an
+    #    attacker host or an internal address).
+    ALLOWED_IMAGE_HOSTS = {"uploads.linear.app"}
+
+    class _NoRedirect(urllib.request.HTTPRedirectHandler):
+        def redirect_request(self, *args, **kwargs):
+            return None
+
+    def _resolves_public(host: str) -> bool:
+        # Reject a host that resolves to any non-public address (defense in depth
+        # against DNS-rebinding to an internal target, on top of the host allowlist).
+        import socket as _socket
+        import ipaddress as _ip
+        try:
+            infos = _socket.getaddrinfo(host, 443, proto=_socket.IPPROTO_TCP)
+        except Exception:
+            return False
+        for info in infos:
+            try:
+                addr = _ip.ip_address(info[4][0])
+            except ValueError:
+                return False
+            if (addr.is_private or addr.is_loopback or addr.is_link_local
+                    or addr.is_unspecified or addr.is_reserved or addr.is_multicast):
+                return False
+        return bool(infos)
+
+    opener = urllib.request.build_opener(_NoRedirect)
     assets_dir = SWARM_DIR / "assets" / (task.get("id", "task")[:8] or "task")
     ext_map = {"image/png": "png", "image/jpeg": "jpg", "image/gif": "gif", "image/webp": "webp"}
     out: List[dict] = []
     for i, (alt, url) in enumerate(matches, 1):
         try:
+            parsed = urlparse(url)
+            host = (parsed.hostname or "").lower().rstrip(".")
+            if parsed.scheme != "https" or host not in ALLOWED_IMAGE_HOSTS:
+                continue  # untrusted or non-https image reference — skip
+            if not _resolves_public(host):
+                logging.warning(f"  Skipping image host {host} — resolves to a non-public address")
+                continue
             req = urllib.request.Request(url)
-            if "uploads.linear.app" in url and key:
+            if key:  # host is verified above, so the token only goes to Linear
                 req.add_header("Authorization", key)
-            with urllib.request.urlopen(req, timeout=20) as resp:
+            with opener.open(req, timeout=20) as resp:
                 ctype = (resp.headers.get("Content-Type", "") or "").split(";")[0]
                 if "image" not in ctype:
                     continue
