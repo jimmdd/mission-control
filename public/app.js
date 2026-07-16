@@ -1040,10 +1040,13 @@
                     ? (task.priority === 'urgent' ? 'priority-urgent' : task.priority === 'high' ? 'priority-high' : '')
                     : '';
 
-                // Structured live progress (phase / step / blocked reason).
+                // Structured live progress (phase / step / blocked reason). Once a task
+                // is handed off (review) or done, the agent's live progress is stale —
+                // don't show it (a completed agent's session-exit was flagging false BLOCKED).
                 let progressBadgeHtml = '';
                 const prog = task.progress;
-                if (prog && !isDone) {
+                const progressRelevant = !isDone && task.status !== 'review';
+                if (prog && progressRelevant) {
                     if (prog.state === 'blocked' || prog.state === 'waiting') {
                         const reason = escapeHtml(prog.blocked_reason || (prog.state === 'waiting' ? 'waiting on subtask' : 'blocked'));
                         progressBadgeHtml = `<div class="badge" title="${reason}" style="background: rgba(239,68,68,0.16); color:#ef4444; font-size:9px; padding:1px 6px;">${prog.state.toUpperCase()}</div>`;

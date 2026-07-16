@@ -37,6 +37,29 @@ export function startLivenessReaper(db: MissionControlDB, events: McEventBus, op
       let condition: "agent_exited" | "agent_stalled" | null = null;
       let reason = "";
       if (liveStatus === "completed_by_agent") {
+        // This liveStatus conflates two cases: the agent finished successfully
+        // (registry marked completed_by_agent) vs. a session that died while the
+        // registry still said "running". Only the latter is a real problem — a
+        // finished task (or one already advanced to review/testing/done) must NOT
+        // be flagged blocked, or its card shows a false BLOCKED tag.
+        const registryStatus = entry.status as string | undefined;
+        const task = db.getTask(taskId);
+        const finished =
+          registryStatus === "completed_by_agent" ||
+          (task && ["review", "testing", "done"].includes(task.status));
+        if (finished) {
+          const key = `${taskId}:settled`;
+          stillHolding.add(key);
+          if (!flagged.has(key)) {
+            flagged.add(key);
+            try {
+              db.upsertProgress(taskId, { state: "done", blocked_reason: null });
+            } catch {
+              /* task may not exist locally */
+            }
+          }
+          continue;
+        }
         condition = "agent_exited";
         reason = "agent session exited without reporting completion";
       } else if (liveStatus === "running" && lastHeartbeatAt !== null && now - lastHeartbeatAt > staleMs) {
