@@ -2866,6 +2866,52 @@ def _capture_pr_for_task(task: dict):
         logging.warning(f"  Failed to record PR for {task_id[:8]}: {e}")
 
 
+def _gh_pr_state(url: str) -> Optional[str]:
+    """Return a PR's state (OPEN / MERGED / CLOSED), or None on error. Uses --repo
+    parsed from the URL so it works regardless of the current directory."""
+    import re
+    m = re.match(r"https?://github\.com/([^/]+/[^/]+)/pull/(\d+)", url or "")
+    if not m:
+        return None
+    repo, num = m.group(1), m.group(2)
+    try:
+        out = subprocess.run([_gh_bin(), "pr", "view", num, "--repo", repo, "--json", "state"],
+                             capture_output=True, text=True, timeout=30)
+        if out.returncode != 0:
+            return None
+        return (json.loads(out.stdout or "{}") or {}).get("state")
+    except Exception:
+        return None
+
+
+def _check_pr_status_for_task(task: dict) -> bool:
+    """Close the loop on a review task by its captured PR: merged -> mark the task
+    done; closed-without-merge -> note it once. Returns True if the task was closed out."""
+    task_id = task["id"]
+    try:
+        delivs = mc_request("GET", f"/api/tasks/{task_id}/deliverables") or []
+    except Exception:
+        return False
+    pr_url = next((d.get("path") for d in delivs
+                   if d.get("deliverable_type") == "pr" and d.get("path")), None)
+    if not pr_url:
+        return False
+    state = _gh_pr_state(pr_url)
+    if state == "MERGED":
+        mc_update_task(task_id, {"status": "done"})
+        mc_log_activity(task_id, "status_changed", f"PR merged ({pr_url}) — task done.")
+        logging.info(f"  {task_id[:8]} PR merged — marked done")
+        return True
+    if state == "CLOSED":
+        try:
+            acts = mc_request("GET", f"/api/tasks/{task_id}/activities") or []
+            if not any("closed without merging" in a.get("message", "") for a in acts):
+                mc_log_activity(task_id, "updated", f"PR was closed without merging ({pr_url}) — still in review.")
+        except Exception:
+            pass
+    return False
+
+
 def process_review_tasks():
     """Watch for Mission Control feedback on tasks in review/testing status."""
     review_tasks = fetch_tasks_by_status("review") + fetch_tasks_by_status("testing")
@@ -2880,6 +2926,8 @@ def process_review_tasks():
         task_type = task.get("task_type", "implementation")
 
         _capture_pr_for_task(task)
+        if _check_pr_status_for_task(task):
+            continue  # PR merged -> task done; nothing more to do
 
         dashboard_feedback = _collect_dashboard_feedback(task_id)
         if dashboard_feedback:
