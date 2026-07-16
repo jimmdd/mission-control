@@ -1159,26 +1159,29 @@
             try {
                 const triageState = typeof task.triage_state === 'string' ? JSON.parse(task.triage_state) : task.triage_state;
                 if (triageState && triageState.questions) {
-                    const allAnswered = triageState.questions.length > 0
-                        && triageState.questions.every(q => q.answered || q.answer);
-                    const completeBannerHtml = allAnswered ? `
-                        <div style="margin-bottom: 16px; padding: 14px 16px; border: 1px solid rgba(0,255,136,0.3); background: rgba(0,255,136,0.06); border-radius: 8px;">
-                            <div style="display: flex; align-items: center; gap: 8px; color: var(--accent); font-size: 13px; font-weight: 600;">
-                                <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="20 6 9 17 4 12"></polyline></svg>
-                                All questions answered
-                            </div>
-                            <div style="color: var(--text-secondary); font-size: 12px; margin-top: 6px;">The bridge will pick this task up on its next cycle and begin work — no further action needed. You can close this window.</div>
-                            <div style="display: flex; justify-content: flex-end; margin-top: 12px;">
-                                <button class="btn-send" style="padding: 8px 20px;" onclick="closeTriageModal()">Done</button>
-                            </div>
-                        </div>` : '';
-                    contentEl.innerHTML = triageState.questions.map((q, idx) => {
-                        const isAnswered = q.answered || q.answer;
+                    const qs = triageState.questions;
+                    const allAnswered = qs.length > 0 && qs.every(q => q.answer);
+                    const confirmed = !!triageState.confirmed;
+                    // Editable until the user confirms (or global read-only). This lets you
+                    // fix wrong agent-suggested answers before anything is dispatched.
+                    const locked = state.readOnly || confirmed;
+
+                    const questionsHtml = qs.map((q, idx) => {
+                        const ans = q.answer || '';
                         const hasOptions = q.options && q.options.length > 0;
                         const isOther = (opt) => /other\s*\(/i.test(opt);
-                        const answerEditorHtml = state.readOnly
-                            ? `<div style="color: var(--text-secondary); font-size: 12px; opacity: 0.8;">Read-only mode: answer editing disabled.</div>`
-                            : `${hasOptions ? `
+                        const auto = q.answered_by === 'agent';
+                        const tag = !ans ? ''
+                            : auto
+                                ? '<span style="margin-left:8px; font-size:10px; color:#ffb020;">🤖 agent-suggested — edit if wrong</span>'
+                                : '<span style="margin-left:8px; font-size:10px; color:var(--accent);">answered</span>';
+                        let body;
+                        if (locked) {
+                            body = `<div style="color: var(--text-secondary); display: flex; gap: 8px; align-items: flex-start;">
+                                        <span>${ans ? escapeHtml(ans) : 'Pending…'}</span>
+                                    </div>`;
+                        } else {
+                            body = `${hasOptions ? `
                                 <div class="triage-options">
                                     ${q.options.filter(o => !isOther(o)).map(opt => `
                                         <button class="triage-option-chip" onclick="selectTriageOption(event, '${task.id}', ${idx}, this.textContent)">${escapeHtml(opt)}</button>
@@ -1186,23 +1189,45 @@
                                 </div>
                             ` : ''}
                             <div class="triage-custom-row">
-                                <input type="text" id="triage-ans-${task.id}-${idx}" class="kb-textarea" style="margin: 0; min-height: 36px; height: 36px; font-family: var(--font-body); padding: 8px 12px; font-size: 13px;" placeholder="${hasOptions ? 'Or type a custom answer...' : 'Type answer...'}" onclick="event.stopPropagation()" onkeydown="if(event.key==='Enter') submitTriageAnswer(event, '${task.id}', ${idx})">
-                                <button class="btn-send" style="padding: 8px 16px;" onclick="submitTriageAnswer(event, '${task.id}', ${idx})">Submit</button>
+                                <input type="text" id="triage-ans-${task.id}-${idx}" class="kb-textarea" style="margin: 0; min-height: 36px; height: 36px; font-family: var(--font-body); padding: 8px 12px; font-size: 13px;" value="${escapeHtml(ans)}" placeholder="${hasOptions ? 'Choose above or type…' : 'Type answer…'}" onclick="event.stopPropagation()" onkeydown="if(event.key==='Enter') submitTriageAnswer(event, '${task.id}', ${idx})">
+                                <button class="btn-send" style="padding: 8px 16px;" onclick="submitTriageAnswer(event, '${task.id}', ${idx})">${ans ? 'Update' : 'Submit'}</button>
                             </div>`;
+                        }
                         return `
                             <div style="margin-bottom: 16px; padding-bottom: 16px; border-bottom: 1px solid rgba(255,255,255,0.05);">
-                                <div style="color: var(--text-primary); margin-bottom: 8px; font-size: 13px;"><span style="color: var(--accent);">Q:</span> ${escapeHtml(q.q || q.question)}</div>
-                                ${isAnswered ? `
-                                    <div style="color: var(--text-secondary); display: flex; gap: 8px; align-items: flex-start;">
-                                        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="rgba(0, 255, 136, 0.8)" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="margin-top: 2px; flex-shrink: 0;"><polyline points="20 6 9 17 4 12"></polyline></svg>
-                                        <span>${escapeHtml(q.answer)}</span>
-                                    </div>
-                                ` : `
-                                    ${answerEditorHtml}
-                                `}
+                                <div style="color: var(--text-primary); margin-bottom: 8px; font-size: 13px;"><span style="color: var(--accent);">Q:</span> ${escapeHtml(q.q || q.question)}${tag}</div>
+                                ${body}
                             </div>
                         `;
-                    }).join('') + completeBannerHtml + resetFooterHtml;
+                    }).join('');
+
+                    let footerHtml = '';
+                    if (!state.readOnly) {
+                        if (confirmed) {
+                            footerHtml = `
+                                <div style="margin-bottom: 16px; padding: 14px 16px; border: 1px solid rgba(0,255,136,0.3); background: rgba(0,255,136,0.06); border-radius: 8px;">
+                                    <div style="display:flex; align-items:center; gap:8px; color:var(--accent); font-size:13px; font-weight:600;">
+                                        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="20 6 9 17 4 12"></polyline></svg>
+                                        Confirmed — the bridge will proceed on its next cycle.
+                                    </div>
+                                    <div style="display:flex; justify-content:flex-end; margin-top:12px;">
+                                        <button class="btn-send" style="padding:8px 20px;" onclick="closeTriageModal()">Done</button>
+                                    </div>
+                                </div>`;
+                        } else if (allAnswered) {
+                            footerHtml = `
+                                <div style="margin-bottom: 16px; padding: 14px 16px; border: 1px solid rgba(255,176,32,0.4); background: rgba(255,176,32,0.06); border-radius: 8px;">
+                                    <div style="color: var(--text-primary); font-size: 13px;">All questions have answers. Review them (agent-suggested ones may be wrong), edit any, then confirm to start the work.</div>
+                                    <div style="display:flex; justify-content:flex-end; margin-top:12px;">
+                                        <button class="btn-send" style="padding:8px 20px;" onclick="confirmTriage(event, '${task.id}')">✓ Confirm &amp; start</button>
+                                    </div>
+                                </div>`;
+                        } else {
+                            footerHtml = `<div style="color: var(--text-secondary); font-size: 12px; margin-bottom: 12px;">Answer every question — a Confirm button appears once they're all filled in.</div>`;
+                        }
+                    }
+
+                    contentEl.innerHTML = questionsHtml + footerHtml + resetFooterHtml;
                 }
             } catch (e) {
                 console.error('Failed to parse triage_state', e);
@@ -1255,12 +1280,12 @@
                 if (triageState.questions && triageState.questions[questionIdx]) {
                     triageState.questions[questionIdx].answer = answer;
                     triageState.questions[questionIdx].answered = true;
-                    
-                    // Check if all answered
-                    const allAnswered = triageState.questions.every(q => q.answered || q.answer);
-                    if (allAnswered) {
-                        triageState.status = 'answered';
-                    }
+                    triageState.questions[questionIdx].answered_by = 'user';
+                    // Editing an answer un-confirms — the bridge won't proceed until the
+                    // user reviews everything and explicitly confirms again.
+                    triageState.confirmed = false;
+
+                    const allAnswered = triageState.questions.every(q => q.answer);
 
                     const res = await fetch(getApiUrl(`/tasks/${taskId}`), {
                         method: 'PATCH',
@@ -1287,6 +1312,34 @@
             } catch (err) {
                 console.error('Error submitting triage answer:', err);
                 alert('Failed to submit answer: ' + err.message);
+            }
+        };
+
+        window.confirmTriage = async (event, taskId) => {
+            if (event) event.stopPropagation();
+            if (state.readOnly) { alert('Read-only mode: editing is disabled.'); return; }
+            const task = state.tasks.find(t => t.id === taskId);
+            if (!task || !task.triage_state) return;
+            try {
+                const triageState = typeof task.triage_state === 'string' ? JSON.parse(task.triage_state) : task.triage_state;
+                if (!triageState.questions || !triageState.questions.every(q => q.answer)) {
+                    alert('Answer every question before confirming.');
+                    return;
+                }
+                triageState.confirmed = true;
+                triageState.status = 'answered';
+                const res = await fetch(getApiUrl(`/tasks/${taskId}`), {
+                    method: 'PATCH',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ triage_state: JSON.stringify(triageState) })
+                });
+                if (!res.ok) throw new Error(`Confirm failed (${res.status})`);
+                task.triage_state = JSON.stringify(triageState);
+                if (state.activeTriageTaskId === taskId) renderTriageModalContent(task);
+                await fetchTasks();
+            } catch (err) {
+                console.error('Error confirming triage:', err);
+                alert('Failed to confirm: ' + err.message);
             }
         };
 

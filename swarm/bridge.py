@@ -2428,17 +2428,15 @@ def process_task(task: dict):
             logging.info(f"  Self-answered {auto_answered}/{len(questions)} questions, {len(unanswered)} remain")
 
             if not unanswered:
-                logging.info(f"  All questions self-answered — skipping planning, proceeding to dispatch")
+                # Even when the agent self-answered everything, don't dispatch yet — the
+                # auto-answers may be wrong. Post them to planning and wait for the human
+                # to review/edit and confirm (the process_planning_tasks confirmed-gate).
+                logging.info(f"  All questions self-answered — awaiting human review + confirmation")
+                mc_update_task(task_id, {"status": "planning"})
+                mc_log_activity(task_id, "status_changed", "Moved to planning: agent self-answered all questions — review and confirm to start")
                 post_planning_questions(task_id, questions, triage_result=triage)
-                mc_log_activity(task_id, "updated", f"Self-answered all {len(questions)} triage questions from codebase knowledge")
-                repos = triage.get("repos", repos)
-                if repos:
-                    task_type = task.get("task_type", "implementation")
-                    use_planner = os.environ.get("ENABLE_PLANNER", "1") == "1"
-                    if use_planner and task_type == "implementation":
-                        _plan_and_dispatch(task, repos)
-                    else:
-                        _spawn_for_repos(task, repos)
+                mc_log_activity(task_id, "updated",
+                    f"Self-answered all {len(questions)} triage questions from codebase knowledge — review the answers and confirm in Mission Control to start.")
                 return
 
             for i, q in enumerate(questions, 1):
@@ -2641,16 +2639,20 @@ def process_planning_tasks():
         except Exception:
             state = None
 
-        # Only proceed once EVERY structured question is answered. This is also what makes a
-        # follow-up question (posted below) cause the task to wait here until it's answered,
-        # rather than us re-processing on partial answers every cycle.
+        # Only proceed once EVERY structured question is answered AND the human has
+        # confirmed. Confirmation lets the user review/edit answers (including the
+        # agent's auto-suggestions) before anything dispatches. The all-answered check
+        # is also what makes a follow-up question park the task here until answered.
         if state and state.get("questions"):
             unanswered = [q for q in state["questions"] if not q.get("answer")]
             if unanswered:
                 logging.info(f"  {task_id[:8]} has {len(unanswered)} unanswered question(s) — waiting")
                 continue
+            if not state.get("confirmed"):
+                logging.info(f"  {task_id[:8]} all answered but not confirmed — waiting for human confirmation")
+                continue
 
-        logging.info(f"Answers found for: {title} ({task_id[:8]}) — proceeding to spawn agents")
+        logging.info(f"Answers confirmed for: {title} ({task_id[:8]}) — proceeding to spawn agents")
 
         repos = state.get("triage_repos", []) if state else []
 
