@@ -91,7 +91,7 @@ step "Installing swarm runtime scripts into MC_HOME/swarm"
 # The bridge and spawn-agent.sh resolve their launchers via \$MC_HOME/swarm.
 # Symlink the repo copies so they always track your checkout (no drift).
 linked=0
-for f in spawn-agent.sh run-claude.sh run-codex.sh run-pi.sh swarm-state.py knowledge-distill.py; do
+for f in spawn-agent.sh run-claude.sh run-codex.sh run-pi.sh pre-review.sh swarm-state.py knowledge-distill.py; do
   if [ -e "$REPO_DIR/swarm/$f" ]; then
     ln -sfn "$REPO_DIR/swarm/$f" "$MC_HOME/swarm/$f"
     linked=$((linked+1))

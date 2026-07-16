@@ -1058,9 +1058,10 @@ Run the same checks that GitHub Actions CI will run:
 3. If any check fails, fix and re-run until all pass
 
 ### Step 6: Codex Review
-Run the pre-review script to get an external Codex review on your branch diff:
+Run the pre-review script to get an external Codex review on your branch diff
+(reviewed against the branch you based on):
 ```bash
-                ~/.mission-control/swarm/pre-review.sh "$(pwd)" origin/main
+                ~/.mission-control/swarm/pre-review.sh "$(pwd)" "${{BASE_BRANCH:-origin/master}}"
 ```
 Read the output. If VERDICT is FAIL:
 1. Fix the issues identified

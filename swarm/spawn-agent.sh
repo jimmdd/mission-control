@@ -216,6 +216,7 @@ add_session_env AGENT_PROVIDER     "${AGENT_PROVIDER:-}"
 add_session_env AGENT_THINKING     "${AGENT_THINKING:-}"
 add_session_env AGENT_FALLBACK_MODEL "${AGENT_FALLBACK_MODEL:-}"
 add_session_env AGENT_EFFORT       "${AGENT_EFFORT:-}"
+add_session_env BASE_BRANCH        "${BASE_BRANCH:-}"
 
 # Optional: give agents a SEPARATE git identity (a bot) so their commits and PRs
 # aren't attributed to your local user. Read only these keys from MC_HOME/.env and
