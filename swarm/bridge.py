@@ -1137,7 +1137,7 @@ resume and proceed accordingly — if rejected, do NOT take the action.
 - PR title MUST start with the ticket ID in brackets (e.g. `[{_task_ref(task)}] ...`)
 - GSD verification is the source of truth — review fixes must not break it
 """
-    return prompt
+    return prompt + _image_prompt_section(task)
 
 
 def generate_investigation_prompt(task: dict, repo_context: str, project: str, repo: str,
@@ -1268,6 +1268,53 @@ def _resolve_base_branch(task: dict, repo_path: Path) -> str:
     except Exception:
         pass
     return detect_base_branch(repo_path)
+
+
+def _download_task_images(task: dict) -> List[dict]:
+    """Download images referenced in a task description (markdown ![](url)) so a
+    vision-capable agent can actually see them. Linear-hosted uploads need the
+    LINEAR_API_KEY. Saved under SWARM_DIR/assets/<task>/; best-effort."""
+    import re
+    desc = task.get("description", "") or ""
+    matches = re.findall(r"!\[([^\]]*)\]\((https?://[^)\s]+)\)", desc)
+    if not matches:
+        return []
+    key = os.environ.get("LINEAR_API_KEY", "").strip()
+    assets_dir = SWARM_DIR / "assets" / (task.get("id", "task")[:8] or "task")
+    ext_map = {"image/png": "png", "image/jpeg": "jpg", "image/gif": "gif", "image/webp": "webp"}
+    out: List[dict] = []
+    for i, (alt, url) in enumerate(matches, 1):
+        try:
+            req = urllib.request.Request(url)
+            if "uploads.linear.app" in url and key:
+                req.add_header("Authorization", key)
+            with urllib.request.urlopen(req, timeout=20) as resp:
+                ctype = (resp.headers.get("Content-Type", "") or "").split(";")[0]
+                if "image" not in ctype:
+                    continue
+                assets_dir.mkdir(parents=True, exist_ok=True)
+                path = assets_dir / f"img-{i}.{ext_map.get(ctype, 'png')}"
+                path.write_bytes(resp.read())
+                out.append({"alt": alt or f"image {i}", "path": str(path)})
+        except Exception as e:
+            logging.warning(f"  Failed to download task image {i}: {e}")
+    if out:
+        logging.info(f"  Downloaded {len(out)} ticket image(s) for {task.get('id', '')[:8]}")
+    return out
+
+
+def _image_prompt_section(task: dict) -> str:
+    """A prompt appendix listing downloaded ticket images by absolute path, so the
+    agent (Claude can read image files) opens them for the visual details."""
+    imgs = _download_task_images(task)
+    if not imgs:
+        return ""
+    lines = ["\n\n---\n## Ticket screenshots (IMPORTANT — key visual detail is here)",
+             "The ticket includes screenshots. Open/read each image file below (your Read"
+             " tool can view images) to see the exact UI and wording being referred to:"]
+    for i, im in enumerate(imgs, 1):
+        lines.append(f"{i}. {im['alt']} — `{im['path']}`")
+    return "\n".join(lines)
 
 
 def _infer_branch_prefix(title: str) -> str:
