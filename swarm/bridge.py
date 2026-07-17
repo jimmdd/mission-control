@@ -1357,10 +1357,27 @@ def _design_links(text: str) -> List[str]:
     return [l.rstrip(').,>]') for l in dict.fromkeys(links)]
 
 
+def _gather_design_links(task_id: str, description: str) -> List[str]:
+    """Design links from the task's COMMENTS (newest first) and the description.
+    Designers often post — or update — the real design link in a comment rather than
+    the description, so the most recent comment link should win."""
+    links: List[str] = []
+    try:
+        acts = mc_request("GET", f"/api/tasks/{task_id}/activities") or []
+        acts = sorted(acts, key=lambda a: a.get("created_at", ""), reverse=True)
+        for a in acts:
+            if a.get("activity_type") in ("linear_comment", "manual_feedback", "updated", "planning_answer"):
+                links += _design_links(a.get("message", ""))
+    except Exception:
+        pass
+    links += _design_links(description or "")
+    return list(dict.fromkeys(links))  # dedup, newest-first
+
+
 def _design_prompt_section(task: dict) -> str:
-    """If the ticket references a design (Paper or Figma), tell the agent to read the
-    real spec via the matching design MCP instead of guessing from the URL."""
-    links = _design_links(task.get("description", ""))
+    """If the ticket references a design (Paper or Figma) — in the description OR a
+    comment — tell the agent to read the real spec via the matching design MCP."""
+    links = _gather_design_links(task.get("id", ""), task.get("description", ""))
     if not links:
         return ""
     has_figma = any("figma." in l.lower() for l in links)
@@ -1374,19 +1391,20 @@ def _design_prompt_section(task: dict) -> str:
                      "and a screenshot for the referenced frame.")
     return "\n\n---\n## Design source — READ THIS via the design MCP\n" + (
         "This ticket references a design you cannot fetch over the web. Use the design MCP to read the real spec:\n"
-        f"- Link(s): {', '.join(links[:5])}\n"
+        f"- Link(s), most recent first (prefer the latest — a comment link supersedes the description): {', '.join(links[:6])}\n"
         + "".join(f"- {t}\n" for t in tools)
+        + "- Note Figma links carry a `node-id` — open that exact node/frame.\n"
         + "- Match the design's spacing, colors, and type via its tokens/variables where they exist."
     )
 
 
-def _design_context(description: str) -> str:
-    """During triage: if the task links a design (Paper/Figma), read a concise summary via
-    the available design MCP so triage asks design-specific questions instead of generic
-    ones. Best-effort; gated by ENABLE_DESIGN_TRIAGE (default on)."""
+def _design_context(task_id: str, description: str) -> str:
+    """During triage: if the task links a design (Paper/Figma) — in the description or a
+    comment — read a concise summary via the available design MCP so triage asks
+    design-specific questions. Best-effort; gated by ENABLE_DESIGN_TRIAGE (default on)."""
     if os.environ.get("ENABLE_DESIGN_TRIAGE", "1") != "1":
         return ""
-    links = _design_links(description)
+    links = _gather_design_links(task_id, description)
     if not links:
         return ""
     urls = links[:3]
@@ -2386,7 +2404,8 @@ def _extract_repos_from_plan(plan: dict) -> List[dict]:
     return repos
 
 
-def _run_triage(title: str, description: str, manifest: str, model: Optional[str] = None) -> Tuple[dict, List[dict]]:
+def _run_triage(title: str, description: str, manifest: str, model: Optional[str] = None,
+                task_id: str = "") -> Tuple[dict, List[dict]]:
     """Run the 2-pass triage: identify repos (Flash), then enrich with codebase context."""
     repos = identify_repos(title, description, manifest)
     repo_labels = [r["project"] + "/" + r["repo"] for r in repos]
@@ -2414,7 +2433,7 @@ def _run_triage(title: str, description: str, manifest: str, model: Optional[str
 
     # If the ticket links a design (Paper/Figma), read a summary via the design MCP so
     # triage can ask design-specific questions rather than generic ones.
-    design_ctx = _design_context(description)
+    design_ctx = _design_context(task_id, description)
     if design_ctx:
         codebase_context += design_ctx
         logging.info("  Loaded linked design summary into triage context")
@@ -2506,13 +2525,13 @@ def process_task(task: dict):
     description = resolve_notion_urls(description)
 
     manifest = read_manifest()
-    triage, repos = _run_triage(title, description, manifest)
+    triage, repos = _run_triage(title, description, manifest, task_id=task_id)
 
     task_type = task.get("task_type", "implementation")
     if task_type == "investigation" and triage["ready"] and not triage.get("questions"):
         logging.info(f"  Investigation task — re-running triage to force question generation")
         description_with_hint = description + "\n\n[IMPORTANT: This is an investigation/triage task. You MUST generate questions to scope the investigation. Set ready=false and generate 4-8 questions.]"
-        triage2, repos2 = _run_triage(title, description_with_hint, manifest)
+        triage2, repos2 = _run_triage(title, description_with_hint, manifest, task_id=task_id)
         if triage2.get("questions"):
             triage = triage2
             if repos2:
