@@ -2903,7 +2903,7 @@ The reviewer has requested changes on your PR. Address ALL feedback below.
 
 Do NOT create a new PR. Fix the existing code and push.
 Do NOT ask for confirmation. Complete all steps autonomously.
-""")
+""" + _design_prompt_section(task))
 
     try:
         subprocess.run(["tmux", "kill-session", "-t", session],

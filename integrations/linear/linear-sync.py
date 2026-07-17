@@ -1544,10 +1544,36 @@ def sync():
                 "description_hash": _hash_description(issue.get("description", "")),
             }
 
+    # Reconcile tasks that fell out of the fetch (e.g. the Linear issue was reassigned
+    # away from a watched assignee): the main loop never sees them, so a Cancel/Done in
+    # Linear would otherwise leave them orphaned in MC. Check each non-done one's current
+    # Linear state and sync terminal states to done.
+    fetched_ids = {i["id"] for i in issues}
+    reconciled = 0
+    for ext_id, mc_task in existing_tasks.items():
+        if ext_id in fetched_ids or mc_task.get("status") == "done":
+            continue
+        try:
+            data = linear_query("query($id:String!){ issue(id:$id){ state{ type name } } }", {"id": ext_id})
+            st = ((data or {}).get("issue") or {}).get("state") or {}
+        except Exception:
+            continue
+        if st.get("type") in ("canceled", "completed"):
+            try:
+                mc_request("PATCH", f"/api/tasks/{mc_task['id']}", {"status": "done"})
+                mc_request("POST", f"/api/tasks/{mc_task['id']}/activities", {
+                    "activity_type": "status_changed",
+                    "message": f"Linear issue is {st.get('name', 'terminal')} (no longer assigned to a watched user) — syncing to done.",
+                })
+                reconciled += 1
+                logging.info(f"  Reconciled out-of-filter {mc_task['id'][:8]} → done ({st.get('name')})")
+            except Exception as e:
+                logging.warning(f"  Failed to reconcile {mc_task['id'][:8]}: {e}")
+
     state["last_sync"] = datetime.now(timezone.utc).isoformat()
     save_state(state)
 
-    logging.info(f"=== Sync complete: {created} created, {skipped} skipped, {comments_synced} comments synced ===")
+    logging.info(f"=== Sync complete: {created} created, {skipped} skipped, {comments_synced} comments synced, {reconciled} reconciled ===")
 
 
 def discover() -> dict:
