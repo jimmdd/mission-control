@@ -1138,7 +1138,7 @@ resume and proceed accordingly — if rejected, do NOT take the action.
 - PR title MUST start with the ticket ID in brackets (e.g. `[{_task_ref(task)}] ...`)
 - GSD verification is the source of truth — review fixes must not break it
 """
-    return prompt + _image_prompt_section(task)
+    return prompt + _image_prompt_section(task) + _paper_prompt_section(task)
 
 
 def generate_investigation_prompt(task: dict, repo_context: str, project: str, repo: str,
@@ -1342,6 +1342,28 @@ def _download_task_images(task: dict) -> List[dict]:
     if out:
         logging.info(f"  Downloaded {len(out)} ticket image(s) for {task.get('id', '')[:8]}")
     return out
+
+
+def _paper_prompt_section(task: dict) -> str:
+    """If the ticket references a Paper design, tell the agent to read the real spec
+    via the `paper` MCP instead of guessing from the URL (which it can't fetch)."""
+    import re
+    desc = task.get("description", "") or ""
+    links = re.findall(r"https?://(?:[a-z0-9-]+\.)?paper\.design/\S+", desc, re.IGNORECASE)
+    if not links:
+        return ""
+    uniq = list(dict.fromkeys(links))[:5]
+    return "\n\n---\n## Design source (Paper) — READ THIS via the `paper` MCP\n" + (
+        "This ticket references a Paper design. You cannot fetch the URL over the web; use the "
+        "`paper` MCP tools to read the actual spec:\n"
+        f"- Link(s): {', '.join(uniq)}\n"
+        "- `open_file` with the URL (open at the referenced page), then `get_basic_info` / "
+        "`get_tree_summary` / `get_children` / `find_nodes` to locate the exact frame/artboard.\n"
+        "- Extract details with `get_jsx` (implementable code), `get_computed_styles`, "
+        "`get_tokens` (colors/spacing/typography), and `get_screenshot` for a visual reference.\n"
+        "- Match the design's spacing, colors, and type using its design tokens where they exist.\n"
+        "- Call `finish_working_on_nodes` when done reading."
+    )
 
 
 def _image_prompt_section(task: dict) -> str:
