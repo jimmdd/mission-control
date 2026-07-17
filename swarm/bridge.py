@@ -1399,9 +1399,17 @@ def _design_context(description: str) -> str:
         "key text/labels, and anything ambiguous a human should clarify before building. "
         "If you cannot reach a design MCP for a link, note 'NOT ACCESSIBLE: <url>'."
     )
+    # Constrain this summarizer to ONLY the design MCP's read tools — no permission
+    # bypass, no Bash/Write/Edit, no design-mutating tools. It processes untrusted
+    # design content, so its tool surface must stay minimal.
+    paper_read = ["open_file", "list_files", "get_basic_info", "get_selection", "get_node_info",
+                  "get_children", "get_screenshot", "get_jsx", "get_tree_summary", "get_computed_styles",
+                  "get_fill_image", "find_nodes", "get_font_family_info", "get_guide", "get_tokens",
+                  "finish_working_on_nodes"]
+    allowed = ",".join(f"mcp__paper__{t}" for t in paper_read) + ",mcp__figma__*"
     try:
         out = subprocess.run(
-            [_claude_bin(), "-p", "--dangerously-skip-permissions", "--max-turns", "25", prompt],
+            [_claude_bin(), "-p", "--allowedTools", allowed, "--max-turns", "25", prompt],
             capture_output=True, text=True, timeout=240, stdin=subprocess.DEVNULL)
         summary = (out.stdout or "").strip()
         if summary and len(summary) > 40:
