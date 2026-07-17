@@ -1138,7 +1138,7 @@ resume and proceed accordingly — if rejected, do NOT take the action.
 - PR title MUST start with the ticket ID in brackets (e.g. `[{_task_ref(task)}] ...`)
 - GSD verification is the source of truth — review fixes must not break it
 """
-    return prompt + _image_prompt_section(task) + _paper_prompt_section(task)
+    return prompt + _image_prompt_section(task) + _design_prompt_section(task)
 
 
 def generate_investigation_prompt(task: dict, repo_context: str, project: str, repo: str,
@@ -1344,26 +1344,71 @@ def _download_task_images(task: dict) -> List[dict]:
     return out
 
 
-def _paper_prompt_section(task: dict) -> str:
-    """If the ticket references a Paper design, tell the agent to read the real spec
-    via the `paper` MCP instead of guessing from the URL (which it can't fetch)."""
+def _claude_bin() -> str:
+    return shutil.which("claude") or os.path.expanduser("~/.local/bin/claude")
+
+
+_DESIGN_LINK_RE = r"https?://(?:[a-z0-9-]+\.)?(?:paper\.design|figma\.com|figma\.design)/\S+"
+
+
+def _design_links(text: str) -> List[str]:
     import re
-    desc = task.get("description", "") or ""
-    links = re.findall(r"https?://(?:[a-z0-9-]+\.)?paper\.design/\S+", desc, re.IGNORECASE)
+    links = re.findall(_DESIGN_LINK_RE, text or "", re.IGNORECASE)
+    return [l.rstrip(').,>]') for l in dict.fromkeys(links)]
+
+
+def _design_prompt_section(task: dict) -> str:
+    """If the ticket references a design (Paper or Figma), tell the agent to read the
+    real spec via the matching design MCP instead of guessing from the URL."""
+    links = _design_links(task.get("description", ""))
     if not links:
         return ""
-    uniq = list(dict.fromkeys(links))[:5]
-    return "\n\n---\n## Design source (Paper) — READ THIS via the `paper` MCP\n" + (
-        "This ticket references a Paper design. You cannot fetch the URL over the web; use the "
-        "`paper` MCP tools to read the actual spec:\n"
-        f"- Link(s): {', '.join(uniq)}\n"
-        "- `open_file` with the URL (open at the referenced page), then `get_basic_info` / "
-        "`get_tree_summary` / `get_children` / `find_nodes` to locate the exact frame/artboard.\n"
-        "- Extract details with `get_jsx` (implementable code), `get_computed_styles`, "
-        "`get_tokens` (colors/spacing/typography), and `get_screenshot` for a visual reference.\n"
-        "- Match the design's spacing, colors, and type using its design tokens where they exist.\n"
-        "- Call `finish_working_on_nodes` when done reading."
+    has_figma = any("figma." in l.lower() for l in links)
+    has_paper = any("paper.design" in l.lower() for l in links)
+    tools = []
+    if has_paper:
+        tools.append("Paper → `paper` MCP: `open_file` (at the referenced page), then "
+                     "`get_jsx`/`get_computed_styles`/`get_tokens`/`get_screenshot`; `finish_working_on_nodes` when done.")
+    if has_figma:
+        tools.append("Figma → the `figma` MCP (Dev Mode): open the node/link, then pull code/styles/variables "
+                     "and a screenshot for the referenced frame.")
+    return "\n\n---\n## Design source — READ THIS via the design MCP\n" + (
+        "This ticket references a design you cannot fetch over the web. Use the design MCP to read the real spec:\n"
+        f"- Link(s): {', '.join(links[:5])}\n"
+        + "".join(f"- {t}\n" for t in tools)
+        + "- Match the design's spacing, colors, and type via its tokens/variables where they exist."
     )
+
+
+def _design_context(description: str) -> str:
+    """During triage: if the task links a design (Paper/Figma), read a concise summary via
+    the available design MCP so triage asks design-specific questions instead of generic
+    ones. Best-effort; gated by ENABLE_DESIGN_TRIAGE (default on)."""
+    if os.environ.get("ENABLE_DESIGN_TRIAGE", "1") != "1":
+        return ""
+    links = _design_links(description)
+    if not links:
+        return ""
+    urls = links[:3]
+    prompt = (
+        "READ-ONLY design summary for engineering triage. Use the available design MCP "
+        "(paper or figma) to open the linked design(s). Do NOT modify anything.\n"
+        "Links:\n" + "\n".join(f"- {u}" for u in urls) + "\n\n"
+        "Open each at the referenced page/frame, then output a CONCISE summary (under 200 words): the "
+        "screens/frames present, distinct states or responsive variants (desktop/mobile, empty/error/loading), "
+        "key text/labels, and anything ambiguous a human should clarify before building. "
+        "If you cannot reach a design MCP for a link, note 'NOT ACCESSIBLE: <url>'."
+    )
+    try:
+        out = subprocess.run(
+            [_claude_bin(), "-p", "--dangerously-skip-permissions", "--max-turns", "25", prompt],
+            capture_output=True, text=True, timeout=240, stdin=subprocess.DEVNULL)
+        summary = (out.stdout or "").strip()
+        if summary and len(summary) > 40:
+            return f"\n\n---\n\n## Linked design summary (read from the design tool)\n{summary[:2500]}"
+    except Exception as e:
+        logging.warning(f"  Design triage context failed: {e}")
+    return ""
 
 
 def _image_prompt_section(task: dict) -> str:
@@ -2358,6 +2403,13 @@ def _run_triage(title: str, description: str, manifest: str, model: Optional[str
         total_knowledge = len(dev_notes) + len(skills) + len(past_learnings)
         if total_knowledge:
             logging.info(f"  Pass 3 — recalled {total_knowledge} chars of knowledge")
+
+    # If the ticket links a design (Paper/Figma), read a summary via the design MCP so
+    # triage can ask design-specific questions rather than generic ones.
+    design_ctx = _design_context(description)
+    if design_ctx:
+        codebase_context += design_ctx
+        logging.info("  Loaded linked design summary into triage context")
 
     triage = triage_task(title, description, manifest, codebase_context, model=model)
 
