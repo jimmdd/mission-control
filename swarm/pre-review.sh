@@ -13,8 +13,9 @@ MC_HOME="${MC_HOME:-$HOME/.mission-control}"
 SWARM_DIR="$MC_HOME/swarm"
 CONFIG="$SWARM_DIR/swarm-config.json"
 
-CODEX_MODEL=$(jq -r '.codex.model // "gpt-5.4"' "$CONFIG" 2>/dev/null || echo "gpt-5.4")
-REVIEW_EFFORT=$(jq -r '.codex.reviewEffort // "high"' "$CONFIG" 2>/dev/null || echo "high")
+# Model is optional — if not configured, use codex's own default (a bogus default
+# like "gpt-5.4" makes the CLI reject the run).
+CODEX_MODEL=$(jq -r '.codex.model // ""' "$CONFIG" 2>/dev/null || echo "")
 
 cd "$WORKTREE"
 
@@ -94,9 +95,13 @@ End with one of:
 - VERDICT: FAIL (has critical or major issues that must be fixed)
 - VERDICT: WARN (minor issues, can proceed but should be addressed)"
 
-# Run Codex review
-REVIEW_OUTPUT=$(echo "$REVIEW_PROMPT" | codex -q --model "$CODEX_MODEL" --effort "$REVIEW_EFFORT" 2>&1) || {
+# Run Codex review — `codex exec` is the non-interactive mode (the old `-q`/`--effort`
+# flags were removed); prompt is read from stdin, read-only sandbox (review only).
+MODEL_FLAG=""
+[ -n "$CODEX_MODEL" ] && MODEL_FLAG="--model $CODEX_MODEL"
+REVIEW_OUTPUT=$(printf '%s' "$REVIEW_PROMPT" | codex exec --skip-git-repo-check --sandbox read-only $MODEL_FLAG 2>&1) || {
   echo "Codex review failed to run"
+  echo "$REVIEW_OUTPUT" | tail -8
   exit 2
 }
 
