@@ -1380,6 +1380,25 @@ def _image_prompt_section(task: dict) -> str:
     return "\n".join(lines)
 
 
+def _pr_is_draft(task: dict) -> bool:
+    """Agent PRs default to DRAFT (a human marks them ready after review). Override to
+    a ready PR via triage_state.pr_ready=true, or a 'PR: ready' line in the description."""
+    try:
+        raw = task.get("triage_state")
+        state = json.loads(raw) if isinstance(raw, str) and raw.strip() else (raw if isinstance(raw, dict) else {})
+        if (state or {}).get("pr_ready") is True:
+            return False
+    except Exception:
+        pass
+    try:
+        import re
+        if re.search(r"(?im)^\s*PR:\s*ready\s*$", task.get("description", "") or ""):
+            return False
+    except Exception:
+        pass
+    return True
+
+
 def _infer_branch_prefix(title: str) -> str:
     import re
     lower = title.lower()
@@ -1390,7 +1409,7 @@ def _infer_branch_prefix(title: str) -> str:
 
 def spawn_agent(task_id: str, task_label: str, repo_path: Path, prompt_content: str,
                 agent_type: str = "claude", mc_task_id: str = "", base_branch: str = "",
-                task_title: str = "") -> bool:
+                task_title: str = "", draft_pr: bool = True) -> bool:
     prefix = _infer_branch_prefix(task_title or task_label)
     branch_name = f"{prefix}/{task_label}"
     if not base_branch:
@@ -1399,6 +1418,9 @@ def spawn_agent(task_id: str, task_label: str, repo_path: Path, prompt_content: 
     # PR must target the same branch we based off (e.g. a feature branch like
     # coda/new-ui), not the repo default. gh's --base wants the bare branch name.
     pr_base = base_branch.split("/", 1)[1] if base_branch.startswith("origin/") else base_branch
+    draft_flag = "--draft " if draft_pr else ""
+    draft_note = ("Open it as a DRAFT so a human reviews before it's marked ready.\n"
+                  if draft_pr else "Open it ready for review.\n")
 
     prompt_dir = SWARM_DIR / "prompts"
     prompt_dir.mkdir(parents=True, exist_ok=True)
@@ -1407,7 +1429,8 @@ def spawn_agent(task_id: str, task_label: str, repo_path: Path, prompt_content: 
         prompt_content
         + f"\n\n---\n## Branch & PR target\n"
         f"Your work is based on `{pr_base}`. When you open the pull request, it MUST "
-        f"target that branch:\n\n```\ngh pr create --base {pr_base} --title \"[...] ...\" --body \"...\"\n```\n"
+        f"target that branch. {draft_note}"
+        f"\n```\ngh pr create {draft_flag}--base {pr_base} --title \"[...] ...\" --body \"...\"\n```\n"
     )
 
     env = os.environ.copy()
@@ -1759,7 +1782,7 @@ def _spawn_for_repos(task: dict, repos: List[dict]):
         task_label = f"{_task_ref(task)}-inv-{repo}"
 
         if spawn_agent(task_id, task_label, repo_path, prompt, mc_task_id=task_id, task_title=title,
-                       base_branch=_resolve_base_branch(task, repo_path)):
+                       base_branch=_resolve_base_branch(task, repo_path), draft_pr=_pr_is_draft(task)):
             mc_update_task(task_id, {"status": "in_progress"})
             mc_log_activity(task_id, "spawned", f"Investigation agent spawned for {project}/{repo}")
         else:
@@ -1781,7 +1804,7 @@ def _spawn_for_repos(task: dict, repos: List[dict]):
         task_label = f"{_task_ref(task)}-{repo}"
 
         if spawn_agent(task_id, task_label, repo_path, prompt, mc_task_id=task_id, task_title=title,
-                       base_branch=_resolve_base_branch(task, repo_path)):
+                       base_branch=_resolve_base_branch(task, repo_path), draft_pr=_pr_is_draft(task)):
             mc_update_task(task_id, {"status": "in_progress"})
             mc_log_activity(task_id, "spawned", f"Agent spawned for {project}/{repo}")
         else:
@@ -1986,7 +2009,7 @@ def _dispatch_next_steps(task: dict, plan: dict, repos: List[dict]):
 
         if spawn_agent(task_id, task_label, target_repo, prompt,
                        agent_type=agent_type, mc_task_id=task_id, task_title=title,
-                       base_branch=step_base_branch):
+                       base_branch=step_base_branch, draft_pr=_pr_is_draft(task)):
             mc_update_task(task_id, {"status": "in_progress"})
             mc_log_activity(
                 task_id, "step_dispatched",

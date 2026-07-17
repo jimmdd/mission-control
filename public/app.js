@@ -1215,9 +1215,14 @@
                                     </div>
                                 </div>`;
                         } else if (allAnswered) {
+                            const prReady = !!triageState.pr_ready;
                             footerHtml = `
                                 <div style="margin-bottom: 16px; padding: 14px 16px; border: 1px solid rgba(255,176,32,0.4); background: rgba(255,176,32,0.06); border-radius: 8px;">
                                     <div style="color: var(--text-primary); font-size: 13px;">All questions have answers. Review them (agent-suggested ones may be wrong), edit any, then confirm to start the work.</div>
+                                    <label style="display:flex; align-items:center; gap:8px; margin-top:12px; font-size:12px; color:var(--text-secondary); cursor:pointer;">
+                                        <input type="checkbox" id="pr-ready-${task.id}" ${prReady ? 'checked' : ''} style="accent-color: var(--accent);">
+                                        Open the PR ready for review (default: draft PR)
+                                    </label>
                                     <div style="display:flex; justify-content:flex-end; margin-top:12px;">
                                         <button class="btn-send" style="padding:8px 20px;" onclick="confirmTriage(event, '${task.id}')">✓ Confirm &amp; start</button>
                                     </div>
@@ -1328,6 +1333,8 @@
                 }
                 triageState.confirmed = true;
                 triageState.status = 'answered';
+                const prReadyEl = document.getElementById(`pr-ready-${taskId}`);
+                if (prReadyEl) triageState.pr_ready = prReadyEl.checked;  // else default draft
                 const res = await fetch(getApiUrl(`/tasks/${taskId}`), {
                     method: 'PATCH',
                     headers: { 'Content-Type': 'application/json' },
@@ -1362,9 +1369,10 @@
             if (descToggle) descToggle.textContent = '(show)';
             
             const externalUrl = task.external_url || task.linear_issue_url;
-            const sourceLabel = externalUrl ? 'EXTERNAL' : 'MANUAL';
+            const linearMatch = externalUrl ? externalUrl.match(/linear\.app\/[^/]+\/issue\/([A-Za-z0-9]+-\d+)/) : null;
+            const sourceLabel = linearMatch ? `${linearMatch[1].toUpperCase()} ↗` : externalUrl ? 'EXTERNAL ↗' : 'MANUAL';
             const sourceHtml = externalUrl
-                ? `<a href="${externalUrl}" target="_blank" rel="noopener noreferrer">${sourceLabel}</a>`
+                ? `<a href="${externalUrl}" target="_blank" rel="noopener noreferrer" title="Open in Linear">${sourceLabel}</a>`
                 : sourceLabel;
 
             let triageBtnHtml = '';
