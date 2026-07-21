@@ -588,8 +588,14 @@ def discover_local_repos() -> List[dict]:
     root = GITPROJECTS_DIR
     if not root.is_dir():
         return repos
+    # spawn-agent.sh stages agent worktrees under <root>/worktrees. Those are NOT
+    # target repos — descending into them makes a stale task worktree (e.g.
+    # MET-551-backend-new-ui) look like a repo and mis-routes dispatch to it.
+    EXCLUDED_DIRS = {"worktrees"}
     for entry in sorted(root.iterdir()):
         if not entry.is_dir() or entry.name.startswith("."):
+            continue
+        if entry.name in EXCLUDED_DIRS:
             continue
         # .git may be a dir (main clone) or a file (git worktree) — both are valid targets.
         if (entry / ".git").exists():
@@ -682,19 +688,44 @@ def extract_api_summary(repo_index: str, repo_label: str) -> str:
 def find_repo_path(project: str, repo: str) -> Optional[Path]:
     """Resolve a repo to a path on disk, tolerant of flat vs nested layout and of
     however the router split project/repo. Tries nested <root>/<project>/<repo>,
-    then flat <root>/<repo>, then flat <root>/<project>."""
+    then flat <root>/<repo>, then flat <root>/<project>.
+
+    Also tolerates the common router mistake of stuffing a full "project/repo"
+    label into the repo field (e.g. project="New UI", repo="GitProjects/backend-new-ui")
+    by falling back to the trailing path segment and, finally, to a name match
+    against the repos actually discovered on disk."""
     project = (project or "").strip().strip("/")
     repo = (repo or "").strip().strip("/")
+
+    def _valid(p: Path) -> bool:
+        # .git may be a dir (main clone) or a file (git worktree) — both are valid.
+        return p.exists() and (p / ".git").exists()
+
+    repo_base = repo.split("/")[-1] if repo else ""
+    project_base = project.split("/")[-1] if project else ""
+
     candidates = []
     if project and repo:
         candidates.append(GITPROJECTS_DIR / project / repo)  # nested project/repo
     if repo:
-        candidates.append(GITPROJECTS_DIR / repo)            # flat, by repo name
+        candidates.append(GITPROJECTS_DIR / repo)            # flat, by repo name (or label path)
+        if repo_base and repo_base != repo:                  # label-in-repo → try trailing segment
+            candidates.append(GITPROJECTS_DIR / repo_base)
     if project:
         candidates.append(GITPROJECTS_DIR / project)         # flat, by project name
+        if project_base and project_base != project:
+            candidates.append(GITPROJECTS_DIR / project_base)
     for candidate in candidates:
-        if candidate.exists() and (candidate / ".git").exists():
+        if _valid(candidate):
             return candidate
+
+    # Last resort: match by repo name against the repos actually on disk. Handles
+    # any remaining router split we didn't anticipate as long as the repo name is right.
+    wanted = {name for name in (repo, repo_base) if name}
+    if wanted:
+        for r in discover_local_repos():
+            if r["repo"] in wanted:
+                return r["path"]
     return None
 
 
@@ -1138,7 +1169,8 @@ resume and proceed accordingly — if rejected, do NOT take the action.
 - PR title MUST start with the ticket ID in brackets (e.g. `[{_task_ref(task)}] ...`)
 - GSD verification is the source of truth — review fixes must not break it
 """
-    return prompt + _image_prompt_section(task) + _design_prompt_section(task)
+    return (prompt + _image_prompt_section(task) + _design_prompt_section(task)
+            + _video_prompt_section(task) + _attachment_prompt_section(task))
 
 
 def generate_investigation_prompt(task: dict, repo_context: str, project: str, repo: str,
@@ -1271,76 +1303,208 @@ def _resolve_base_branch(task: dict, repo_path: Path) -> str:
     return detect_base_branch(repo_path)
 
 
+# Trusted host(s) for ticket-attachment downloads. A ticket description is
+# attacker-influenceable (anyone who can edit the ticket), so downloads are locked to
+# an EXACT host over https — a substring match would allow look-alikes like
+# uploads.linear.app.evil.com and leak the Authorization token there.
+_ALLOWED_UPLOAD_HOSTS = {"uploads.linear.app"}
+
+
+class _UploadNoRedirect(urllib.request.HTTPRedirectHandler):
+    # Never follow redirects: one could bounce our Authorization header to an
+    # attacker host or an internal address.
+    def redirect_request(self, *args, **kwargs):
+        return None
+
+
+def _upload_host_public(host: str) -> bool:
+    """Reject a host that resolves to any non-public address (defense in depth
+    against DNS-rebinding to an internal target, on top of the host allowlist)."""
+    import socket as _socket
+    import ipaddress as _ip
+    try:
+        infos = _socket.getaddrinfo(host, 443, proto=_socket.IPPROTO_TCP)
+    except Exception:
+        return False
+    for info in infos:
+        try:
+            addr = _ip.ip_address(info[4][0])
+        except ValueError:
+            return False
+        if (addr.is_private or addr.is_loopback or addr.is_link_local
+                or addr.is_unspecified or addr.is_reserved or addr.is_multicast):
+            return False
+    return bool(infos)
+
+
+def _fetch_trusted_upload(url: str, dest: "Path", timeout: int = 30) -> Optional[str]:
+    """Securely download a ticket attachment to `dest`. Returns the response
+    Content-Type on success, None otherwise. Enforces: https-only, exact trusted
+    host, no redirects, non-public-IP rejection. The LINEAR_API_KEY is only ever
+    sent after the host is verified."""
+    from urllib.parse import urlparse
+    try:
+        parsed = urlparse(url)
+        host = (parsed.hostname or "").lower().rstrip(".")
+        if parsed.scheme != "https" or host not in _ALLOWED_UPLOAD_HOSTS:
+            return None  # untrusted or non-https reference — skip
+        if not _upload_host_public(host):
+            logging.warning(f"  Skipping upload host {host} — resolves to a non-public address")
+            return None
+        req = urllib.request.Request(url)
+        key = os.environ.get("LINEAR_API_KEY", "").strip()
+        if key:  # host verified above, so the token only goes to Linear
+            req.add_header("Authorization", key)
+        opener = urllib.request.build_opener(_UploadNoRedirect)
+        with opener.open(req, timeout=timeout) as resp:
+            ctype = (resp.headers.get("Content-Type", "") or "").split(";")[0].strip()
+            dest.parent.mkdir(parents=True, exist_ok=True)
+            dest.write_bytes(resp.read())
+            return ctype
+    except Exception as e:
+        logging.warning(f"  Failed to download upload {url[:60]}: {e}")
+        return None
+
+
 def _download_task_images(task: dict) -> List[dict]:
     """Download images referenced in a task description (markdown ![](url)) so a
     vision-capable agent can actually see them. Linear-hosted uploads need the
     LINEAR_API_KEY. Saved under SWARM_DIR/assets/<task>/; best-effort."""
     import re
-    from urllib.parse import urlparse
     desc = task.get("description", "") or ""
     matches = re.findall(r"!\[([^\]]*)\]\((https?://[^)\s]+)\)", desc)
     if not matches:
         return []
-    key = os.environ.get("LINEAR_API_KEY", "").strip()
-    # The description is attacker-influenceable (anyone who can edit the ticket), so:
-    #  - only fetch from an EXACT trusted host over https (blocks SSRF to internal /
-    #    link-local addresses and blocks token leaks to look-alike hosts like
-    #    uploads.linear.app.evil.com — a substring match would have allowed those), and
-    #  - never follow redirects (a redirect could bounce our Authorization header to an
-    #    attacker host or an internal address).
-    ALLOWED_IMAGE_HOSTS = {"uploads.linear.app"}
-
-    class _NoRedirect(urllib.request.HTTPRedirectHandler):
-        def redirect_request(self, *args, **kwargs):
-            return None
-
-    def _resolves_public(host: str) -> bool:
-        # Reject a host that resolves to any non-public address (defense in depth
-        # against DNS-rebinding to an internal target, on top of the host allowlist).
-        import socket as _socket
-        import ipaddress as _ip
-        try:
-            infos = _socket.getaddrinfo(host, 443, proto=_socket.IPPROTO_TCP)
-        except Exception:
-            return False
-        for info in infos:
-            try:
-                addr = _ip.ip_address(info[4][0])
-            except ValueError:
-                return False
-            if (addr.is_private or addr.is_loopback or addr.is_link_local
-                    or addr.is_unspecified or addr.is_reserved or addr.is_multicast):
-                return False
-        return bool(infos)
-
-    opener = urllib.request.build_opener(_NoRedirect)
     assets_dir = SWARM_DIR / "assets" / (task.get("id", "task")[:8] or "task")
     ext_map = {"image/png": "png", "image/jpeg": "jpg", "image/gif": "gif", "image/webp": "webp"}
     out: List[dict] = []
     for i, (alt, url) in enumerate(matches, 1):
+        tmp = assets_dir / f"img-{i}.bin"
+        ctype = _fetch_trusted_upload(url, tmp)
+        if not ctype or "image" not in ctype:
+            if tmp.exists():
+                try:
+                    tmp.unlink()
+                except Exception:
+                    pass
+            continue
+        path = assets_dir / f"img-{i}.{ext_map.get(ctype, 'png')}"
         try:
-            parsed = urlparse(url)
-            host = (parsed.hostname or "").lower().rstrip(".")
-            if parsed.scheme != "https" or host not in ALLOWED_IMAGE_HOSTS:
-                continue  # untrusted or non-https image reference — skip
-            if not _resolves_public(host):
-                logging.warning(f"  Skipping image host {host} — resolves to a non-public address")
-                continue
-            req = urllib.request.Request(url)
-            if key:  # host is verified above, so the token only goes to Linear
-                req.add_header("Authorization", key)
-            with opener.open(req, timeout=20) as resp:
-                ctype = (resp.headers.get("Content-Type", "") or "").split(";")[0]
-                if "image" not in ctype:
-                    continue
-                assets_dir.mkdir(parents=True, exist_ok=True)
-                path = assets_dir / f"img-{i}.{ext_map.get(ctype, 'png')}"
-                path.write_bytes(resp.read())
-                out.append({"alt": alt or f"image {i}", "path": str(path)})
-        except Exception as e:
-            logging.warning(f"  Failed to download task image {i}: {e}")
+            tmp.replace(path)
+        except Exception:
+            continue
+        out.append({"alt": alt or f"image {i}", "path": str(path)})
     if out:
         logging.info(f"  Downloaded {len(out)} ticket image(s) for {task.get('id', '')[:8]}")
+    return out
+
+
+# Video attachments (screencasts) can't be read by the model directly, so we
+# convert them to keyframes with ffmpeg and feed those images instead — the same
+# "make it readable" move used for Paper/Figma designs.
+_VIDEO_EXTS = (".webm", ".mp4", ".mov", ".m4v", ".avi", ".mkv")
+
+
+def _ffmpeg_bin() -> Optional[str]:
+    return shutil.which("ffmpeg") or next(
+        (p for p in ("/opt/homebrew/bin/ffmpeg", "/usr/local/bin/ffmpeg", "/usr/bin/ffmpeg")
+         if os.path.exists(p)), None)
+
+
+def _video_duration_secs(video_path: "Path") -> Optional[float]:
+    """Clip duration via ffprobe (ships with ffmpeg), or None if unavailable."""
+    probe = shutil.which("ffprobe") or next(
+        (p for p in ("/opt/homebrew/bin/ffprobe", "/usr/local/bin/ffprobe", "/usr/bin/ffprobe")
+         if os.path.exists(p)), None)
+    if not probe:
+        return None
+    try:
+        out = subprocess.run(
+            [probe, "-v", "error", "-show_entries", "format=duration",
+             "-of", "default=nw=1:nk=1", str(video_path)],
+            capture_output=True, text=True, timeout=30, stdin=subprocess.DEVNULL)
+        return float((out.stdout or "").strip())
+    except Exception:
+        return None
+
+
+def _gather_video_links(task: dict) -> List[Tuple[str, str]]:
+    """Return (label, url) for trusted-host video attachments in the description.
+    Linear renders a video as a plain markdown link [name.webm](url) — not ![]() —
+    so we detect by the link-text filename extension."""
+    import re
+    desc = task.get("description", "") or ""
+    out: List[Tuple[str, str]] = []
+    seen = set()
+    # [label](url) links whose visible label looks like a video filename.
+    for label, url in re.findall(r"(?<!\!)\[([^\]]*)\]\((https?://[^)\s]+)\)", desc):
+        if url in seen:
+            continue
+        if label.lower().strip().endswith(_VIDEO_EXTS):
+            out.append((label.strip() or "video", url))
+            seen.add(url)
+    return out
+
+
+def _extract_video_frames(video_path: "Path", out_dir: "Path", max_frames: int = 10) -> List["Path"]:
+    """Extract keyframes evenly across a video so the whole demonstrated flow is
+    covered (scene-cut detection misses visually-similar states like an empty vs.
+    filled input, which matter in a spec). Returns frame paths in order. Requires
+    ffmpeg; returns [] if unavailable."""
+    ff = _ffmpeg_bin()
+    if not ff:
+        return []
+    out_dir.mkdir(parents=True, exist_ok=True)
+    for old in out_dir.glob("frame-*.png"):
+        try:
+            old.unlink()
+        except Exception:
+            pass
+
+    # Spread max_frames evenly across the clip's duration; fall back to a fixed
+    # cadence when the duration can't be probed.
+    dur = _video_duration_secs(video_path)
+    if dur and dur > 0:
+        fps = min(max_frames / dur, 4.0)  # cap so a very short clip doesn't over-sample
+    else:
+        fps = 0.5
+    vf = f"fps={fps:.4f},scale='min(1280,iw)':-2"
+    try:
+        subprocess.run(
+            [ff, "-y", "-i", str(video_path), "-vf", vf, "-vsync", "vfr",
+             "-frames:v", str(max_frames), str(out_dir / "frame-%03d.png")],
+            capture_output=True, timeout=120, stdin=subprocess.DEVNULL)
+    except Exception as e:
+        logging.warning(f"  ffmpeg frame extraction failed: {e}")
+    return sorted(out_dir.glob("frame-*.png"))
+
+
+def _gather_video_frames(task: dict) -> List[dict]:
+    """Download each video attachment and extract keyframes. Returns frame dicts
+    {alt, path} across all videos, cached on disk so re-runs skip re-extraction."""
+    links = _gather_video_links(task)
+    if not links:
+        return []
+    base = SWARM_DIR / "assets" / (task.get("id", "task")[:8] or "task")
+    out: List[dict] = []
+    for vi, (label, url) in enumerate(links, 1):
+        frame_dir = base / f"video-{vi}-frames"
+        frames = sorted(frame_dir.glob("frame-*.png"))
+        if not frames:  # not cached yet — download + extract
+            video_path = base / f"video-{vi}.mp4"
+            ctype = _fetch_trusted_upload(url, video_path)
+            if not ctype or "video" not in ctype:
+                logging.warning(f"  Attachment {label} is not a downloadable video (ctype={ctype})")
+                continue
+            frames = _extract_video_frames(video_path, frame_dir)
+            try:
+                video_path.unlink()  # keep only the frames
+            except Exception:
+                pass
+        for fi, fp in enumerate(frames, 1):
+            out.append({"alt": f"{label} — frame {fi}/{len(frames)}", "path": str(fp)})
+    if out:
+        logging.info(f"  Extracted {len(out)} video frame(s) for {task.get('id', '')[:8]}")
     return out
 
 
@@ -1376,7 +1540,9 @@ def _gather_design_links(task_id: str, description: str) -> List[str]:
 
 def _design_prompt_section(task: dict) -> str:
     """If the ticket references a design (Paper or Figma) — in the description OR a
-    comment — tell the agent to read the real spec via the matching design MCP."""
+    comment — tell the agent to read the real spec AND extract its image assets via
+    the matching design MCP. Injected into every design-working agent, so the asset
+    protocol below applies uniformly."""
     links = _gather_design_links(task.get("id", ""), task.get("description", ""))
     if not links:
         return ""
@@ -1389,12 +1555,40 @@ def _design_prompt_section(task: dict) -> str:
     if has_figma:
         tools.append("Figma → the `figma` MCP (Dev Mode): open the node/link, then pull code/styles/variables "
                      "and a screenshot for the referenced frame.")
-    return "\n\n---\n## Design source — READ THIS via the design MCP\n" + (
-        "This ticket references a design you cannot fetch over the web. Use the design MCP to read the real spec:\n"
+
+    # Asset-export steps, per tool. A design is NOT matched if its imagery is faked,
+    # so this is mandatory and self-reporting (gaps must be surfaced, never hidden).
+    export_steps = []
+    if has_paper:
+        export_steps.append(
+            "   - Paper: find nodes whose fill/background is an image (names often look like "
+            "`magnific_*`, `freepik_*`, or reference a `file-assets/*.png`). Export EACH with "
+            "`get_fill_image` and save it into the app's static assets."
+        )
+    if has_figma:
+        export_steps.append(
+            "   - Figma: every image fill / exported asset is served by Dev Mode via localhost asset "
+            "URLs that appear in `get_code`/image output — fetch each and save it into the app's static assets."
+        )
+
+    return "\n\n---\n## Design source — READ THE SPEC AND EXTRACT ITS ASSETS (via the design MCP)\n" + (
+        "This ticket references a design you cannot fetch over the web. Use the design MCP:\n"
         f"- Link(s), most recent first (prefer the latest — a comment link supersedes the description): {', '.join(links[:6])}\n"
         + "".join(f"- {t}\n" for t in tools)
         + "- Note Figma links carry a `node-id` — open that exact node/frame.\n"
-        + "- Match the design's spacing, colors, and type via its tokens/variables where they exist."
+        + "- Match the design's spacing, colors, and type via its tokens/variables where they exist.\n\n"
+        "### Image assets — MANDATORY, do not skip\n"
+        "The design contains real image assets (photos, 3D renders, logos, illustration/section art). "
+        "Bring them into the repo and use them — the page is NOT done if its imagery is faked with a "
+        "placeholder, watermark, icon, or solid color.\n"
+        "1. ENUMERATE every raster/image-fill node in the referenced frame(s) — hero/background renders, "
+        "section art, logos, avatars. Query the design tree for image fills; do NOT judge from the screenshot alone.\n"
+        "2. EXPORT each one and save it under the app's static assets, then reference the saved file in the component:\n"
+        + "\n".join(export_steps) + "\n"
+        "3. Use the REAL exported assets in the built UI — never substitute a placeholder for a design image.\n"
+        "4. If an asset genuinely cannot be exported (tool error, missing source in the design), DO NOT silently "
+        "swap in a placeholder. List it explicitly in the PR description under a `Missing design assets:` heading "
+        "(node name + where it belongs) so it's caught and followed up. A silent placeholder is a defect."
     )
 
 
@@ -1415,7 +1609,12 @@ def _design_context(task_id: str, description: str) -> str:
         "Open each at the referenced page/frame, then output a CONCISE summary (under 200 words): the "
         "screens/frames present, distinct states or responsive variants (desktop/mobile, empty/error/loading), "
         "key text/labels, and anything ambiguous a human should clarify before building. "
-        "If you cannot reach a design MCP for a link, note 'NOT ACCESSIBLE: <url>'."
+        "If you cannot reach a design MCP for a link, note 'NOT ACCESSIBLE: <url>'.\n\n"
+        "Figma tips (Dev Mode MCP): a link carries a `node-id` (e.g. 4255-18171 — dashes, not colons); "
+        "open THAT exact node. `get_design_context`/`get_code` TIME OUT on large frames — do NOT call them "
+        "on a whole page. Instead pull `get_metadata` + `get_screenshot` + `get_variable_defs` on the node "
+        "(fast, reliable); only reach for code/context on a small child node if you need exact values. "
+        "Prefer the metadata tree + screenshot to describe layout/text."
     )
     # Constrain this summarizer to ONLY the design MCP's read tools — no permission
     # bypass, no Bash/Write/Edit, no design-mutating tools. It processes untrusted
@@ -1437,6 +1636,132 @@ def _design_context(task_id: str, description: str) -> str:
     return ""
 
 
+# File attachments other than inline images/videos — handoff packages, provided code,
+# spec docs, asset zips. Images/videos are handled by their own sections.
+_ATTACH_SKIP_EXTS = (".png", ".jpg", ".jpeg", ".gif", ".webp", ".svg") + _VIDEO_EXTS
+_ATTACH_MAX_BYTES = 25 * 1024 * 1024  # skip anything larger — not a handoff, and a zip-bomb guard
+
+
+def _gather_attachment_links(task: dict) -> List[Tuple[str, str]]:
+    """(label, url) for trusted-host FILE attachments in the description AND comments
+    (a handoff zip, provided code, a spec doc), newest comment first. Excludes inline
+    images/videos, which have their own handling."""
+    import re
+    texts: List[str] = []
+    try:
+        acts = mc_request("GET", f"/api/tasks/{task.get('id','')}/activities") or []
+        acts = sorted(acts, key=lambda a: a.get("created_at", ""), reverse=True)
+        for a in acts:
+            if a.get("activity_type") in ("linear_comment", "manual_feedback", "updated", "planning_answer"):
+                texts.append(a.get("message", ""))
+    except Exception:
+        pass
+    texts.append(task.get("description", "") or "")
+
+    out: List[Tuple[str, str]] = []
+    seen = set()
+    for text in texts:
+        for label, url in re.findall(r"\[([^\]]*)\]\((https?://[^)\s]+)\)", text or ""):
+            if url in seen:
+                continue
+            name = label.strip().lower()
+            if not name or name.endswith(_ATTACH_SKIP_EXTS):
+                continue
+            if "." not in name.split("/")[-1]:  # needs a file extension to be an attachment
+                continue
+            out.append((label.strip(), url))
+            seen.add(url)
+    return out
+
+
+def _safe_extract_zip(zip_path: "Path", dest: "Path") -> List["Path"]:
+    """Extract a zip, rejecting path-traversal ('zip slip') entries and capping total
+    size. Returns the extracted file paths."""
+    import zipfile
+    extracted: List["Path"] = []
+    dest_root = dest.resolve()
+    total = 0
+    try:
+        with zipfile.ZipFile(zip_path) as z:
+            for info in z.infolist():
+                if info.is_dir():
+                    continue
+                target = (dest / info.filename).resolve()
+                if not str(target).startswith(str(dest_root) + os.sep) and target != dest_root:
+                    logging.warning(f"  Skipping unsafe zip entry {info.filename}")
+                    continue
+                total += info.file_size
+                if total > _ATTACH_MAX_BYTES:
+                    logging.warning("  Zip exceeds size cap — stopping extraction")
+                    break
+                target.parent.mkdir(parents=True, exist_ok=True)
+                with z.open(info) as src, open(target, "wb") as dst:
+                    dst.write(src.read())
+                extracted.append(target)
+    except Exception as e:
+        logging.warning(f"  Failed to extract zip {zip_path.name}: {e}")
+    return extracted
+
+
+def _download_task_attachments(task: dict) -> List[dict]:
+    """Download trusted-host file attachments (from description + comments), extracting
+    zips. Returns {label, path, kind} for each usable file, cached on disk."""
+    links = _gather_attachment_links(task)
+    if not links:
+        return []
+    base = SWARM_DIR / "assets" / (task.get("id", "task")[:8] or "task") / "attachments"
+    out: List[dict] = []
+    for i, (label, url) in enumerate(links, 1):
+        safe_name = __import__("re").sub(r"[^A-Za-z0-9._-]", "_", label) or f"file-{i}"
+        is_zip = label.lower().endswith(".zip")
+        marker = base / (safe_name + (".d" if is_zip else ""))
+        if not marker.exists():
+            tmp = base / f".dl-{i}"
+            ctype = _fetch_trusted_upload(url, tmp)
+            if not ctype:
+                continue
+            if is_zip:
+                extract_dir = base / (safe_name + ".d")
+                _safe_extract_zip(tmp, extract_dir)
+                try:
+                    tmp.unlink()
+                except Exception:
+                    pass
+            else:
+                try:
+                    tmp.replace(base / safe_name)
+                except Exception:
+                    continue
+        # Collect the resulting file(s).
+        if is_zip:
+            extract_dir = base / (safe_name + ".d")
+            for fp in sorted(extract_dir.rglob("*")):
+                if fp.is_file():
+                    out.append({"label": f"{label} → {fp.name}", "path": str(fp), "kind": "zip-member"})
+        else:
+            fp = base / safe_name
+            if fp.exists():
+                out.append({"label": label, "path": str(fp), "kind": "file"})
+    if out:
+        logging.info(f"  Prepared {len(out)} attachment file(s) for {task.get('id', '')[:8]}")
+    return out
+
+
+def _attachment_prompt_section(task: dict) -> str:
+    """Prompt appendix for ticket file attachments (handoff zips, provided code, docs).
+    The agent must READ and USE these — a provided implementation is not to be reinvented."""
+    files = _download_task_attachments(task)
+    if not files:
+        return ""
+    lines = ["\n\n---\n## Ticket attachments — READ AND USE THESE (do not reinvent)",
+             "The ticket attaches files: a handoff, provided code/implementation, or spec docs. "
+             "Read each and USE it. If a working implementation or asset is provided, integrate it as-is "
+             "rather than rebuilding from scratch. Read any README first for integration steps:"]
+    for i, f in enumerate(files, 1):
+        lines.append(f"{i}. {f['label']} — `{f['path']}`")
+    return "\n".join(lines)
+
+
 def _image_prompt_section(task: dict) -> str:
     """A prompt appendix listing downloaded ticket images by absolute path, so the
     agent (Claude can read image files) opens them for the visual details."""
@@ -1449,6 +1774,83 @@ def _image_prompt_section(task: dict) -> str:
     for i, im in enumerate(imgs, 1):
         lines.append(f"{i}. {im['alt']} — `{im['path']}`")
     return "\n".join(lines)
+
+
+def _video_prompt_section(task: dict) -> str:
+    """A prompt appendix for ticket video attachments (screencasts). The model can't
+    play video, so we hand it the extracted keyframes (in order) to read."""
+    links = _gather_video_links(task)
+    if not links:
+        return ""
+    frames = _gather_video_frames(task)
+    if not frames:
+        # A video is attached but we couldn't turn it into frames (ffmpeg missing or
+        # download failed) — tell the agent rather than let it silently miss the spec.
+        names = ", ".join(l for l, _ in links)
+        return ("\n\n---\n## Ticket video — COULD NOT PROCESS\n"
+                f"This ticket's spec includes a screencast ({names}) that could not be "
+                "converted to frames. Do NOT guess the flow — flag that the video needs "
+                "a human summary or a design link before implementing.")
+    has_design = bool(_gather_design_links(task.get("id", ""), task.get("description", "")))
+    if has_design:
+        header = ("\n\n---\n## Ticket screencast — SUPPLEMENTARY CONTEXT (flow/behavior)\n"
+                  "A screen recording accompanies this ticket. The linked DESIGN is the source "
+                  "of truth for layout, spacing, copy, and visuals — use the video only to "
+                  "understand interaction, sequence, and dynamic behavior. Where the video and "
+                  "the design disagree, FOLLOW THE DESIGN. The recording is split into ordered "
+                  "keyframes; read each IN ORDER:")
+    else:
+        header = ("\n\n---\n## Ticket screencast — THE SPEC IS IN THIS VIDEO\n"
+                  "The ticket's requirements are demonstrated in a screen recording. The model "
+                  "can't play video, so the recording has been split into ordered keyframes. "
+                  "Read each frame file below IN ORDER to reconstruct the exact flow, UI, and wording:")
+    lines = [header]
+    for i, fr in enumerate(frames, 1):
+        lines.append(f"{i}. {fr['alt']} — `{fr['path']}`")
+    return "\n".join(lines)
+
+
+def _video_context(task_id: str, description: str) -> str:
+    """During triage: if the ticket attaches a video, extract keyframes and have a
+    headless vision agent summarize the demonstrated flow, so triage asks specific
+    questions instead of 'what does the screencast show?'. Best-effort."""
+    if os.environ.get("ENABLE_DESIGN_TRIAGE", "1") != "1":
+        return ""
+    task = {"id": task_id, "description": description}
+    links = _gather_video_links(task)
+    if not links:
+        return ""
+    frames = _gather_video_frames(task)
+    if not frames:
+        names = ", ".join(l for l, _ in links)
+        return ("\n\n---\n\n## Ticket video (NOT PROCESSED)\n"
+                f"A screencast ({names}) is the spec but could not be converted to frames. "
+                "Ask the human to describe the flow step-by-step or link a design — do not "
+                "assume the requirements.")
+    frame_paths = [f["path"] for f in frames]
+    prompt = (
+        "READ-ONLY analysis for engineering triage. The image files below are ordered "
+        "keyframes from a screen recording that IS the ticket's spec. Read them IN ORDER "
+        "with your Read tool and output a CONCISE summary (under 200 words): the user flow "
+        "step-by-step, the screens/states shown, key UI elements and text/labels, and "
+        "anything ambiguous a human should clarify before building. Frames:\n"
+        + "\n".join(f"- {p}" for p in frame_paths)
+    )
+    try:
+        out = subprocess.run(
+            [_claude_bin(), "-p", "--allowedTools", "Read", "--max-turns", "25", prompt],
+            capture_output=True, text=True, timeout=240, stdin=subprocess.DEVNULL)
+        summary = (out.stdout or "").strip()
+        if summary and len(summary) > 40:
+            note = ""
+            if _gather_design_links(task_id, description):
+                note = ("\n_(Supplementary: a design doc is also linked and is the source of "
+                        "truth for layout/visuals — use this video only for flow/behavior.)_\n")
+            return (f"\n\n---\n\n## Ticket screencast summary (read from extracted frames)"
+                    f"{note}\n{summary[:2500]}")
+    except Exception as e:
+        logging.warning(f"  Video triage context failed: {e}")
+    return ""
 
 
 def _pr_is_draft(task: dict) -> bool:
@@ -1481,6 +1883,11 @@ def _infer_branch_prefix(title: str) -> str:
 def spawn_agent(task_id: str, task_label: str, repo_path: Path, prompt_content: str,
                 agent_type: str = "claude", mc_task_id: str = "", base_branch: str = "",
                 task_title: str = "", draft_pr: bool = True) -> bool:
+    # task_label becomes a git branch, worktree dir, tmux session, and prompt filename —
+    # a "/" or space in it crashes the spawn (e.g. a prompt path with a phantom subdir).
+    # Sanitize defensively, on top of _normalize_repos fixing the source.
+    import re as _re
+    task_label = _re.sub(r"[^A-Za-z0-9._-]", "-", task_label).strip("-") or "task"
     prefix = _infer_branch_prefix(task_title or task_label)
     branch_name = f"{prefix}/{task_label}"
     if not base_branch:
@@ -1717,16 +2124,21 @@ def _find_existing_pr(task: dict, repos: List[dict]) -> Optional[dict]:
     ticket = _extract_ticket_id(task.get("title", ""))
     if not ticket or ticket == "TICKET":
         return None
-    tl = ticket.lower()
+    # Ownership must come from the TITLE or BRANCH (our convention: "[MET-123] ..."
+    # title + "feature/MET-123-..." branch). The body is excluded: an unrelated PR
+    # can merely cross-reference the ticket ("relates to MET-123", shared checklist),
+    # which is not ownership and caused false positives (e.g. MET-551's PR mentioning
+    # MET-531). Word-boundaried so MET-53 / MET-5310 don't match MET-531.
+    import re
+    tref = re.compile(rf"(?<![A-Za-z0-9]){re.escape(ticket)}(?![0-9])", re.IGNORECASE)
     for r in repos:
         repo_path = find_repo_path(r["project"], r["repo"])
         if not repo_path:
             continue
-        # gh's --search matches PR title/body; also accept the ticket in the branch name.
         candidates = _gh_pr_list(repo_path, ["--state", "open", "--search", ticket])
         for p in candidates:
-            hay = f"{p.get('title', '')} {p.get('headRefName', '')} {p.get('body', '')}".lower()
-            if tl in hay:
+            owner = f"{p.get('title', '')} {p.get('headRefName', '')}"
+            if tref.search(owner):
                 return {"url": p["url"], "is_draft": bool(p.get("isDraft")),
                         "number": p.get("number"), "branch": p.get("headRefName"), "source": "gh"}
     return None
@@ -1789,7 +2201,26 @@ def _pr_guard(task: dict, repos: List[dict]) -> bool:
     return False
 
 
+def _normalize_repos(repos: List[dict]) -> List[dict]:
+    """Repair triage mis-splits where the repo field holds a path (e.g. repo=
+    "GitProjects/backend-new-ui", project="New UI" — the Linear project name). A "/" in
+    repo flows into branch/worktree/prompt-file names and crashes the spawn. Take the
+    last path segment as the repo and the rest as the project."""
+    out: List[dict] = []
+    for r in repos or []:
+        project = r.get("project", "")
+        repo = r.get("repo", "")
+        if "/" in str(repo):
+            parts = [p for p in str(repo).split("/") if p]
+            repo = parts[-1]
+            if len(parts) > 1:
+                project = "/".join(parts[:-1])
+        out.append({**r, "project": project, "repo": repo})
+    return out
+
+
 def _spawn_for_repos(task: dict, repos: List[dict]):
+    repos = _normalize_repos(repos)
     task_id = task["id"]
     title = task["title"]
     description = task.get("description", "")
@@ -1925,11 +2356,21 @@ def _spawn_for_repos(task: dict, repos: List[dict]):
 
 def _plan_and_dispatch(task: dict, repos: List[dict]):
     """Generate a plan for the task, then dispatch the first runnable steps."""
+    repos = _normalize_repos(repos)
     task_id = task["id"]
     title = task["title"]
     description = task.get("description", "")
 
     if task.get("task_type", "implementation") == "implementation" and not _pr_guard(task, repos):
+        return
+
+    # Multi-step orchestration is OFF by default. This is a monorepo, so a task should
+    # produce ONE agent and ONE PR — not a split plan with per-step agents (which caused
+    # per-step verification loops, blocked dependent steps, and confusing partial
+    # "EXECUTE 1/2" states). Re-enable with ENABLE_MULTI_STEP_PLANNING=1 if ever needed.
+    if os.environ.get("ENABLE_MULTI_STEP_PLANNING", "0") != "1":
+        logging.info(f"  Single-PR mode — one agent for {task_id[:8]} (multi-step planning disabled)")
+        _spawn_for_repos(task, repos)
         return
 
     # Build context for planner
@@ -2248,23 +2689,35 @@ def process_in_progress_plans():
 
             continue
 
-        # Check if any steps permanently failed — escalate
+        # Check if any steps permanently failed — escalate if the plan can no longer
+        # make progress. A "pending" step whose dependency chain includes a failed step
+        # can never run, so counting it as "runnable" (the old check) looped forever:
+        # it kept re-dispatching the failed step. Escalate when nothing is actually
+        # runnable AND nothing is still in progress.
         failed_steps = [
             k for k, v in progress.get("steps", {}).items()
             if v["status"] == "failed"
         ]
         if failed_steps:
-            pending_or_running = [
+            in_progress_steps = [
                 k for k, v in progress.get("steps", {}).items()
-                if v["status"] in ("pending", "in_progress")
+                if v["status"] == "in_progress"
             ]
-            if not pending_or_running:
+            runnable_now = get_next_steps(task_id, plan)  # excludes failed steps
+            if not runnable_now and not in_progress_steps:
                 progress["status"] = "failed"
                 progress_file.write_text(json.dumps(progress, indent=2))
+                blocked = [
+                    k for k, v in progress.get("steps", {}).items()
+                    if v["status"] == "pending"
+                ]
+                detail = f"step(s) {', '.join(failed_steps)} failed permanently"
+                if blocked:
+                    detail += f"; step(s) {', '.join(blocked)} blocked by the failure"
                 mc_log_activity(task_id, "updated",
-                                f"Plan cannot complete — steps {', '.join(failed_steps)} failed permanently")
+                                f"Plan cannot complete — {detail}. Parked for manual intervention.")
                 mc_update_task(task_id, {"status": "on_hold"})
-                logging.warning(f"  Plan stuck for {task_id[:8]} — failed steps: {failed_steps}")
+                logging.warning(f"  Plan stuck for {task_id[:8]} — {detail}")
                 continue
 
         # Dispatch next runnable steps (includes retried steps that went back to pending)
@@ -2437,6 +2890,13 @@ def _run_triage(title: str, description: str, manifest: str, model: Optional[str
     if design_ctx:
         codebase_context += design_ctx
         logging.info("  Loaded linked design summary into triage context")
+
+    # If the ticket attaches a screencast, extract keyframes and summarize the flow so
+    # triage asks specific questions instead of punting to the human.
+    video_ctx = _video_context(task_id, description)
+    if video_ctx:
+        codebase_context += video_ctx
+        logging.info("  Loaded ticket video summary into triage context")
 
     triage = triage_task(title, description, manifest, codebase_context, model=model)
 
@@ -2632,11 +3092,16 @@ def _collect_dashboard_feedback(task_id: str) -> Optional[str]:
     if not activities:
         return None
 
+    # An ack marks feedback as already-handled. It MUST match the text that
+    # _relaunch_for_change_request actually writes ("Change request received from
+    # Mission Control — re-launching agent"); a stricter phrase never matched, so
+    # every cycle re-detected the same note and relaunched forever (MET-537 looped
+    # 8x). Match the common prefix, scoped to bridge-written "updated" activities.
     latest_ack_ts = ""
     for act in activities:
         if (
             act.get("activity_type") == "updated"
-            and "Change request received from dashboard note" in act.get("message", "")
+            and "Change request received" in act.get("message", "")
         ):
             ts = act.get("created_at", "")
             if ts > latest_ack_ts:
@@ -2922,7 +3387,7 @@ The reviewer has requested changes on your PR. Address ALL feedback below.
 
 Do NOT create a new PR. Fix the existing code and push.
 Do NOT ask for confirmation. Complete all steps autonomously.
-""" + _design_prompt_section(task))
+""" + _design_prompt_section(task) + _video_prompt_section(task) + _attachment_prompt_section(task))
 
     try:
         subprocess.run(["tmux", "kill-session", "-t", session],
@@ -2932,6 +3397,12 @@ Do NOT ask for confirmation. Complete all steps autonomously.
 
     launcher = _launcher_for_entry(entry)
     env_exports = _env_exports_for_entry(entry)
+    # Pass MC_TASK_ID explicitly. run-claude.sh's heartbeat loop early-exits without it,
+    # and its registry fallback races the status="running" write below (the tmux session
+    # starts before the write), so the relaunched agent otherwise never heartbeats and
+    # the reaper false-flags it "stalled". Same reason spawn-agent.sh forwards it.
+    _relaunch_mc_id = entry.get("mcTaskId") or task_id
+    env_exports += f"export MC_TASK_ID={shlex.quote(str(_relaunch_mc_id))}; "
 
     try:
         subprocess.run(
@@ -2953,6 +3424,11 @@ Do NOT ask for confirmation. Complete all steps autonomously.
                 e["status"] = "running"
                 e["changeRequestAt"] = datetime.now(timezone.utc).isoformat()
                 e.pop("completionSyncedAt", None)
+                # Clear the stale heartbeat from the prior run — otherwise the reaper
+                # measures heartbeat age across the relaunch and falsely flags the new
+                # agent as "stalled/blocked" during its startup gap (a fresh spawn has
+                # no lastHeartbeatAt and is never flagged; match that).
+                e.pop("lastHeartbeatAt", None)
                 break
         registry_file.write_text(json.dumps(entries, indent=2))
     except Exception:
@@ -3013,6 +3489,12 @@ This task is investigation-only. You received new follow-up context/questions.
 
     launcher = _launcher_for_entry(entry)
     env_exports = _env_exports_for_entry(entry)
+    # Pass MC_TASK_ID explicitly. run-claude.sh's heartbeat loop early-exits without it,
+    # and its registry fallback races the status="running" write below (the tmux session
+    # starts before the write), so the relaunched agent otherwise never heartbeats and
+    # the reaper false-flags it "stalled". Same reason spawn-agent.sh forwards it.
+    _relaunch_mc_id = entry.get("mcTaskId") or task_id
+    env_exports += f"export MC_TASK_ID={shlex.quote(str(_relaunch_mc_id))}; "
 
     try:
         subprocess.run(
@@ -3034,6 +3516,7 @@ This task is investigation-only. You received new follow-up context/questions.
                 e["status"] = "running"
                 e["changeRequestAt"] = datetime.now(timezone.utc).isoformat()
                 e.pop("completionSyncedAt", None)
+                e.pop("lastHeartbeatAt", None)  # avoid false "stalled" across relaunch (see change-request path)
                 break
         registry_file.write_text(json.dumps(entries, indent=2))
     except Exception:
@@ -3126,6 +3609,189 @@ def _check_pr_status_for_task(task: dict) -> bool:
     return False
 
 
+# --- Auto-monitors for review-state PRs -------------------------------------------
+# Automatically relaunch the agent to fix an open PR: merge conflicts, failing CI/lint,
+# or new review comments. Guarded against loops by per-condition dedup markers (fire
+# once per new head SHA / new comment id) and a hard per-task cap. Instruction text
+# mirrors FOLLOWUP_ACTIONS in src/routes.ts — keep the two in sync.
+_REVIEW_MONITOR_FILE = SWARM_DIR / "review-monitor.json"
+_MAX_AUTO_FIX_PER_TASK = int(os.environ.get("MC_REVIEW_AUTOFIX_MAX", "5"))
+_FOLLOWUP = {
+    "merge_conflicts": "Auto follow-up: this PR has merge conflicts with its base branch. Fetch latest, "
+        "merge/rebase the base branch in, resolve ALL conflicts (preserve both your change and the incoming "
+        "base changes), run build + tests, then commit and push.",
+    "ci_lint": "Auto follow-up: this PR's CI is failing. Run `gh pr checks`, reproduce locally, fix "
+        "build/type/lint/test errors (run the repo's lint/format), then commit and push. Repeat until green.",
+    "review_comments": "Auto follow-up: this PR has new review comments (human and/or bots like Greptile). "
+        "Fetch them (`gh pr view <n> --comments` and `gh api repos/{owner}/{repo}/pulls/{n}/comments`), address "
+        "every actionable one, then commit and push. Skip only comments that conflict with the ticket's "
+        "acceptance criteria, and note why.",
+}
+
+
+def _load_review_monitor() -> dict:
+    try:
+        return json.loads(_REVIEW_MONITOR_FILE.read_text())
+    except Exception:
+        return {}
+
+
+def _save_review_monitor(d: dict) -> None:
+    try:
+        _REVIEW_MONITOR_FILE.write_text(json.dumps(d, indent=2))
+    except Exception:
+        pass
+
+
+_GH_SELF_LOGIN: Optional[str] = None
+
+
+def _gh_self_login() -> str:
+    """The GitHub login the agent pushes/comments as — so the monitor ignores the
+    agent's own PR comments and doesn't react to itself."""
+    global _GH_SELF_LOGIN
+    if _GH_SELF_LOGIN is None:
+        try:
+            out = subprocess.run([_gh_bin(), "api", "user", "--jq", ".login"],
+                                 capture_output=True, text=True, timeout=20)
+            _GH_SELF_LOGIN = (out.stdout or "").strip().lower() if out.returncode == 0 else ""
+        except Exception:
+            _GH_SELF_LOGIN = ""
+    return _GH_SELF_LOGIN
+
+
+def _gh_pr_meta(url: str) -> Optional[dict]:
+    import re
+    m = re.match(r"https?://github\.com/([^/]+/[^/]+)/pull/(\d+)", url or "")
+    if not m:
+        return None
+    repo, num = m.group(1), m.group(2)
+    try:
+        out = subprocess.run(
+            [_gh_bin(), "pr", "view", num, "--repo", repo, "--json",
+             "headRefOid,mergeable,state,statusCheckRollup"],
+            capture_output=True, text=True, timeout=30)
+        if out.returncode != 0:
+            return None
+        d = json.loads(out.stdout or "{}")
+        d["_repo"], d["_num"] = repo, num
+        return d
+    except Exception:
+        return None
+
+
+def _pr_ci_failing(meta: dict) -> bool:
+    for c in meta.get("statusCheckRollup") or []:
+        concl = (c.get("conclusion") or "").upper()
+        state = (c.get("state") or "").upper()
+        if concl in ("FAILURE", "TIMED_OUT", "STARTUP_FAILURE") or state in ("FAILURE", "ERROR"):
+            return True
+    return False
+
+
+def _pr_comment_signals(meta: dict) -> dict:
+    """Scan a PR's comments (inline review + issue) once and return two signals:
+      - "ext": latest comment id NOT authored by our own account (a reviewer weighing in)
+      - "mention": latest comment id whose body @-mentions the owner handle (a directive
+        to the agent — fires regardless of author, since a mention is explicit; the agent
+        won't @-mention itself, so no self-loop)."""
+    self_login = _gh_self_login()
+    owner = (os.environ.get("MC_REVIEW_OWNER_HANDLE") or self_login or "").lower()
+    tag = f"@{owner}" if owner else None
+    ext, mention = 0, 0
+    for endpoint in (f"repos/{meta['_repo']}/pulls/{meta['_num']}/comments",
+                     f"repos/{meta['_repo']}/issues/{meta['_num']}/comments"):
+        try:
+            out = subprocess.run(
+                [_gh_bin(), "api", endpoint, "--jq", "[.[] | {id: .id, login: .user.login, body: .body}]"],
+                capture_output=True, text=True, timeout=30)
+            if out.returncode != 0:
+                continue
+            for c in json.loads(out.stdout or "[]"):
+                cid = int(c.get("id") or 0)
+                login = (c.get("login") or "").lower()
+                body = (c.get("body") or "").lower()
+                if self_login and login != self_login:
+                    ext = max(ext, cid)
+                if tag and tag in body:
+                    mention = max(mention, cid)
+        except Exception:
+            continue
+    return {"ext": ext, "mention": mention}
+
+
+def _auto_review_monitor(task: dict) -> bool:
+    """Relaunch the agent to fix a review-state PR (conflicts / CI / new review comments).
+    Returns True if it triggered a relaunch. Dedup + a per-task cap prevent loops."""
+    if os.environ.get("ENABLE_REVIEW_AUTOFIX", "1") != "1":
+        return False
+    if task.get("task_type", "implementation") != "implementation":
+        return False
+    task_id = task["id"]
+    try:
+        delivs = mc_request("GET", f"/api/tasks/{task_id}/deliverables") or []
+    except Exception:
+        return False
+    pr_url = next((d.get("path") for d in delivs
+                   if d.get("deliverable_type") == "pr" and d.get("path")), None)
+    if not pr_url:
+        return False
+    meta = _gh_pr_meta(pr_url)
+    if not meta or meta.get("state") != "OPEN":
+        return False
+
+    state = _load_review_monitor()
+    head = meta.get("headRefOid") or ""
+
+    # First time we see this PR: record a baseline (existing bot comments, any
+    # pre-existing conflict/CI state) and fire NOTHING — so enabling the monitor doesn't
+    # relaunch every open PR at once. Only conditions that appear AFTER this trigger.
+    if task_id not in state:
+        sig = _pr_comment_signals(meta)
+        base = {"autoCount": 0, "lastCommentId": sig["ext"], "lastMentionId": sig["mention"]}
+        if str(meta.get("mergeable", "")).upper() == "CONFLICTING":
+            base["conflictHead"] = head
+        if _pr_ci_failing(meta):
+            base["ciHead"] = head
+        state[task_id] = base
+        _save_review_monitor(state)
+        logging.info(f"  Auto-review-monitor: baselined {task_id[:8]} (no action on pre-existing state)")
+        return False
+
+    mk = state[task_id]
+    if mk.get("autoCount", 0) >= _MAX_AUTO_FIX_PER_TASK:
+        return False
+
+    kind = None
+    if str(meta.get("mergeable", "")).upper() == "CONFLICTING" and mk.get("conflictHead") != head:
+        kind, mk["conflictHead"] = "merge_conflicts", head
+    elif _pr_ci_failing(meta) and mk.get("ciHead") != head:
+        kind, mk["ciHead"] = "ci_lint", head
+    else:
+        sig = _pr_comment_signals(meta)
+        # An @owner mention is an explicit directive (fires from any author); a new
+        # reviewer comment also fires. Update both markers so next cycle compares fresh.
+        if sig["mention"] > mk.get("lastMentionId", 0) or sig["ext"] > mk.get("lastCommentId", 0):
+            kind = "review_comments"
+        mk["lastMentionId"] = sig["mention"]
+        mk["lastCommentId"] = sig["ext"]
+
+    if not kind:
+        state[task_id] = mk
+        _save_review_monitor(state)
+        return False
+
+    mk["autoCount"] = mk.get("autoCount", 0) + 1
+    state[task_id] = mk
+    _save_review_monitor(state)
+    logging.info(f"  Auto-review-monitor: {task_id[:8]} → {kind} "
+                 f"(relaunch {mk['autoCount']}/{_MAX_AUTO_FIX_PER_TASK})")
+    mc_log_activity(task_id, "updated",
+                    f"Auto follow-up: {kind.replace('_', ' ')} detected on the PR — relaunching agent.")
+    _relaunch_for_change_request(task, _FOLLOWUP[kind], source="auto-monitor")
+    return True
+
+
 def process_review_tasks():
     """Watch for Mission Control feedback on tasks in review/testing status."""
     review_tasks = fetch_tasks_by_status("review") + fetch_tasks_by_status("testing")
@@ -3151,6 +3817,9 @@ def process_review_tasks():
             else:
                 _relaunch_for_change_request(task, dashboard_feedback, source="dashboard")
             continue
+
+        # No manual feedback — run the auto-monitors (merge conflicts / CI / review comments).
+        _auto_review_monitor(task)
 
 
 def process_human_escalations():

@@ -779,12 +779,12 @@
         }
 
         .badge-source a {
-            color: inherit;
+            color: var(--accent);
             text-decoration: none;
         }
 
         .badge-source a:hover {
-            color: var(--text-primary);
+            text-decoration: underline;
         }
 
         .agent-badge {
@@ -1326,23 +1326,35 @@
         .add-note-container {
             display: flex;
             gap: 8px;
+            align-items: flex-end;
         }
 
         .note-input {
             flex: 1;
-            background: var(--bg-main);
-            border: 1px solid var(--border-color);
+            /* Lighter than the footer so the field clearly reads as an input, with a
+               visible border and comfortable text — it used to blend into the dark bg. */
+            background: #1c1c26;
+            border: 1px solid rgba(255, 255, 255, 0.18);
             color: var(--text-primary);
-            padding: 8px 12px;
-            border-radius: 4px;
+            padding: 10px 12px;
+            border-radius: 6px;
             font-family: var(--font-mono);
-            font-size: 13px;
+            font-size: 14px;
+            line-height: 1.5;
             outline: none;
-            transition: border-color 150ms ease;
+            resize: vertical;
+            min-height: 44px;
+            max-height: 180px;
+            transition: border-color 150ms ease, background 150ms ease;
+        }
+
+        .note-input::placeholder {
+            color: var(--text-secondary);
         }
 
         .note-input:focus {
             border-color: var(--accent);
+            background: #22222e;
         }
 
         .btn-send {
@@ -2208,6 +2220,12 @@
             background: rgba(245, 158, 11, 0.2);
             border-color: rgba(245, 158, 11, 0.4);
         }
+
+/* The Settings/Objectives launch buttons are fixed bottom-right at z-index 9000, which
+   overlaps the ticket drawer (z-index 30) and blocks its note field. Hide them while the
+   drawer is open — they're global actions not needed inside a ticket. */
+body:has(.drawer.open) #mc-set-launch,
+body:has(.drawer.open) #mc-obj-launch { display: none; }
 
 /* --- Autopilot / Objectives panel (objectives.js) --- */
 #mc-obj-launch {

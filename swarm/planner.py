@@ -692,10 +692,18 @@ def get_next_steps(task_id: str, plan: dict) -> List[dict]:
         if step_progress["status"] == "in_progress":
             in_progress.add(int(step_key))
 
+    # Permanently-failed steps must NOT be re-offered — a failed step with no deps
+    # otherwise passes `deps ⊆ completed` and gets re-dispatched forever. (Retries use
+    # status "pending", not "failed", so they still return here.)
+    failed = set()
+    for step_key, step_progress in progress["steps"].items():
+        if step_progress["status"] == "failed":
+            failed.add(int(step_key))
+
     runnable = []
     for step in plan.get("steps", []):
         step_num = step["step"]
-        if step_num in completed or step_num in in_progress:
+        if step_num in completed or step_num in in_progress or step_num in failed:
             continue
         deps = set(step.get("depends_on", []))
         if deps.issubset(completed):

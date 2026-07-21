@@ -81,6 +81,13 @@
         { key: "MISSION_CONTROL_NOTIFY_WEBHOOK", label: "Notification webhook URL", secret: false },
       ],
     },
+    {
+      title: "Local previews",
+      note: "Preview a task's branch from its card (▶ Preview). Each runs on its own port; they auto-stop after 2h idle and are capped at 4 concurrent.",
+      fields: [
+        { key: "__previews_stop_all", type: "action", action: "previews_stop_all" },
+      ],
+    },
   ];
 
   function statusDot(s) {
@@ -128,6 +135,17 @@
       alert("Linear sync complete:\n\n" + (r.output || "done"));
     } catch (e) {
       alert("Linear sync failed: " + e.message);
+    }
+    await refresh();
+  }
+
+  async function stopAllPreviews(btn) {
+    if (btn) { btn.disabled = true; btn.textContent = "Stopping…"; }
+    try {
+      const r = await post("/previews/stop-all", {});
+      alert(`Stopped ${r.stopped ?? 0} local preview(s).`);
+    } catch (e) {
+      alert("Stop all failed: " + e.message);
     }
     await refresh();
   }
@@ -219,6 +237,13 @@
           <div class="mc-set-field">
             <button class="mc-set-btn" id="mc-linear-sync" style="width:100%"${configured.LINEAR_API_KEY ? "" : " disabled"}>↻ Sync Linear now</button>
             <div class="mc-set-note">Pull issues and push status changes now, without waiting for the 5-minute cycle.</div>
+          </div>`;
+        }
+        if (f.type === "action" && f.action === "previews_stop_all") {
+          return `
+          <div class="mc-set-field">
+            <button class="mc-set-btn" id="mc-previews-stop-all" style="width:100%">✕ Stop all local previews</button>
+            <div class="mc-set-note">Kill every running preview dev server at once.</div>
           </div>`;
         }
         if (f.type === "action") {
@@ -329,6 +354,8 @@
     if (repoScan) repoScan.onclick = () => buildKnowledgeNow(repoScan);
     const linearSync = root.querySelector("#mc-linear-sync");
     if (linearSync) linearSync.onclick = () => syncLinearNow(linearSync);
+    const previewsStop = root.querySelector("#mc-previews-stop-all");
+    if (previewsStop) previewsStop.onclick = () => stopAllPreviews(previewsStop);
   }
 
   function mountButton() {

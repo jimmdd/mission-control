@@ -203,6 +203,29 @@ reconcile_completed_agents_to_mc() {
 
     if [[ "$mc_status" =~ ^(review|done|testing|merged)$ ]]; then
       state_update "$task_id" "{\"status\": \"ready\", \"completionSyncedAt\": \"$TIMESTAMP\"}" "completion-already-synced"
+      continue
+    fi
+
+    # Fallback for implementation tasks: the agent declared completion but MC is
+    # still active (in_progress/assigned) and the tmux pane is gone — e.g. a
+    # change-request relaunch finished, or the live CI-gated flow never closed it
+    # out before the session died (a benign failing check, a crash). Without this
+    # the task orphans in in_progress forever. Only fire when no live session
+    # remains, so we never race the live monitor flow.
+    if [[ "$mc_status" =~ ^(in_progress|assigned)$ ]]; then
+      local session
+      session=$(jq -r ".[] | select(.id == \"$task_id\") | .tmuxSession // empty" "$REGISTRY" 2>/dev/null)
+      if [ -n "$session" ] && tmux has-session -t "$session" 2>/dev/null; then
+        echo "[$TIMESTAMP] RECONCILE: $task_id — completed_by_agent but tmux $session still live; observing" >> "$LOG"
+        continue
+      fi
+      if mc_complete_task "$mc_task_id" "Agent completed; reconciled to review (session ended)" "review"; then
+        mc_post_activity "$mc_task_id" "updated" "Monitor reconciled completed agent to review (tmux session ended)"
+        echo "[$TIMESTAMP] RECONCILE: $task_id — implementation completed_by_agent → review (session gone)" >> "$LOG"
+        state_update "$task_id" "{\"status\": \"ready\", \"completionSyncedAt\": \"$TIMESTAMP\"}" "completion-reconcile-impl"
+      else
+        echo "[$TIMESTAMP] WARN: $task_id — failed to sync implementation completion to MC (will retry)" >> "$LOG"
+      fi
     fi
   done <<< "$completed_ids"
 }

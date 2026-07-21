@@ -217,6 +217,12 @@ add_session_env AGENT_THINKING     "${AGENT_THINKING:-}"
 add_session_env AGENT_FALLBACK_MODEL "${AGENT_FALLBACK_MODEL:-}"
 add_session_env AGENT_EFFORT       "${AGENT_EFFORT:-}"
 add_session_env BASE_BRANCH        "${BASE_BRANCH:-}"
+# MC_TASK_ID/MC_URL are required for run-claude.sh's heartbeat loop and completion
+# webhook — without MC_TASK_ID the heartbeat early-exits, so the agent runs but never
+# shows up as live in Swarm Ops. PR_BASE_BRANCH carries the PR target through.
+add_session_env MC_TASK_ID         "${MC_TASK_ID:-}"
+add_session_env MC_URL             "${MC_URL:-}"
+add_session_env PR_BASE_BRANCH     "${PR_BASE_BRANCH:-}"
 
 # Optional: give agents a SEPARATE git identity (a bot) so their commits and PRs
 # aren't attributed to your local user. Read only these keys from MC_HOME/.env and

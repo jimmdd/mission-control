@@ -66,6 +66,7 @@ fi
 if have python3; then ok "python3 $(python3 -V 2>&1 | awk '{print $2}')"; else err "python3 not found (needed for the swarm/bridge)"; missing=1; fi
 have gh    && ok "gh (GitHub CLI) present" || warn "gh not found — PR-aware dispatch will fall back to Linear-only detection"
 have git   && ok "git present" || { err "git not found"; missing=1; }
+have ffmpeg && ok "ffmpeg present" || warn "ffmpeg not found — ticket video screencasts won't be converted to frames (brew install ffmpeg)"
 if [ "$missing" = 1 ]; then err "Install the missing prerequisites above, then re-run."; exit 1; fi
 
 # ---------------------------------------------------------------------------

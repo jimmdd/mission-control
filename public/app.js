@@ -324,6 +324,18 @@
                     <div class="svc-meta">${meta || svc.details || '-'}</div>
                 </div>`;
             }).join('');
+
+            // Services panel is collapsed by default; honor a saved "show" preference.
+            applyServicesPanelPref();
+        }
+
+        function applyServicesPanelPref() {
+            const grid = document.getElementById('services-grid');
+            const toggle = document.getElementById('services-toggle');
+            if (!grid) return;
+            const show = localStorage.getItem('mc-services-panel') === 'show';
+            grid.style.display = show ? 'flex' : 'none';
+            if (toggle) toggle.textContent = show ? '(hide)' : '(show)';
         }
 
         function toggleServicesPanel() {
@@ -333,9 +345,11 @@
             if (grid.style.display === 'none') {
                 grid.style.display = 'flex';
                 if (toggle) toggle.textContent = '(hide)';
+                localStorage.setItem('mc-services-panel', 'show');
             } else {
                 grid.style.display = 'none';
                 if (toggle) toggle.textContent = '(show)';
+                localStorage.setItem('mc-services-panel', 'hide');
             }
         }
 
@@ -1040,12 +1054,14 @@
                     ? (task.priority === 'urgent' ? 'priority-urgent' : task.priority === 'high' ? 'priority-high' : '')
                     : '';
 
-                // Structured live progress (phase / step / blocked reason). Once a task
-                // is handed off (review) or done, the agent's live progress is stale —
-                // don't show it (a completed agent's session-exit was flagging false BLOCKED).
+                // Structured live progress (phase / step / blocked reason) only makes
+                // sense while a task is actively executing. Outside those statuses the
+                // row is stale — e.g. a re-triaged task (planning) or a parked one
+                // (on_hold) would otherwise show a phantom "EXECUTE 1/2" from an old run,
+                // and a handed-off (review/done) task showed a false BLOCKED.
                 let progressBadgeHtml = '';
                 const prog = task.progress;
-                const progressRelevant = !isDone && task.status !== 'review';
+                const progressRelevant = ['assigned', 'in_progress', 'testing'].includes(task.status);
                 if (prog && progressRelevant) {
                     if (prog.state === 'blocked' || prog.state === 'waiting') {
                         const reason = escapeHtml(prog.blocked_reason || (prog.state === 'waiting' ? 'waiting on subtask' : 'blocked'));
@@ -1070,6 +1086,30 @@
                     prButtonHtml = `<a href="${escapeHtml(task.pr_url)}" target="_blank" rel="noopener" onclick="event.stopPropagation()" class="badge" title="Open pull request on GitHub" style="background: rgba(99,102,241,0.18); color:#a5b4fc; font-size:9px; padding:1px 6px; font-weight:600; text-decoration:none;">↗ PR</a>`;
                 }
 
+                // Run the task's branch locally (vite dev from its worktree) so you can
+                // open it in a browser and verify. Only for tasks that have a branch.
+                let previewHtml = '';
+                const previewable = ['in_progress', 'review', 'testing', 'done'].includes(task.status);
+                if (task.preview && task.preview.url) {
+                    previewHtml = `<a href="${escapeHtml(task.preview.url)}" target="_blank" rel="noopener" onclick="event.stopPropagation()" class="badge" title="Open local preview (${escapeHtml(task.preview.app || '')})" style="background: rgba(34,197,94,0.18); color:#86efac; font-size:9px; padding:1px 6px; font-weight:600; text-decoration:none;">▶ :${task.preview.port}</a><button onclick="stopPreview(event, '${task.id}')" class="badge" title="Stop local preview" style="background: rgba(255,255,255,0.08); color: var(--text-secondary); font-size:9px; padding:1px 5px; font-weight:600; border:none; cursor:pointer;">✕</button>`;
+                } else if (previewable) {
+                    previewHtml = `<button onclick="previewTask(event, '${task.id}')" class="badge" title="Run this branch locally to verify" style="background: rgba(34,197,94,0.12); color:#86efac; font-size:9px; padding:1px 6px; font-weight:600; border:none; cursor:pointer;">▶ Preview</button>`;
+                }
+
+                // One-click follow-up actions — relaunch the agent to fix a specific
+                // thing on the PR. Shown for review/testing tasks that have a PR.
+                let followupHtml = '';
+                if (['review', 'testing'].includes(task.status) && task.pr_url) {
+                    const fa = (action, label, title) => `<button onclick="runFollowup(event, '${task.id}', '${action}')" class="badge" title="${title}" style="background: rgba(147,130,255,0.14); color:#c4b5fd; font-size:9px; padding:1px 6px; font-weight:600; border:none; cursor:pointer;">${label}</button>`;
+                    followupHtml = `<div class="card-subtitle" style="margin-top:4px; gap:4px; flex-wrap:wrap;">
+                        <span style="font-size:9px; color:var(--text-secondary); align-self:center;">Fix:</span>
+                        ${fa('review_comments', 'review comments', 'Relaunch the agent to address the PR review comments')}
+                        ${fa('merge_conflicts', 'conflicts', 'Relaunch the agent to resolve merge conflicts')}
+                        ${fa('ci_lint', 'CI/lint', 'Relaunch the agent to fix failing CI / lint')}
+                        ${fa('rebuild_design', 'design', 'Relaunch the agent to re-sync the UI to the design')}
+                    </div>`;
+                }
+
                 return `
                     <div class="task-card ${isExpanded} ${isDone ? 'task-done' : ''} ${priorityClass}" id="card-${task.id}" style="--card-status-color: ${statusColor}">
                         <div class="card-header" onclick="${isExpandable ? `toggleChildren(event, '${task.id}')` : `handleTaskClick(event, '${task.id}')`}">
@@ -1083,6 +1123,7 @@
                                 <div class="badge badge-status ${task.status}">${task.status.replace('_', ' ')}</div>
                                 ${needsHumanBadge}
                                 ${prButtonHtml}
+                                ${previewHtml}
                                 ${progressBadgeHtml}
                                 ${task.task_type === 'investigation'
                                     ? '<div class="badge" style="background: rgba(147, 130, 255, 0.15); color: #9382ff; font-size: 9px; padding: 1px 6px;">INVESTIGATION</div>'
@@ -1092,6 +1133,7 @@
                                 <div class="card-time">${timeAgo(task.created_at)}</div>
                                 ${triageIndicatorHtml}
                             </div>
+                            ${followupHtml}
                             ${subtaskChipsHtml}
                             ${milestoneHtml}
                         </div>
@@ -1257,6 +1299,68 @@
             } catch (err) {
                 console.error('Error resetting triage:', err);
                 alert('Failed to reset triage: ' + err.message);
+            }
+        };
+
+        window.previewTask = async (event, taskId) => {
+            event.stopPropagation();
+            const btn = event.currentTarget;
+            const orig = btn.textContent;
+            btn.textContent = '⏳ starting server…';
+            btn.disabled = true;
+            try {
+                // The server waits for the dev server to accept connections before
+                // responding, so by the time this resolves the URL is ready to open.
+                const res = await fetch(getApiUrl(`/tasks/${taskId}/preview`), { method: 'POST' });
+                const data = await res.json();
+                if (!res.ok) throw new Error(data.error || `Preview failed (${res.status})`);
+                if (data.ready === false) {
+                    alert('Preview started but the dev server is taking a while to boot — give it a few seconds, then open ' + data.url);
+                } else {
+                    window.open(data.url, '_blank');
+                }
+                await fetchTasks();
+            } catch (err) {
+                console.error('Error starting preview:', err);
+                alert('Failed to start preview: ' + err.message);
+                btn.textContent = orig;
+                btn.disabled = false;
+            }
+        };
+
+        window.stopPreview = async (event, taskId) => {
+            event.stopPropagation();
+            try {
+                const res = await fetch(getApiUrl(`/tasks/${taskId}/preview/stop`), { method: 'POST' });
+                if (!res.ok) throw new Error(`Stop failed (${res.status})`);
+                await fetchTasks();
+            } catch (err) {
+                console.error('Error stopping preview:', err);
+                alert('Failed to stop preview: ' + err.message);
+            }
+        };
+
+        window.runFollowup = async (event, taskId, action) => {
+            event.stopPropagation();
+            const btn = event.currentTarget;
+            const orig = btn.textContent;
+            btn.textContent = '⏳';
+            btn.disabled = true;
+            try {
+                const res = await fetch(getApiUrl(`/tasks/${taskId}/followup`), {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ action }),
+                });
+                const data = await res.json();
+                if (!res.ok) throw new Error(data.error || `Failed (${res.status})`);
+                btn.textContent = '✓ queued';
+                await fetchTasks();
+            } catch (err) {
+                console.error('Error queuing follow-up:', err);
+                alert('Follow-up failed: ' + err.message);
+                btn.textContent = orig;
+                btn.disabled = false;
             }
         };
 
@@ -1679,6 +1783,17 @@
                 }
             }
         });
+
+        // The note field is a textarea (multi-line), so Enter inserts a newline —
+        // submit with ⌘/Ctrl+Enter.
+        if (els.noteInput) {
+            els.noteInput.addEventListener('keydown', (e) => {
+                if ((e.metaKey || e.ctrlKey) && e.key === 'Enter') {
+                    e.preventDefault();
+                    els.addNoteForm.requestSubmit();
+                }
+            });
+        }
 
         els.addNoteForm.addEventListener('submit', async (e) => {
             e.preventDefault();

@@ -258,6 +258,7 @@ _ISSUE_NODE_FIELDS = """
           project { name }
           team { name key }
           labels { nodes { name } }
+          relations { nodes { type relatedIssue { identifier } } }
         }
         pageInfo { hasNextPage endCursor }
 """
@@ -522,6 +523,41 @@ def move_issue_to_state(issue: dict, prefer_name: str):
 def is_terminal_state(issue: dict) -> bool:
     state_type = issue.get("state", {}).get("type", "")
     return state_type in ("completed", "cancelled")
+
+
+def _mc_initiated_hold(mc_task_id: str) -> bool:
+    """True if MC parked this task on_hold ITSELF (a stuck plan / manual-intervention
+    escalation) rather than mirroring a Linear backlog state. Such holds must NOT be
+    auto-restored to inbox on the next sync — that bounces a deliberately-parked task
+    back into triage."""
+    try:
+        acts = mc_request("GET", f"/api/tasks/{mc_task_id}/activities") or []
+    except Exception:
+        return False
+    markers = ("cannot complete", "manual intervention", "parked", "plan stuck", "failed permanently")
+    hold_acts = [
+        a for a in acts
+        if a.get("activity_type") in ("status_changed", "updated")
+        and (any(m in (a.get("message", "").lower()) for m in markers)
+             or "on hold" in a.get("message", "").lower())
+    ]
+    if not hold_acts:
+        return False
+    hold_acts.sort(key=lambda a: a.get("created_at", ""), reverse=True)
+    latest = hold_acts[0].get("message", "").lower()
+    # Linear-mirrored holds say "Linear ticket moved to <state> — setting on hold".
+    return "linear ticket moved to" not in latest
+
+
+def duplicate_of(issue: dict) -> Optional[str]:
+    """If the issue is marked a duplicate of another, return that issue's identifier.
+    Linear records this as a 'duplicate' relation, and often leaves the state
+    unchanged (still 'In Progress') — so a state-type check misses it. A duplicate is
+    effectively resolved and should not stay on the active board."""
+    for rel in (issue.get("relations", {}) or {}).get("nodes", []) or []:
+        if rel.get("type") == "duplicate":
+            return (rel.get("relatedIssue") or {}).get("identifier") or "another issue"
+    return None
 
 
 def is_on_hold_state(issue: dict) -> bool:
@@ -1139,6 +1175,64 @@ def _try_auto_answer_triage(mc_task_id: str, triage_state: dict, comment: dict) 
     return answered
 
 
+def _unanswered_sig(triage_state: dict) -> str:
+    """Stable signature of the current unanswered question set, so we post a given
+    round to Linear at most once."""
+    unanswered = [q for q in triage_state.get("questions", []) if not q.get("answer")]
+    return ",".join(sorted(q.get("id", "") for q in unanswered))
+
+
+def _post_initial_triage_questions(issue_id: str, mc_task_id: str, triage_state: dict,
+                                   state: dict, threaded: bool) -> None:
+    """Post the freshly-generated triage question set to the Linear ticket once.
+
+    Reactive feedback (_post_triage_feedback_to_linear) only fires *after* a human
+    reply auto-answers a question; without this, questions from initial triage live
+    only in the MC UI and never reach the ticket. Threaded-mode questions are posted
+    individually elsewhere, so skip those. Tracked per-issue in the sync state file so
+    each distinct round is posted at most once."""
+    if threaded:
+        return
+    unanswered = [q for q in triage_state.get("questions", []) if not q.get("answer")]
+    if not unanswered:
+        return
+    api_key = os.environ.get("LINEAR_API_KEY", "")
+    if not api_key:
+        return
+    posted_map = state.setdefault("initial_questions_posted", {})
+    sig = _unanswered_sig(triage_state)
+    if posted_map.get(issue_id) == sig:
+        return  # this exact round already posted
+
+    lines = [
+        f"{BOT_REPLY_PREFIX}: I need a few answers before I can start — "
+        "please reply on this ticket:\n"
+    ]
+    for i, q in enumerate(unanswered, 1):
+        lines.append(f"{i}. **{q['question']}**")
+        if q.get("options"):
+            for j, opt in enumerate(q["options"]):
+                label = chr(ord('a') + j)
+                lines.append(f"   {label}) {opt}")
+        lines.append("")
+    lines.append("_Reply with your answers (e.g. \"1a, 2b\" or type your own)._")
+    body = "\n".join(lines)
+
+    mutation = (
+        "mutation($issueId: String!, $body: String!) "
+        "{ commentCreate(input: { issueId: $issueId, body: $body }) { success } }"
+    )
+    try:
+        linear_query(mutation, {"issueId": issue_id, "body": body})
+        posted_map[issue_id] = sig
+        logging.info(
+            f"  Posted initial triage questions to Linear for {mc_task_id[:8]} "
+            f"({len(unanswered)} question(s))"
+        )
+    except Exception as e:
+        logging.warning(f"  Failed to post initial triage questions to Linear: {e}")
+
+
 def _post_triage_feedback_to_linear(issue_id: str, triage_state: dict, answered_count: int):
     api_key = os.environ.get("LINEAR_API_KEY", "")
     if not api_key:
@@ -1211,6 +1305,62 @@ def _notify_triage_complete(mc_task_id: str, triage_state: dict, linear_issue_id
                 )
             except Exception as e:
                 logging.warning(f"  Failed to post completion to Linear: {e}")
+
+
+def _delete_comment(comment_id: str) -> bool:
+    try:
+        linear_query("mutation($id: String!) { commentDelete(id: $id) { success } }", {"id": comment_id})
+        return True
+    except Exception as e:
+        logging.warning(f"  Failed to delete Linear comment {comment_id}: {e}")
+        return False
+
+
+def _finalize_triage_comments(issue_id: str, mc_task: dict, triage_state: Optional[dict], state: dict) -> None:
+    """Once triage is done and the task is dispatched, tidy the Linear thread: replace
+    MC's back-and-forth triage comments with a single 'triage complete + answers +
+    spawning agent' summary. Runs once per issue (tracked in state)."""
+    if not os.environ.get("LINEAR_API_KEY", ""):
+        return
+    if not (triage_state and isinstance(triage_state, dict)):
+        return
+    # Only after triage produced questions AND they're all answered AND the task has
+    # left planning (i.e. an agent is/was dispatched).
+    if mc_task.get("status") not in ("in_progress", "assigned", "testing", "review", "done"):
+        return
+    questions = triage_state.get("questions", [])
+    if not questions or any(not q.get("answer") for q in questions):
+        return
+    done_map = state.setdefault("triage_finalized", {})
+    if done_map.get(issue_id):
+        return
+
+    # Identify MC's existing triage bot comments BEFORE posting the summary (so the
+    # summary isn't deleted). Only bot comments — human answers/context are preserved.
+    try:
+        existing = fetch_issue_comments(issue_id)
+    except Exception:
+        existing = []
+    noise_ids = [c["id"] for c in existing if _is_bot_comment(c.get("body", ""))]
+
+    lines = [f"{BOT_REPLY_PREFIX}: ✅ Triage complete — spawning an agent to work on this now.", "", "**Answers:**"]
+    for i, q in enumerate(questions, 1):
+        lines.append(f"{i}. **{q.get('question', '')}** — {q.get('answer', '')}")
+    lines.append("")
+    lines.append("_I'll update this ticket when there's a PR._")
+    body = "\n".join(lines)
+    try:
+        linear_query(
+            "mutation($id: String!, $body: String!) { commentCreate(input: { issueId: $id, body: $body }) { success } }",
+            {"id": issue_id, "body": body},
+        )
+    except Exception as e:
+        logging.warning(f"  Failed to post triage summary for {issue_id}: {e}")
+        return  # don't delete the thread if we couldn't post the replacement
+
+    removed = sum(1 for cid in noise_ids if _delete_comment(cid))
+    done_map[issue_id] = True
+    logging.info(f"  Finalized triage thread for {mc_task['id'][:8]} — posted summary, removed {removed} triage message(s)")
 
 
 def _hash_description(description: str) -> str:
@@ -1343,6 +1493,17 @@ def sync_comments_to_mc(issue: dict, mc_task: dict, state: dict) -> int:
             if lcid:
                 question_comment_ids[lcid] = q
 
+    # Surface initial triage questions on the ticket (once) so they can be answered
+    # on Linear, not just in the MC UI.
+    if triage_state and isinstance(triage_state, dict) and mc_task.get("status") == "planning":
+        _post_initial_triage_questions(
+            issue_id, mc_task_id, triage_state, state, bool(question_comment_ids)
+        )
+
+    # Once triage is done and an agent is dispatched, replace the triage back-and-forth
+    # with a single summary comment (keeps the Linear thread from getting noisy).
+    _finalize_triage_comments(issue_id, mc_task, triage_state, state)
+
     for comment in comments:
         comment_id = comment["id"]
         body = comment.get("body", "")
@@ -1427,6 +1588,9 @@ def sync_comments_to_mc(issue: dict, mc_task: dict, state: dict) -> int:
         has_threaded_questions = any(q.get("linear_comment_id") for q in triage_state.get("questions", []))
         if not has_threaded_questions:
             _post_triage_feedback_to_linear(issue_id, triage_state, new_auto_answered)
+            # Keep the initial-post marker aligned so we don't re-post the same
+            # remaining set from the initial-question path on the next cycle.
+            state.setdefault("initial_questions_posted", {})[issue_id] = _unanswered_sig(triage_state)
         _notify_triage_complete(mc_task_id, triage_state, issue_id if not has_threaded_questions else None)
 
     if "synced_comments" not in state:
@@ -1465,6 +1629,24 @@ def sync():
     for issue in issues:
         issue_id = issue["id"]
 
+        dup_of = duplicate_of(issue)
+        if dup_of:
+            if issue_id in existing_tasks:
+                mc_task = existing_tasks[issue_id]
+                if mc_task.get("status") != "done":
+                    mc_task_id = mc_task["id"]
+                    logging.info(f"  Linear {issue['identifier']} is a duplicate of {dup_of} — marking MC task {mc_task_id[:8]} done")
+                    mc_request("PATCH", f"/api/tasks/{mc_task_id}", {"status": "done"})
+                    mc_request("POST", f"/api/tasks/{mc_task_id}/activities", {
+                        "activity_type": "status_changed",
+                        "message": f"Linear ticket marked duplicate of {dup_of} — syncing to done",
+                    })
+                    for child in [t for t in existing_tasks.values() if t.get("parent_task_id") == mc_task_id and t.get("status") != "done"]:
+                        mc_request("PATCH", f"/api/tasks/{child['id']}", {"status": "done"})
+                        logging.info(f"    Child {child['id'][:8]} also marked done")
+            skipped += 1
+            continue
+
         if is_terminal_state(issue):
             if issue_id in existing_tasks:
                 mc_task = existing_tasks[issue_id]
@@ -1486,7 +1668,13 @@ def sync():
         if issue_id in existing_tasks:
             mc_task = existing_tasks[issue_id]
 
-            if is_on_hold_state(issue) and mc_task.get("status") != "on_hold":
+            # Backlog handling. By default MC does NOT treat Backlog as a hold — a new
+            # ticket (which Linear creates in Backlog) should still triage and, once done,
+            # auto-dispatch to in_progress (MC then writes "In Progress" back to Linear).
+            # Set LINEAR_HOLD_ON_BACKLOG=1 to make Backlog park tasks instead.
+            hold_on_backlog = os.environ.get("LINEAR_HOLD_ON_BACKLOG", "0") == "1"
+
+            if hold_on_backlog and is_on_hold_state(issue) and mc_task.get("status") != "on_hold":
                 mc_priority = mc_task.get("priority", "normal")
                 if mc_priority in ("urgent", "high"):
                     logging.info(f"  Linear {issue['identifier']} is Backlog but MC priority is {mc_priority} — skipping on_hold")
@@ -1506,15 +1694,20 @@ def sync():
                     except Exception as e:
                         logging.warning(f"  Failed to set on_hold for {mc_task_id[:8]}: {e}")
 
-            elif not is_on_hold_state(issue) and mc_task.get("status") == "on_hold":
+            elif mc_task.get("status") == "on_hold" and not _mc_initiated_hold(mc_task["id"]) and (
+                not is_on_hold_state(issue) or not hold_on_backlog
+            ):
+                # Restore a Linear-mirrored hold: the ticket left Backlog, OR (default) we
+                # no longer treat Backlog as a hold — so a Backlog task flows through triage
+                # and dispatch like any other. MC-initiated stuck-plan holds are left alone.
                 mc_task_id = mc_task["id"]
                 state_name = issue.get("state", {}).get("name", "?")
-                logging.info(f"  Linear {issue['identifier']} moved to {state_name} — restoring MC task {mc_task_id[:8]} to inbox")
+                logging.info(f"  Restoring {issue['identifier']} ({mc_task_id[:8]}) from on_hold — will triage/dispatch")
                 try:
                     mc_request("PATCH", f"/api/tasks/{mc_task_id}", {"status": "inbox"})
                     mc_request("POST", f"/api/tasks/{mc_task_id}/activities", {
                         "activity_type": "status_changed",
-                        "message": f"Linear ticket moved to {state_name} — restored from on hold",
+                        "message": f"Restored from on hold ({state_name}) — Backlog no longer parks tasks; triaging.",
                     })
                 except Exception as e:
                     logging.warning(f"  Failed to restore {mc_task_id[:8]} from on_hold: {e}")

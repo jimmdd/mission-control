@@ -8,6 +8,7 @@ import { lookup } from "node:dns/promises";
 import type { IncomingMessage, ServerResponse } from "node:http";
 import { McEventBus } from "./events.js";
 import type { McEvent } from "./events.js";
+import { getPreviews, startPreview, stopPreview, stopAllPreviews } from "./preview.js";
 import type {
   AgentProgressState,
   CreateActivityInput,
@@ -31,6 +32,27 @@ export interface McLogger {
 
 const consoleLogger: McLogger = { info: console.log, error: console.error };
 const MAX_JSON_BODY_BYTES = Number.parseInt(process.env.MISSION_CONTROL_MAX_BODY_BYTES ?? "1048576", 10);
+
+// Canned follow-up instructions for a review-state PR. Used by the ticket quick-action
+// buttons (manual) AND the check-agents auto-monitors (automatic) — keep the wording in
+// sync with swarm/check-agents.sh so a human click and an auto-trigger behave the same.
+const FOLLOWUP_ACTIONS: Record<string, string> = {
+  review_comments:
+    "Follow-up: address this PR's review comments. Fetch them via `gh pr view <n> --comments` AND the inline review threads " +
+    "(`gh api repos/{owner}/{repo}/pulls/{n}/comments`), including bot reviewers like Greptile. Address every actionable " +
+    "comment, then commit and push to update the PR. Skip a comment only if it conflicts with the ticket's acceptance " +
+    "criteria, and note why.",
+  merge_conflicts:
+    "Follow-up: resolve this PR's merge conflicts. Fetch latest, merge/rebase the base branch into your branch, resolve ALL " +
+    "conflicts (preserve both your change and the incoming base changes), run build + tests, then commit and push.",
+  ci_lint:
+    "Follow-up: fix this PR's failing CI. Run `gh pr checks <n>`, reproduce locally, fix build/type/lint/test errors (run the " +
+    "repo's lint/format scripts), then commit and push. Repeat until checks are green.",
+  rebuild_design:
+    "Follow-up: re-sync the UI to the design. Re-read the linked Paper/Figma design via the design MCP, export EVERY image " +
+    "asset (Paper get_fill_image / Figma assets), and match each section's real background, colors, typography, and alignment " +
+    "(get_computed_styles) — do not default to the app's theme. Commit and push.",
+};
 
 // Resolve a runtime helper script (swarm/*.py, health/*.py). Prefer the copy
 // shipped in this repo so a fresh `git clone` works without first copying files
@@ -824,11 +846,13 @@ async function handleApiRequest(
         const progressMap = db.getProgressMap();
         const checkpointCounts = db.getPendingCheckpointCounts();
         const prLinks = db.getPrLinks();
+        const previews = getPreviews();
         const enriched = tasks.map((t) => ({
           ...t,
           progress: progressMap[t.id] ?? null,
           pending_checkpoints: checkpointCounts[t.id] ?? 0,
           pr_url: prLinks[t.id] ?? null,
+          preview: previews[t.id] ?? null,
         }));
         sendJson(res, 200, enriched);
         return;
@@ -1169,6 +1193,67 @@ async function handleApiRequest(
               });
               events.emit("triage_reset", { taskId });
               sendJson(res, 200, task);
+              return;
+            }
+
+            // Local dev-server preview of the task's branch, so a reviewer can open
+            // the change in a browser and verify it.
+            if (segments.length === 3 && segments[2] === "preview" && method === "POST") {
+              const task = db.getTask(taskId);
+              if (!task) {
+                sendJson(res, 404, { error: "Task not found" });
+                return;
+              }
+              try {
+                const state = await startPreview(taskId, task.title ?? "");
+                db.createActivity({
+                  task_id: taskId,
+                  activity_type: "updated",
+                  message: `Started local preview: ${state.app} at ${state.url}`,
+                });
+                sendJson(res, 200, state);
+              } catch (err) {
+                const message = err instanceof Error ? err.message : String(err);
+                logger.error(`preview start failed for ${taskId}: ${message}`);
+                sendJson(res, 400, { error: message });
+              }
+              return;
+            }
+
+            if (
+              segments.length === 4 &&
+              segments[2] === "preview" &&
+              segments[3] === "stop" &&
+              method === "POST"
+            ) {
+              const stopped = stopPreview(taskId);
+              sendJson(res, 200, { stopped });
+              return;
+            }
+
+            // One-click follow-up actions on a review-state ticket. Each posts a canned
+            // instruction as manual_feedback; the bridge's review-feedback path relaunches
+            // the agent (reusing its worktree/PR). Same instruction text the auto-monitors use.
+            if (segments.length === 3 && segments[2] === "followup" && method === "POST") {
+              const body = await parseBody(req);
+              const action = isRecord(body) ? String(body.action ?? "") : "";
+              const instruction = FOLLOWUP_ACTIONS[action];
+              if (!instruction) {
+                sendJson(res, 400, { error: `Unknown follow-up action: ${action}` });
+                return;
+              }
+              const task = db.getTask(taskId);
+              if (!task) {
+                sendJson(res, 404, { error: "Task not found" });
+                return;
+              }
+              db.createActivity({ task_id: taskId, activity_type: "manual_feedback", message: instruction });
+              db.createActivity({
+                task_id: taskId,
+                activity_type: "updated",
+                message: `Follow-up queued: ${action.replace(/_/g, " ")} — relaunching agent.`,
+              });
+              sendJson(res, 200, { queued: true, action });
               return;
             }
 
@@ -1650,6 +1735,22 @@ async function handleApiRequest(
             logger.error(`mission-control agent-status error: ${message}`);
             sendJson(res, 500, { error: message });
           }
+          return;
+        }
+
+        if (segments[0] === "previews" && segments.length === 1 && method === "GET") {
+          sendJson(res, 200, getPreviews());
+          return;
+        }
+
+        if (
+          segments[0] === "previews" &&
+          segments[1] === "stop-all" &&
+          segments.length === 2 &&
+          method === "POST"
+        ) {
+          const stopped = stopAllPreviews();
+          sendJson(res, 200, { stopped });
           return;
         }
 

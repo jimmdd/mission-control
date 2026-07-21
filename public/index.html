@@ -92,9 +92,9 @@
         <div class="services-panel">
             <div class="section-title" style="margin: 0 0 12px 0; cursor: pointer;" onclick="toggleServicesPanel()">
                 SERVICES <span id="services-overall-indicator"></span>
-                <span id="services-toggle" style="font-size: 10px; opacity: 0.5; margin-left: 4px;">(hide)</span>
+                <span id="services-toggle" style="font-size: 10px; opacity: 0.5; margin-left: 4px;">(show)</span>
             </div>
-            <div id="services-grid" class="services-grid"></div>
+            <div id="services-grid" class="services-grid" style="display: none;"></div>
         </div>
 
         <div class="task-cards-panel" style="padding: 24px 24px 0 24px; position: relative; z-index: 1;">
@@ -387,7 +387,7 @@
         </div>
         <div class="drawer-footer">
             <form id="add-note-form" class="add-note-container">
-                <input type="text" id="note-input" class="note-input" placeholder="Add a note..." autocomplete="off">
+                <textarea id="note-input" class="note-input" rows="2" placeholder="Add a note…  (⌘/Ctrl+Enter to send)"></textarea>
                 <button type="submit" class="btn-send" id="btn-send">Send</button>
             </form>
         </div>
