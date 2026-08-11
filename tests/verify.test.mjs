@@ -104,6 +104,27 @@ test("a missing worktree falls through rather than reporting a pass", () => {
   assert.notEqual(result.verified_by, "command");
 });
 
+test("the worktree lookup prefers an exact id over an earlier prefix match", () => {
+  // Verifying in a sibling step's worktree would check the wrong tree and still
+  // look like a pass, so an exact id must win regardless of registry order.
+  const program = `
+import json, sys
+sys.path.insert(0, ${JSON.stringify(SWARM)})
+import bridge
+registry = [
+    {"id": "MET-1-s1-api-retry", "worktree": ${JSON.stringify(workdir)}},
+    {"id": "MET-1-s1-api", "worktree": ${JSON.stringify(mcHome)}},
+]
+print(json.dumps(bridge._agent_worktree("MET-1-s1-api", registry)))
+`;
+  const found = JSON.parse(execFileSync("python3", ["-c", program], {
+    env: { ...process.env, MC_HOME: mcHome },
+    encoding: "utf8",
+    stdio: ["ignore", "pipe", "ignore"],
+  }));
+  assert.equal(found, mcHome);
+});
+
 test("a verify_command that hangs fails on timeout", () => {
   const program = `
 import json, sys

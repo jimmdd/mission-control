@@ -1880,9 +1880,30 @@ def _infer_branch_prefix(title: str) -> str:
     return "feature"
 
 
+class _AtCapacity:
+    """Falsy result meaning the spawn was refused for want of a free slot.
+
+    Distinct from a plain False, which means the spawn is broken. A busy machine
+    must not raise a checkpoint or burn a retry attempt — it just has to wait.
+    """
+
+    def __bool__(self) -> bool:
+        return False
+
+    def __repr__(self) -> str:
+        return "AT_CAPACITY"
+
+
+AT_CAPACITY = _AtCapacity()
+
+# spawn-agent.sh exits 3 when starting this agent would cross the global ceiling.
+_SPAWN_EXIT_AT_CAPACITY = 3
+
+
 def spawn_agent(task_id: str, task_label: str, repo_path: Path, prompt_content: str,
                 agent_type: str = "claude", mc_task_id: str = "", base_branch: str = "",
-                task_title: str = "", draft_pr: bool = True) -> bool:
+                task_title: str = "", draft_pr: bool = True):
+    """Spawn an agent. Returns True, AT_CAPACITY (no free slot), or False (failed)."""
     # task_label becomes a git branch, worktree dir, tmux session, and prompt filename —
     # a "/" or space in it crashes the spawn (e.g. a prompt path with a phantom subdir).
     # Sanitize defensively, on top of _normalize_repos fixing the source.
@@ -1924,12 +1945,36 @@ def spawn_agent(task_id: str, task_label: str, repo_path: Path, prompt_content: 
         if result.returncode == 0:
             logging.info(f"  Spawned {agent_type} agent: {task_label} (mc_task_id={mc_task_id or task_id}, base={base_branch})")
             return True
+        elif result.returncode == _SPAWN_EXIT_AT_CAPACITY:
+            logging.info(f"  No agent slot for {task_label} — will retry: {result.stdout.strip()}")
+            return AT_CAPACITY
         else:
             logging.error(f"  spawn-agent.sh failed: {result.stderr}")
             return False
     except Exception as e:
         logging.error(f"  Failed to spawn agent: {e}")
         return False
+
+
+def _handle_spawn_refusal(task_id: str, outcome, what: str):
+    """Route a spawn that did not start. A full machine is a wait, not a fault."""
+    if outcome is AT_CAPACITY:
+        _defer_spawn(task_id, what)
+    else:
+        _handle_spawn_failure(task_id, what)
+
+
+def _defer_spawn(task_id: str, what: str):
+    """No agent slot was free. Put the task back where the bridge will re-scan it and
+    say nothing to the human — there is nothing to fix, and no attempt is spent."""
+    logging.info(f"  Deferring {task_id[:8]} ({what}) — no agent slot free")
+    try:
+        mc_update_task(task_id, {"status": "planning"})
+    except Exception:
+        pass
+    # Deliberately avoids the phrase _handle_spawn_failure counts, so waiting for a
+    # slot never accumulates toward giving up and flagging a human.
+    mc_log_activity(task_id, "updated", f"Waiting for a free agent slot before dispatching {what}.")
 
 
 def _handle_spawn_failure(task_id: str, what: str, max_attempts: int = 3):
@@ -2283,12 +2328,13 @@ def _spawn_for_repos(task: dict, repos: List[dict]):
         prompt = generate_investigation_prompt(task, repo_context, project, repo, knowledge=knowledge)
         task_label = f"{_task_ref(task)}-inv-{repo}"
 
-        if spawn_agent(task_id, task_label, repo_path, prompt, mc_task_id=task_id, task_title=title,
-                       base_branch=_resolve_base_branch(task, repo_path), draft_pr=_pr_is_draft(task)):
+        outcome = spawn_agent(task_id, task_label, repo_path, prompt, mc_task_id=task_id, task_title=title,
+                              base_branch=_resolve_base_branch(task, repo_path), draft_pr=_pr_is_draft(task))
+        if outcome:
             mc_update_task(task_id, {"status": "in_progress"})
             mc_log_activity(task_id, "spawned", f"Investigation agent spawned for {project}/{repo}")
         else:
-            _handle_spawn_failure(task_id, f"{project}/{repo}")
+            _handle_spawn_refusal(task_id, outcome, f"{project}/{repo}")
         return
 
     if len(repos) == 1:
@@ -2305,12 +2351,13 @@ def _spawn_for_repos(task: dict, repos: List[dict]):
         prompt = generate_prompt(task, repo_context, project, repo, knowledge=knowledge)
         task_label = f"{_task_ref(task)}-{repo}"
 
-        if spawn_agent(task_id, task_label, repo_path, prompt, mc_task_id=task_id, task_title=title,
-                       base_branch=_resolve_base_branch(task, repo_path), draft_pr=_pr_is_draft(task)):
+        outcome = spawn_agent(task_id, task_label, repo_path, prompt, mc_task_id=task_id, task_title=title,
+                              base_branch=_resolve_base_branch(task, repo_path), draft_pr=_pr_is_draft(task))
+        if outcome:
             mc_update_task(task_id, {"status": "in_progress"})
             mc_log_activity(task_id, "spawned", f"Agent spawned for {project}/{repo}")
         else:
-            _handle_spawn_failure(task_id, f"{project}/{repo}")
+            _handle_spawn_refusal(task_id, outcome, f"{project}/{repo}")
     else:
         mc_log_activity(task_id, "updated", f"Multi-repo task detected ({len(repos)} repos). Creating child tasks.")
 
@@ -2344,11 +2391,12 @@ def _spawn_for_repos(task: dict, repos: List[dict]):
                                      sibling_contexts=sibling_contexts, knowledge=knowledge)
             task_label = f"{_task_ref(child)}-{repo}"
 
-            if spawn_agent(child_id, task_label, repo_path, prompt, mc_task_id=child_id, task_title=title):
+            outcome = spawn_agent(child_id, task_label, repo_path, prompt, mc_task_id=child_id, task_title=title)
+            if outcome:
                 mc_update_task(child_id, {"status": "in_progress"})
                 mc_log_activity(child_id, "spawned", f"Agent spawned for {project}/{repo}")
             else:
-                _handle_spawn_failure(child_id, f"{project}/{repo}")
+                _handle_spawn_refusal(child_id, outcome, f"{project}/{repo}")
 
         mc_update_task(task_id, {"status": "in_progress"})
         mc_log_activity(task_id, "updated", f"Spawned agents across {len(repos)} repos")
@@ -2532,9 +2580,10 @@ def _dispatch_next_steps(task: dict, plan: dict, repos: List[dict]):
             "agent_id": task_label,
         })
 
-        if spawn_agent(task_id, task_label, target_repo, prompt,
-                       agent_type=agent_type, mc_task_id=task_id, task_title=title,
-                       base_branch=step_base_branch, draft_pr=_pr_is_draft(task)):
+        outcome = spawn_agent(task_id, task_label, target_repo, prompt,
+                              agent_type=agent_type, mc_task_id=task_id, task_title=title,
+                              base_branch=step_base_branch, draft_pr=_pr_is_draft(task))
+        if outcome:
             mc_update_task(task_id, {"status": "in_progress"})
             mc_log_activity(
                 task_id, "step_dispatched",
@@ -2547,6 +2596,14 @@ def _dispatch_next_steps(task: dict, plan: dict, repos: List[dict]):
             mc_set_progress(task_id, state="running", phase="execute",
                             step_label=step.get("title", ""), step_index=step_num, step_total=_step_total)
             logging.info(f"  Dispatched step {step_num}: {step['title']} → {agent_type} ({category})")
+        elif outcome is AT_CAPACITY:
+            # A slot was taken between the headroom check above and this spawn.
+            # Hand the step back so a later tick re-offers it; nothing is wrong.
+            update_step_progress(task_id, step_num, {
+                "status": "pending", "agent_id": None, "started_at": None,
+            })
+            logging.info(f"  No slot for step {step_num} — left pending")
+            break
         else:
             update_step_progress(task_id, step_num, {"status": "failed", "outcome": "Spawn failed"})
             _handle_spawn_failure(task_id, f"step {step_num}: {step.get('title', '')}"[:80])
@@ -2850,13 +2907,23 @@ def _agent_slots_free(registry: list) -> Optional[int]:
 
 def _agent_worktree(agent_label: str, registry: list) -> Optional[str]:
     """Worktree path for a spawned agent, so a step's verify_command can be run
-    where the work actually happened. None if the entry or path is missing."""
+    where the work actually happened. None if the entry or path is missing.
+
+    Exact match wins outright before any prefix match is considered — a
+    verify_command run in a sibling step's worktree would be checking the wrong
+    tree while looking like it passed. The prefix pass mirrors _is_agent_running's
+    backwards compatibility with older, suffixed registry ids.
+    """
+    def worktree_of(entry: dict) -> Optional[str]:
+        worktree = entry.get("worktree")
+        return worktree if worktree and Path(worktree).is_dir() else None
+
     for entry in registry:
-        if entry.get("id") == agent_label or entry.get("id", "").startswith(agent_label):
-            worktree = entry.get("worktree")
-            if worktree and Path(worktree).is_dir():
-                return worktree
-            return None
+        if entry.get("id") == agent_label:
+            return worktree_of(entry)
+    for entry in registry:
+        if entry.get("id", "").startswith(agent_label):
+            return worktree_of(entry)
     return None
 
 

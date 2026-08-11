@@ -150,19 +150,51 @@ print(json.dumps(sorted(int(k) for k, v in steps.items() if v["status"] != "comp
   assert.deepEqual(result, [], "every step's update must survive");
 });
 
-test("spawn-agent.sh refuses to start an agent over the global ceiling", () => {
-  const registry = join(mcHome, "swarm", "active-tasks.json");
-  writeFileSync(registry, JSON.stringify(REGISTRY));
-  let code = 0;
+/** Run spawn-agent.sh directly and return its exit code. */
+function spawnExitCode(env) {
+  writeFileSync(join(mcHome, "swarm", "active-tasks.json"), JSON.stringify(REGISTRY));
   try {
     execFileSync(join(SWARM, "spawn-agent.sh"), ["lbl", mcHome, "feat/lbl", "claude", "d"], {
-      env: { ...process.env, MC_HOME: mcHome, MC_MAX_CONCURRENT_AGENTS: "2" },
+      env: { ...process.env, MC_HOME: mcHome, ...env },
       encoding: "utf8",
       stdio: ["ignore", "pipe", "pipe"],
     });
+    return 0;
   } catch (e) {
-    code = e.status;
+    return e.status;
   }
+}
+
+test("spawn-agent.sh refuses to start an agent over the global ceiling", () => {
   // Exit 3 is "full, retry later" — distinct from exit 2, "this spawn is broken".
-  assert.equal(code, 3);
+  assert.equal(spawnExitCode({ MC_MAX_CONCURRENT_AGENTS: "2" }), 3);
+  assert.notEqual(spawnExitCode({ MC_MAX_CONCURRENT_AGENTS: "9" }), 3);
+});
+
+test("a full machine is a wait, not a spawn failure", () => {
+  // Conflating the two would raise a checkpoint asking a human to check that the
+  // agent CLI is logged in, and burn one of three attempts, because the box was busy.
+  const result = python(`
+import json, bridge
+
+calls = []
+bridge.mc_update_task = lambda task_id, updates: calls.append(("update", updates))
+bridge.mc_log_activity = lambda task_id, kind, msg, agent_id=None: calls.append(("log", msg))
+bridge.mc_request = lambda *a, **k: []
+bridge.fetch_task_activities = lambda task_id: []
+
+bridge._handle_spawn_refusal("task", bridge.AT_CAPACITY, "repo")
+capacity = list(calls)
+calls.clear()
+bridge._handle_spawn_refusal("task", False, "repo")
+print(json.dumps({"capacity": capacity, "broken": calls}))
+`);
+  const messages = result.capacity.filter(([kind]) => kind === "log").map(([, m]) => m);
+  assert.equal(messages.length, 1);
+  assert.match(messages[0], /Waiting for a free agent slot/);
+  // The retry counter keys off this phrase, so waiting must never spend an attempt.
+  assert.doesNotMatch(messages[0], /Agent spawn failed/);
+
+  const broken = result.broken.filter(([kind]) => kind === "log").map(([, m]) => m);
+  assert.match(broken.join("\n"), /Agent spawn failed/);
 });
