@@ -49,7 +49,10 @@ test("agent loop verifies planner acceptance criteria and handles review feedbac
   const bridge = read("swarm/bridge.py");
   assert.match(bridge, /def _step_verification_criteria/);
   assert.match(bridge, /step\.get\("acceptance_criteria", step\.get\("done_when", \[\]\)\)/);
-  assert.match(bridge, /if step_def and agent_output and criteria:/);
+  // Criteria alone gate verification: a step with criteria but no readable agent
+  // log must reach verify_step_completion and fail closed, not auto-complete.
+  assert.match(bridge, /if step_def and criteria:/);
+  assert.match(bridge, /verify_step_completion\(step_def, agent_output, cwd=worktree\)/);
   assert.match(bridge, /process_review_tasks\(\)/);
   assert.match(bridge, /def _max_step_retries/);
   assert.doesNotMatch(bridge, /MAX_STEP_RETRIES = 2/);

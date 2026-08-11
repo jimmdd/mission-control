@@ -9,13 +9,16 @@ with precise scoped prompts.
 Models:
   - Planning (structured plan generation): Claude Sonnet via Anthropic API
   - Routing (step classification): MiniMax M2.7 via Ollama (free, local)
-  - Verification (did agent satisfy criteria): MiniMax M2.7 via Ollama (free, local)
+  - Verification (did agent satisfy criteria): the step's own verify_command,
+    judged by exit code. No model is involved unless the step has no runnable
+    command, in which case MiniMax M2.7 via Ollama judges the agent's output.
 """
 
 import json
 import logging
 import os
 import re
+import subprocess
 import time
 import urllib.error
 import urllib.request
@@ -869,8 +872,79 @@ You MUST complete all steps autonomously. Do NOT ask for confirmation. Do NOT st
 
 # === Step Verification (MiniMax via Ollama — free) ===
 
-def verify_step_completion(step: dict, agent_output: str) -> dict:
-    """Use local MiniMax to verify if a step's DONE WHEN criteria are met.
+def _verify_timeout() -> int:
+    """Seconds a verify_command may run before it is treated as failed."""
+    raw = _get_config().get("verify_timeout", 600)
+    try:
+        return max(10, min(int(raw), 3600))
+    except (TypeError, ValueError):
+        return 600
+
+
+def _verify_by_command(command: str, cwd: str, criteria: List[str]) -> Optional[dict]:
+    """Run the step's verify_command and judge by exit code.
+
+    Returns the usual verification dict, or None if the command could not be
+    run at all (missing cwd, spawn failure) so the caller can fall back.
+    """
+    workdir = Path(cwd)
+    if not workdir.is_dir():
+        logging.warning(f"  verify_command skipped — no such worktree: {cwd}")
+        return None
+
+    timeout = _verify_timeout()
+    logging.info(f"  Verifying by command in {workdir.name}: {command}")
+    try:
+        proc = subprocess.run(
+            command,
+            shell=True,
+            cwd=str(workdir),
+            capture_output=True,
+            text=True,
+            timeout=timeout,
+        )
+    except subprocess.TimeoutExpired:
+        return {
+            "passed": False,
+            "verified_by": "command",
+            "command": command,
+            "exit_code": None,
+            "results": [
+                {"criterion": c, "met": False, "reason": f"verify_command timed out after {timeout}s"}
+                for c in criteria
+            ],
+        }
+    except OSError as e:
+        logging.warning(f"  verify_command could not be started: {e}")
+        return None
+
+    passed = proc.returncode == 0
+    tail = (proc.stdout or "")[-1500:] + (proc.stderr or "")[-1500:]
+    reason = "verify_command exited 0" if passed else (
+        f"verify_command exited {proc.returncode}\n{tail.strip()[-800:]}"
+    )
+    logging.info(f"  Verify {'passed' if passed else 'FAILED'} (exit {proc.returncode})")
+
+    # The command is the whole gate: it either proves the criteria or it doesn't.
+    # Per-criterion attribution isn't available from an exit code, so every
+    # criterion carries the same verdict rather than inventing a breakdown.
+    return {
+        "passed": passed,
+        "verified_by": "command",
+        "command": command,
+        "exit_code": proc.returncode,
+        "output_tail": tail[-2000:],
+        "results": [{"criterion": c, "met": passed, "reason": reason} for c in criteria],
+    }
+
+
+def verify_step_completion(step: dict, agent_output: str, cwd: Optional[str] = None) -> dict:
+    """Verify a step's acceptance criteria.
+
+    Runs the step's `verify_command` and judges by exit code — deterministic,
+    with no model in the loop. Falls back to an LLM judge over the agent's
+    output only when there is no runnable command (no `verify_command`, or no
+    worktree to run it in).
 
     Returns: {"passed": bool, "results": [{"criterion": str, "met": bool, "reason": str}]}
     """
@@ -878,6 +952,27 @@ def verify_step_completion(step: dict, agent_output: str) -> dict:
     if not criteria:
         return {"passed": True, "results": []}
 
+    command = (step.get("verify_command") or "").strip()
+    if command and cwd:
+        by_command = _verify_by_command(command, cwd, criteria)
+        if by_command is not None:
+            return by_command
+
+    if not agent_output:
+        # No command to run and no output to judge. Failing closed is deliberate:
+        # a step with acceptance criteria must not be marked done unverified.
+        logging.warning("  Cannot verify — no verify_command and no agent output")
+        return {
+            "passed": False,
+            "verified_by": "none",
+            "results": [
+                {"criterion": c, "met": False,
+                 "reason": "Could not verify: step has no verify_command and the agent produced no output"}
+                for c in criteria
+            ],
+        }
+
+    logging.info("  No runnable verify_command — falling back to model judgement")
     criteria_text = "\n".join(f"- {c}" for c in criteria)
 
     prompt = f"""Evaluate whether each criterion is met based on the agent's output.
@@ -904,9 +999,14 @@ Return ONLY valid JSON:
     parsed = _parse_json_response(result)
 
     if parsed and "passed" in parsed:
+        parsed["verified_by"] = "model"
         return parsed
 
-    return {"passed": False, "results": [{"criterion": "verification", "met": False, "reason": "Verification call failed"}]}
+    return {
+        "passed": False,
+        "verified_by": "model",
+        "results": [{"criterion": "verification", "met": False, "reason": "Verification call failed"}],
+    }
 
 
 # === Plan Completion Summary ===

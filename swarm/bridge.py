@@ -2609,9 +2609,12 @@ def process_in_progress_plans():
                 criteria = _step_verification_criteria(step_def) if step_def else []
                 max_step_retries = _max_step_retries()
 
-                # Verify step completion via configured verification model.
-                if step_def and agent_output and criteria:
-                    verification = verify_step_completion(step_def, agent_output)
+                # Verify step completion by running the step's verify_command in
+                # the agent's worktree; falls back to model judgement only when
+                # there is no runnable command.
+                if step_def and criteria:
+                    worktree = _agent_worktree(step_data.get("agent_id", ""), registry)
+                    verification = verify_step_completion(step_def, agent_output, cwd=worktree)
                     if verification.get("passed"):
                         update_step_progress(task_id, int(step_key), {
                             "status": "completed",
@@ -2651,7 +2654,7 @@ def process_in_progress_plans():
                             logging.warning(f"  Step {step_key} exhausted retries for {task_id[:8]}")
                             newly_completed = True
                 else:
-                    # No verification criteria or no output — trust the agent
+                    # No acceptance criteria on the step — nothing to check
                     update_step_progress(task_id, int(step_key), {
                         "status": "completed",
                         "completed_at": datetime.now(timezone.utc).isoformat(),
@@ -2810,6 +2813,18 @@ def _load_active_tasks() -> list:
         return json.loads(registry_file.read_text())
     except Exception:
         return []
+
+
+def _agent_worktree(agent_label: str, registry: list) -> Optional[str]:
+    """Worktree path for a spawned agent, so a step's verify_command can be run
+    where the work actually happened. None if the entry or path is missing."""
+    for entry in registry:
+        if entry.get("id") == agent_label or entry.get("id", "").startswith(agent_label):
+            worktree = entry.get("worktree")
+            if worktree and Path(worktree).is_dir():
+                return worktree
+            return None
+    return None
 
 
 def _is_agent_running(agent_label: str, registry: list) -> bool:
