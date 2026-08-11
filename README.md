@@ -222,6 +222,7 @@ The key idea is:
 {
   "agents": {
     "defaultProfile": "pi",
+    "maxConcurrent": 0,
     "profiles": {
       "pi": {
         "launcher": "pi",
@@ -259,6 +260,12 @@ The key idea is:
   }
 }
 ```
+
+`maxAgents` limits one profile. `maxConcurrent` limits every profile at once — each
+agent is a worktree plus a CLI process, so the real limit is machine memory, and
+falling back to a second profile does not create more of it. `0` turns it off; a
+24 GB machine wants `2`. `MC_MAX_CONCURRENT_AGENTS` overrides it for a single run.
+Plan steps over the line wait for a free slot rather than failing.
 
 ### Notes on Ollama
 

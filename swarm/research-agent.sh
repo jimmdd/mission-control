@@ -31,7 +31,7 @@ cd "$REPO_PATH"
 # Run Claude Code in read-only research mode.
 # Uses script(1) for PTY wrapper (macOS).
 if script -q /dev/null claude \
-  --model claude-sonnet-4-20250514 \
+  --model claude-sonnet-5 \
   --dangerously-skip-permissions \
   --max-turns 30 \
   --prompt-file "$PROMPT_FILE" \

@@ -1,6 +1,7 @@
 {
   "agents": {
     "defaultProfile": "pi",
+    "maxConcurrent": 0,
     "profiles": {
       "pi": {
         "launcher": "pi",
@@ -53,7 +54,7 @@
     "existing_embedding_dimensions": 384
   },
   "planner": {
-    "planning_model": "claude-sonnet-4-20250514",
+    "planning_model": "claude-sonnet-5",
     "planning_provider": "anthropic",
     "routing_model": "minimax-m2.7:cloud",
     "routing_provider": "ollama",
@@ -61,6 +62,7 @@
     "verification_provider": "ollama",
     "ollama_url": "http://localhost:11434",
     "max_step_retries": 2,
+    "max_concurrent_agents": 0,
     "step_categories": {
       "deep": { "agent": "claude", "description": "Complex implementation" },
       "quick": { "agent": "pi", "description": "Simple, scoped change" },

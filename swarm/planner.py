@@ -43,7 +43,7 @@ SWARM_CONFIG_PATH = MC_HOME / "swarm" / "swarm-config.json"
 
 # Defaults — overridden by swarm-config.json "planner" section
 _DEFAULTS = {
-    "planning_model": "claude-sonnet-4-20250514",
+    "planning_model": "claude-sonnet-5",
     "planning_provider": "anthropic",          # anthropic | ollama | gemini
     "routing_model": "minimax-m2.7:cloud",
     "routing_provider": "ollama",
