@@ -8,6 +8,8 @@
 #   FALLBACK_MODEL    — model to fall back to (legacy override)
 #   AGENTS_JSON       — path to Agent Teams JSON file, or "default" for built-in testing agent
 #   MAX_AGENT_RETRIES — retry limit (default: 3)
+#   MC_MAX_CONCURRENT_AGENTS — ceiling on running agents across all profiles
+#                              (default: .agents.maxConcurrent in swarm-config.json, 0 = off)
 #   MC_TASK_ID        — Mission Control task ID (for monitor → webhook callback)
 #   BASE_BRANCH       — base branch for worktree (default: origin/main)
 set -euo pipefail
@@ -37,6 +39,17 @@ if [ -z "$TASK_ID" ] || [ -z "$REPO_PATH" ] || [ -z "$BRANCH_NAME" ]; then
   echo ""
   echo "Env vars: MAX_BUDGET_USD, MAX_TURNS, FALLBACK_MODEL, AGENTS_JSON, MAX_AGENT_RETRIES"
   exit 1
+fi
+
+# Global ceiling across all profiles, checked before any profile is resolved:
+# falling back to another profile does not create more machine memory. 0 = off.
+MAX_CONCURRENT=${MC_MAX_CONCURRENT_AGENTS:-$(jq -r '.agents.maxConcurrent // 0' "$CONFIG" 2>/dev/null || echo 0)}
+if [ "${MAX_CONCURRENT:-0}" -gt 0 ]; then
+  RUNNING_TOTAL=$(jq '[.[] | select(.status == "running")] | length' "$REGISTRY" 2>/dev/null || echo 0)
+  if [ "$RUNNING_TOTAL" -ge "$MAX_CONCURRENT" ]; then
+    echo "ERROR: at global agent limit ($RUNNING_TOTAL/$MAX_CONCURRENT) — retry once a slot frees"
+    exit 3
+  fi
 fi
 
 resolve_profile_json() {

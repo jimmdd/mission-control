@@ -59,6 +59,11 @@ _DEFAULTS = {
     "gapcheck_provider": "gemini",
     "ollama_url": "http://localhost:11434",
     "max_step_retries": 2,
+    # Ceiling on agent sessions running at once across every profile. Each one is a
+    # worktree plus a CLI process, so the limit is machine memory, not quota — on a
+    # 24 GB box 2 is the working number. 0 means no global ceiling (per-profile
+    # maxAgents in spawn-agent.sh still applies).
+    "max_concurrent_agents": 0,
     "step_categories": {
         "deep": {"agent": "claude", "description": "Complex implementation requiring deep reasoning"},
         "quick": {"agent": "claude", "description": "Simple, scoped change"},
@@ -91,6 +96,13 @@ def _load_config() -> dict:
         val = os.environ.get(env_key)
         if val:
             config[cfg_key] = val
+    # spawn-agent.sh reads the same env var, so one export caps both layers.
+    cap = os.environ.get("MC_MAX_CONCURRENT_AGENTS")
+    if cap:
+        try:
+            config["max_concurrent_agents"] = max(0, int(cap))
+        except ValueError:
+            logging.warning(f"Ignoring non-numeric MC_MAX_CONCURRENT_AGENTS={cap!r}")
     return config
 
 
@@ -675,11 +687,53 @@ def update_step_progress(task_id: str, step_num: int, updates: dict):
     progress_path.write_text(json.dumps(progress, indent=2))
 
 
+def _active_group(plan: dict, settled: set) -> Optional[set]:
+    """Step numbers in the earliest `parallel_groups` entry that isn't finished yet.
+
+    Groups run in sequence; steps inside one may run together. `settled` is the set
+    of steps that will never run again (completed, failed or skipped) — a group is
+    done once every step in it is settled.
+
+    Returns None when the plan has no usable grouping, so the caller falls back to
+    dependency order alone. A group that doesn't cover every step is treated as
+    unusable rather than partially applied: silently withholding an uncovered step
+    would stall the plan with no visible cause.
+    """
+    groups = plan.get("parallel_groups")
+    if not isinstance(groups, list) or not groups:
+        return None
+
+    covered = set()
+    parsed = []
+    for group in groups:
+        if not isinstance(group, list):
+            logging.warning("  Ignoring parallel_groups — not a list of lists")
+            return None
+        nums = {n for n in group if isinstance(n, int)}
+        covered |= nums
+        parsed.append(nums)
+
+    all_steps = {s["step"] for s in plan.get("steps", []) if isinstance(s.get("step"), int)}
+    missing = all_steps - covered
+    if missing:
+        logging.warning(
+            f"  Ignoring parallel_groups — steps {sorted(missing)} appear in no group"
+        )
+        return None
+
+    for nums in parsed:
+        if nums and not nums.issubset(settled):
+            return nums
+    return None
+
+
 def get_next_steps(task_id: str, plan: dict) -> List[dict]:
     """Get the next executable steps based on progress and dependencies.
 
-    Returns steps whose dependencies are all completed and that haven't started yet.
-    Respects parallel_groups — returns all steps from the next runnable group.
+    Returns steps whose dependencies are all completed and that haven't started yet,
+    narrowed to the plan's current `parallel_groups` entry when the plan has one.
+    Groups are the planner's statement about which steps may safely touch the repo
+    at the same time — dependencies alone don't capture file overlap.
     """
     progress = load_progress(task_id)
     if not progress:
@@ -703,10 +757,19 @@ def get_next_steps(task_id: str, plan: dict) -> List[dict]:
         if step_progress["status"] == "failed":
             failed.add(int(step_key))
 
+    skipped = set()
+    for step_key, step_progress in progress["steps"].items():
+        if step_progress["status"] == "skipped":
+            skipped.add(int(step_key))
+
+    group = _active_group(plan, completed | failed | skipped)
+
     runnable = []
     for step in plan.get("steps", []):
         step_num = step["step"]
         if step_num in completed or step_num in in_progress or step_num in failed:
+            continue
+        if group is not None and step_num not in group:
             continue
         deps = set(step.get("depends_on", []))
         if deps.issubset(completed):

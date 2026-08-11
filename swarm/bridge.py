@@ -2441,6 +2441,19 @@ def _dispatch_next_steps(task: dict, plan: dict, repos: List[dict]):
             logging.info(f"  No runnable steps for {task_id[:8]} — waiting for in-progress steps")
         return
 
+    # Steps beyond the ceiling are left pending, not failed — the daemon calls this
+    # again each tick, so they dispatch as slots free up.
+    slots = _agent_slots_free(_load_active_tasks())
+    if slots is not None and slots < len(next_steps):
+        held = len(next_steps) - slots
+        logging.info(
+            f"  At agent limit — dispatching {slots} of {len(next_steps)} runnable steps, "
+            f"{held} deferred to a later tick"
+        )
+        if slots == 0:
+            return
+        next_steps = next_steps[:slots]
+
     knowledge_query = f"{title}\n{task.get('description', '')[:500]}"
     knowledge = recall_knowledge(repos, knowledge_query) if repos else {}
     completed_summary = get_completed_steps_summary(task_id, plan)
@@ -2813,6 +2826,26 @@ def _load_active_tasks() -> list:
         return json.loads(registry_file.read_text())
     except Exception:
         return []
+
+
+def _max_concurrent_agents() -> int:
+    try:
+        return max(0, int(get_planner_config().get("max_concurrent_agents", 0)))
+    except (TypeError, ValueError):
+        return 0
+
+
+def _agent_slots_free(registry: list) -> Optional[int]:
+    """How many more agent sessions may start right now, or None for no ceiling.
+
+    Counts every running agent, not just this task's — the ceiling is machine
+    memory, which one task's plan has no exclusive claim on.
+    """
+    cap = _max_concurrent_agents()
+    if cap <= 0:
+        return None
+    running = sum(1 for entry in registry if entry.get("status") == "running")
+    return max(0, cap - running)
 
 
 def _agent_worktree(agent_label: str, registry: list) -> Optional[str]:
