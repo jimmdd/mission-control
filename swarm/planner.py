@@ -14,6 +14,7 @@ Models:
     command, in which case MiniMax M2.7 via Ollama judges the agent's output.
 """
 
+import fcntl
 import json
 import logging
 import os
@@ -22,6 +23,7 @@ import subprocess
 import time
 import urllib.error
 import urllib.request
+from contextlib import contextmanager
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
@@ -628,6 +630,32 @@ Return ONLY the category name (one word)."""
 
 # === Progress Tracking ===
 
+def _write_progress(progress_path: Path, progress: dict):
+    """Replace the progress file in one step, so a concurrent reader sees either
+    the old file or the new one and never a half-written one."""
+    tmp = progress_path.with_suffix(f".json.{os.getpid()}.tmp")
+    tmp.write_text(json.dumps(progress, indent=2))
+    os.replace(tmp, progress_path)
+
+
+@contextmanager
+def _progress_lock(task_id: str):
+    """Hold the task's progress file for a read-modify-write.
+
+    Steps finish independently, and two of them updating their own entries at once
+    would otherwise each write back a copy of the file read before the other's
+    change — losing one step's result. Same `flock` approach as swarm-state.py.
+    """
+    PROGRESS_DIR.mkdir(parents=True, exist_ok=True)
+    lock_path = PROGRESS_DIR / f"{task_id}.lock"
+    with lock_path.open("a+") as fd:
+        fcntl.flock(fd.fileno(), fcntl.LOCK_EX)
+        try:
+            yield
+        finally:
+            fcntl.flock(fd.fileno(), fcntl.LOCK_UN)
+
+
 def init_progress(task_id: str, plan: dict) -> dict:
     """Initialize progress tracker for a task."""
     PROGRESS_DIR.mkdir(parents=True, exist_ok=True)
@@ -657,7 +685,8 @@ def init_progress(task_id: str, plan: dict) -> dict:
         }
 
     progress_path = PROGRESS_DIR / f"{task_id}.json"
-    progress_path.write_text(json.dumps(progress, indent=2))
+    with _progress_lock(task_id):
+        _write_progress(progress_path, progress)
     return progress
 
 
@@ -673,18 +702,23 @@ def load_progress(task_id: str) -> Optional[dict]:
 
 
 def update_step_progress(task_id: str, step_num: int, updates: dict):
-    """Update progress for a specific step."""
-    progress = load_progress(task_id)
-    if not progress:
-        return
+    """Update progress for a specific step.
 
-    step_key = str(step_num)
-    if step_key in progress["steps"]:
-        progress["steps"][step_key].update(updates)
-    progress["updated_at"] = datetime.now(timezone.utc).isoformat()
-
+    The whole read-modify-write is held under the task's lock — the file carries
+    every step, so an unlocked update loses whatever a concurrent step wrote.
+    """
     progress_path = PROGRESS_DIR / f"{task_id}.json"
-    progress_path.write_text(json.dumps(progress, indent=2))
+    with _progress_lock(task_id):
+        progress = load_progress(task_id)
+        if not progress:
+            return
+
+        step_key = str(step_num)
+        if step_key in progress["steps"]:
+            progress["steps"][step_key].update(updates)
+        progress["updated_at"] = datetime.now(timezone.utc).isoformat()
+
+        _write_progress(progress_path, progress)
 
 
 def _active_group(plan: dict, settled: set) -> Optional[set]:

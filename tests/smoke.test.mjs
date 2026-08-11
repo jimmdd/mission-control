@@ -58,6 +58,18 @@ test("agent loop verifies planner acceptance criteria and handles review feedbac
   assert.doesNotMatch(bridge, /MAX_STEP_RETRIES = 2/);
 });
 
+test("every launcher honours PROMPT_OVERRIDE for relaunches", () => {
+  // Review fixes and follow-ups relaunch an agent by pointing it at a different
+  // prompt. A launcher that ignores the override silently re-runs the original task.
+  for (const launcher of ["run-claude.sh", "run-codex.sh", "run-pi.sh"]) {
+    assert.match(
+      read(`swarm/${launcher}`),
+      /PROMPT_FILE="\$\{PROMPT_OVERRIDE:-/,
+      `${launcher} ignores PROMPT_OVERRIDE`,
+    );
+  }
+});
+
 test("server defaults are local and reject unauthenticated public binds", () => {
   const server = read("server.ts");
   assert.match(server, /const HOST = process\.env\.MC_HOST \?\? "127\.0\.0\.1"/);

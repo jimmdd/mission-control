@@ -121,6 +121,35 @@ test("a full machine reports zero slots rather than a negative number", () => {
   assert.equal(slotsFree(REGISTRY, 1), 0);
 });
 
+test("concurrent step updates do not overwrite each other", () => {
+  // The progress file holds every step, so an unlocked read-modify-write loses
+  // whatever another step wrote in between. Twenty processes, one step each.
+  const STEPS = 20;
+  const plan = { steps: Array.from({ length: STEPS }, (_, i) => ({ step: i + 1, title: `s${i + 1}` })) };
+  const result = python(`
+import json, os
+from planner import init_progress, load_progress, update_step_progress
+
+plan = json.loads(${JSON.stringify(JSON.stringify(plan))})
+task = "t-race"
+init_progress(task, plan)
+
+children = []
+for n in range(1, ${STEPS} + 1):
+    pid = os.fork()
+    if pid == 0:
+        update_step_progress(task, n, {"status": "completed", "outcome": "s%d" % n})
+        os._exit(0)
+    children.append(pid)
+for pid in children:
+    os.waitpid(pid, 0)
+
+steps = load_progress(task)["steps"]
+print(json.dumps(sorted(int(k) for k, v in steps.items() if v["status"] != "completed")))
+`);
+  assert.deepEqual(result, [], "every step's update must survive");
+});
+
 test("spawn-agent.sh refuses to start an agent over the global ceiling", () => {
   const registry = join(mcHome, "swarm", "active-tasks.json");
   writeFileSync(registry, JSON.stringify(REGISTRY));
