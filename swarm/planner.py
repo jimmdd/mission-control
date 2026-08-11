@@ -236,6 +236,81 @@ def _call_ollama(prompt: str, model: str = "", system: str = "", max_tokens: int
         return None
 
 
+def _cli_timeout() -> int:
+    """Seconds a headless CLI call may run. Slower than an API call — it boots a
+    whole agent runtime — so the ceiling is generous."""
+    raw = _get_config().get("cli_timeout", 300)
+    try:
+        return max(30, min(int(raw), 1800))
+    except (TypeError, ValueError):
+        return 300
+
+
+def _call_claude_cli(prompt: str, model: str = "", system: str = "", max_tokens: int = 4096) -> Optional[str]:
+    """Call Claude through the logged-in `claude` CLI instead of the HTTP API.
+
+    Runs on the CLI's own subscription session, so no ANTHROPIC_API_KEY is needed.
+    Tools are disabled: this is a single question-and-answer, and a planner call
+    that could touch the filesystem would be a different thing entirely.
+
+    max_tokens is accepted for signature parity and ignored — the CLI has no flag
+    for it.
+    """
+    cfg = _get_config()
+    model = model or cfg["planning_model"]
+
+    cmd = ["claude", "-p", prompt, "--model", model,
+           "--output-format", "text", "--allowed-tools", ""]
+    if system:
+        cmd += ["--append-system-prompt", system]
+
+    try:
+        proc = subprocess.run(cmd, capture_output=True, text=True, timeout=_cli_timeout())
+    except FileNotFoundError:
+        logging.error("claude CLI not found on PATH")
+        return None
+    except subprocess.TimeoutExpired:
+        logging.error(f"claude CLI timed out after {_cli_timeout()}s ({model})")
+        return None
+
+    if proc.returncode != 0:
+        logging.error(f"claude CLI failed ({model}): {proc.stderr.strip()[:300]}")
+        return None
+
+    out = (proc.stdout or "").strip()
+    return out or None
+
+
+def _call_codex_cli(prompt: str, model: str = "", system: str = "", max_tokens: int = 4096) -> Optional[str]:
+    """Call Codex through the logged-in `codex` CLI. Same subscription rationale as
+    _call_claude_cli, and a second pool to spread planning load across.
+
+    `system` is prepended to the prompt — codex exec has no separate system flag.
+    """
+    cfg = _get_config()
+    model = model or cfg["planning_model"]
+    if system:
+        prompt = f"{system}\n\n---\n\n{prompt}"
+
+    cmd = ["codex", "exec", "--model", model, "--sandbox", "read-only", prompt]
+
+    try:
+        proc = subprocess.run(cmd, capture_output=True, text=True, timeout=_cli_timeout())
+    except FileNotFoundError:
+        logging.error("codex CLI not found on PATH")
+        return None
+    except subprocess.TimeoutExpired:
+        logging.error(f"codex CLI timed out after {_cli_timeout()}s ({model})")
+        return None
+
+    if proc.returncode != 0:
+        logging.error(f"codex CLI failed ({model}): {proc.stderr.strip()[:300]}")
+        return None
+
+    out = (proc.stdout or "").strip()
+    return out or None
+
+
 def _call_anthropic(prompt: str, model: str = "", system: str = "", max_tokens: int = 4096) -> Optional[str]:
     """Call a model via Anthropic API."""
     api_key = os.environ.get("ANTHROPIC_API_KEY", "")
@@ -369,6 +444,10 @@ def _call_llm(prompt: str, role: str = "planning", system: str = "", max_tokens:
 
     if provider == "ollama":
         result = _call_ollama(prompt, model=model, system=system, max_tokens=max_tokens)
+    elif provider == "claude-cli":
+        result = _call_claude_cli(prompt, model=model, system=system, max_tokens=max_tokens)
+    elif provider == "codex-cli":
+        result = _call_codex_cli(prompt, model=model, system=system, max_tokens=max_tokens)
     elif provider == "anthropic":
         result = _call_anthropic(prompt, model=model, system=system, max_tokens=max_tokens)
     elif provider == "gemini":
