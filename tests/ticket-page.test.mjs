@@ -265,3 +265,19 @@ test("planner follow-ups lead the page and hide what is already answered", () =>
   assert.match(out, /plan cannot be written until these are settled/);
   assert.match(out, /no code\s+should be written before the plan/);
 });
+
+test("the board flags a task whose planning is blocked, at any status", () => {
+  // The existing triage indicator only renders while status === 'planning', which is
+  // exactly when planner follow-ups have not been raised yet. Without a second badge a
+  // blocked spec is invisible from the board.
+  const appJs = readFileSync(new URL("../public/app.js", import.meta.url), "utf8");
+  assert.match(appJs, /PLANNING BLOCKED/);
+  assert.match(appJs, /q\.source === 'planner'/,
+    "the badge must key off planner questions, not any unanswered question");
+  assert.doesNotMatch(
+    appJs.slice(appJs.indexOf("let followUpBadge"), appJs.indexOf("let needsHumanBadge")),
+    /task\.status === 'planning'/,
+    "the badge must not be gated on the planning status");
+  // Malformed state on one task must not take down the whole board.
+  assert.match(appJs, /malformed triage_state must not break the board/);
+});

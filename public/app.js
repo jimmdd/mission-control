@@ -1076,6 +1076,21 @@
 
                 // A pending checkpoint means a human decision is needed (e.g. an existing
                 // draft PR, or an agent escalation) — flag it prominently.
+                // A planner question blocks the spec, and the spec blocks the work — so it
+                // has to be visible from the board, at any status. The triage indicator
+                // above only renders while the task is still in planning, which is exactly
+                // when follow-ups have not been raised yet.
+                let followUpBadge = '';
+                if (!isDone && task.triage_state) {
+                    try {
+                        const ts = typeof task.triage_state === 'string' ? JSON.parse(task.triage_state) : task.triage_state;
+                        const open = (ts?.questions || []).filter(q => !q.answer && (q.source === 'planner' || q.round > 1));
+                        if (open.length) {
+                            followUpBadge = `<a href="/ticket?id=${encodeURIComponent(task.id)}" onclick="event.stopPropagation()" class="badge" title="Planning is blocked on ${open.length} unanswered question(s) — no code should be written until they are settled" style="background: rgba(255,176,32,0.2); color:#ffb020; font-size:9px; padding:1px 6px; font-weight:600; text-decoration:none;">⚠ PLANNING BLOCKED (${open.length})</a>`;
+                        }
+                    } catch (e) { /* malformed triage_state must not break the board */ }
+                }
+
                 let needsHumanBadge = '';
                 if (!isDone && (task.pending_checkpoints || 0) > 0) {
                     needsHumanBadge = `<div class="badge" title="Awaiting your decision — open the task to respond" style="background: rgba(255,176,32,0.18); color:#ffb020; font-size:9px; padding:1px 6px; font-weight:600;">⚠ NEEDS YOU</div>`;
@@ -1127,6 +1142,7 @@
                             </div>
                             <div class="card-subtitle">
                                 <div class="badge badge-status ${task.status}">${task.status.replace('_', ' ')}</div>
+                                ${followUpBadge}
                                 ${needsHumanBadge}
                                 ${ticketLinkHtml}
                                 ${prButtonHtml}
