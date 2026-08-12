@@ -912,6 +912,26 @@
             gap: 16px;
         }
 
+        /* Route out of the summary drawer into the full ticket page. */
+        .ticket-link {
+            flex: 0 0 auto;
+            align-self: center;
+            font-size: 12px;
+            font-weight: 600;
+            letter-spacing: 0.02em;
+            white-space: nowrap;
+            padding: 5px 10px;
+            border-radius: 6px;
+            border: 1px solid var(--accent);
+            color: var(--accent);
+            text-decoration: none;
+        }
+
+        .ticket-link:hover {
+            background: var(--accent);
+            color: var(--bg);
+        }
+
         .drawer-title {
             font-size: 18px;
             font-weight: 600;

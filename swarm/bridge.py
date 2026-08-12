@@ -623,7 +623,59 @@ def discover_local_repos() -> List[dict]:
                     "path": sub,
                     "label": f"{entry.name}/{sub.name}",
                 })
-    return repos
+    return _dedupe_by_remote(repos)
+
+
+def _origin_url(path: Path) -> str:
+    try:
+        out = subprocess.run(["git", "remote", "get-url", "origin"], cwd=str(path),
+                             capture_output=True, text=True, timeout=15)
+        return out.stdout.strip().rstrip("/").removesuffix(".git") if out.returncode == 0 else ""
+    except (OSError, subprocess.TimeoutExpired):
+        return ""
+
+
+def _dedupe_by_remote(repos: List[dict]) -> List[dict]:
+    """Collapse several local checkouts of one upstream down to a single entry.
+
+    Two clones of the same repository are two names for one codebase, but the manifest
+    listed both, so repo selection picked either — non-deterministically, on identical
+    input — and worktrees landed under different parents run to run.
+
+    The kept clone is the one whose directory name matches the repository name in the
+    remote URL, so `backend` wins over a `backend-phase0` or `…-redesign` copy of it.
+    Repos with no origin are left alone: nothing says they are duplicates.
+    """
+    by_remote: Dict[str, List[dict]] = {}
+    standalone: List[dict] = []
+    for r in repos:
+        url = _origin_url(r["path"])
+        if url:
+            by_remote.setdefault(url, []).append(r)
+        else:
+            standalone.append(r)
+
+    kept: List[dict] = list(standalone)
+    for url, group in by_remote.items():
+        if len(group) == 1:
+            kept.append(group[0])
+            continue
+        upstream_name = url.rsplit("/", 1)[-1]
+
+        def depth(r: dict) -> int:
+            try:
+                return len(Path(r["path"]).resolve().relative_to(GITPROJECTS_DIR.resolve()).parts)
+            except (ValueError, OSError):
+                return 99
+
+        # Name match first, then the shallowest checkout: a top-level clone is the
+        # working copy, while nested ones (external/, vendor/) are reference copies.
+        group.sort(key=lambda r: (r["repo"] != upstream_name, depth(r), len(r["repo"]), r["repo"]))
+        winner, dropped = group[0], group[1:]
+        logging.info(f"  {len(group)} checkouts of {url} — using {winner['label']}, "
+                     f"ignoring {', '.join(d['label'] for d in dropped)}")
+        kept.append(winner)
+    return sorted(kept, key=lambda r: r["label"])
 
 
 def read_manifest() -> str:

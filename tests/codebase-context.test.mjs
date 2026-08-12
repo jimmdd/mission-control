@@ -242,3 +242,52 @@ print(json.dumps({
   assert.match(sections.triage, /ask the human to confirm/i);
   rmSync(dir, { recursive: true, force: true });
 });
+
+// Several local checkouts of one upstream are several names for one codebase. Listing
+// them all made repo selection non-deterministic on identical input — the same ticket
+// picked a different clone run to run, and worktrees landed under different parents.
+
+test("duplicate checkouts of one upstream collapse to a single repo", () => {
+  const dir = mkdtempSync(join(tmpdir(), "mc-dedupe-"));
+  const mk = (rel, url) => {
+    const p = join(dir, rel);
+    mkdirSync(p, { recursive: true });
+    execFileSync("git", ["init", "-q"], { cwd: p });
+    execFileSync("git", ["remote", "add", "origin", url], { cwd: p });
+    return p;
+  };
+  // Same upstream, three names; plus one genuinely different repo.
+  mk("backend", "https://github.com/org/backend.git");
+  mk("nested/backend-copy", "https://github.com/org/backend.git");
+  mk("nested/backend", "https://github.com/org/backend.git");
+  mk("other", "https://github.com/org/other.git");
+
+  const labels = python(`
+import json, pathlib, bridge
+bridge.GITPROJECTS_DIR = pathlib.Path(${JSON.stringify(dir)})
+print(json.dumps([r["label"] for r in bridge.discover_local_repos()]))
+`);
+  const backends = labels.filter(l => l.includes("backend"));
+  assert.equal(backends.length, 1, `expected one backend, got ${JSON.stringify(backends)}`);
+  // Name match wins, then the shallowest checkout — a top-level clone is the working
+  // copy; nested ones (external/, vendor/) are reference copies.
+  assert.ok(backends[0].endsWith("/backend"));
+  assert.ok(labels.some(l => l.endsWith("/other")), "a distinct repo must survive");
+  rmSync(dir, { recursive: true, force: true });
+});
+
+test("a repo with no origin is never treated as a duplicate", () => {
+  const dir = mkdtempSync(join(tmpdir(), "mc-dedupe2-"));
+  for (const name of ["alpha", "beta"]) {
+    const p = join(dir, name);
+    mkdirSync(p, { recursive: true });
+    execFileSync("git", ["init", "-q"], { cwd: p });
+  }
+  const labels = python(`
+import json, pathlib, bridge
+bridge.GITPROJECTS_DIR = pathlib.Path(${JSON.stringify(dir)})
+print(json.dumps(sorted(r["repo"] for r in bridge.discover_local_repos())))
+`);
+  assert.deepEqual(labels, ["alpha", "beta"]);
+  rmSync(dir, { recursive: true, force: true });
+});

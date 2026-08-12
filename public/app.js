@@ -56,6 +56,7 @@
             drawerOverlay: document.getElementById('drawer-overlay'),
             closeDrawer: document.getElementById('close-drawer'),
             drawerTitle: document.getElementById('drawer-title'),
+            drawerTicketLink: document.getElementById('drawer-ticket-link'),
             drawerMeta: document.getElementById('drawer-meta'),
             drawerDescription: document.getElementById('drawer-description'),
             drawerTriageSection: document.getElementById('drawer-triage-section'),
@@ -1467,6 +1468,9 @@
 
             // Populate basic info immediately
             els.drawerTitle.textContent = task.title;
+            if (els.drawerTicketLink) {
+                els.drawerTicketLink.href = `/ticket?id=${encodeURIComponent(task.id)}`;
+            }
             els.drawerDescription.innerHTML = parseMarkdown(task.description) || '<span style="color: var(--text-secondary)">No description provided.</span>';
             els.drawerDescription.classList.add('collapsed');
             const descToggle = document.getElementById('desc-toggle');
