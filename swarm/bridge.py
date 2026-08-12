@@ -3331,6 +3331,10 @@ def process_in_progress_plans():
                     # that skipped decomposition is visible instead of just looking fine.
                     if worktree and _require_gsd():
                         ran, why = gsd_workflow_ran(worktree)
+                        # Recorded on the step, not just in metrics, so the ticket page
+                        # can show whether the work was actually spec-driven.
+                        update_step_progress(task_id, int(step_key),
+                                             {"gsd_ran": ran, "gsd_reason": why})
                         if not ran:
                             logging.warning(f"  Step {step_key}: GSD workflow did not run — {why}")
                             mc_log_activity(task_id, "updated",

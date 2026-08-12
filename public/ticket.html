@@ -147,6 +147,7 @@
   svg.plan-map .dlink { fill: none; stroke-width: 1.5; }
   svg.plan-map .dlink.open { stroke: var(--amber); stroke-dasharray: 4 3; }
   svg.plan-map .dlink.set { stroke: var(--green); opacity: .6; }
+  svg.plan-map .nogsd { fill: var(--amber); font-family: var(--mono); font-size: 9.5px; font-weight: 700; }
   svg.plan-map .wv { font-family: var(--mono); font-size: 9.5px; font-weight: 700; fill: var(--ink-3); letter-spacing: .1em; }
   svg.plan-map .wv.wait { fill: var(--amber); }
   svg.plan-map .ghost rect { fill: none; stroke: var(--line); stroke-width: 1.5; stroke-dasharray: 5 4; }
@@ -317,6 +318,7 @@ function planMap(plan, progress, triage) {
     ? plan.parallel_groups : plan.steps.map(s => [s.step]);
 
   const decisions = (triage?.questions || []);
+  const anyNoGsd = Object.values(progress?.steps || {}).some(st => st.gsd_ran === false);
   const open = decisions.filter(q => !q.answer);
   const cols = [decisions.length ? decisions : null, ...rounds].filter(Boolean);
 
@@ -369,6 +371,9 @@ function planMap(plan, progress, triage) {
       const ghost = open.length > 0 && !state ? "ghost" : "";
       const model = st.agent_profile || st.category || s.category || "";
       const check = (s.verify_command || "").trim();
+      // A step that produced no GSD artifacts was not spec-driven, whatever else it
+      // achieved — the plan carrying the context is the whole premise.
+      const noGsd = st.gsd_ran === false;
       parts.push(`
         <g class="stepg ${state} ${ghost}" tabindex="0">
           <title>${esc(s.title)}${check ? `\n\n✓ ${esc(check)}` : ""}</title>
@@ -376,6 +381,7 @@ function planMap(plan, progress, triage) {
           <text class="snum" x="${x + 12}" y="${y + 18}">STEP ${esc(String(s.step))}</text>
           ${model ? `<text class="srepo" x="${x + BOX_W - 12}" y="${y + 18}" text-anchor="end">${esc(clip(model, 14))}</text>` : ""}
           <text class="stitle" x="${x + 12}" y="${y + 38}">${esc(clip(s.title, 26))}</text>
+          ${noGsd ? `<text class="nogsd" x="${x + BOX_W - 12}" y="${y + 38}" text-anchor="end">no GSD</text>` : ""}
           ${check ? `
             <rect class="cbox" x="${x + 12}" y="${y + 48}" width="${BOX_W - 24}" height="18" rx="5"/>
             <text class="ctext" x="${x + 18}" y="${y + 61}">✓ ${esc(clip(check.split("&&")[0].trim(), 22))}</text>` : ""}
@@ -406,6 +412,7 @@ function planMap(plan, progress, triage) {
       <span><i class="f"></i> depends on</span>
       ${hasDec ? `<span><i class="s"></i> decision locked</span>` : ""}
       ${open.length ? `<span><i class="d"></i> decision open — work is provisional</span>` : ""}
+      ${anyNoGsd ? `<span><i class="d"></i> no GSD — step ran without task decomposition</span>` : ""}
     </div>
     <div class="diagram-wrap">
       <svg class="plan-map" viewBox="0 0 ${width} ${height}" style="min-width:${width}px">
