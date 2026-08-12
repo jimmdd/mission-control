@@ -34,6 +34,8 @@ from planner import (
     get_completed_steps_summary, is_plan_complete, classify_step,
     _get_config as get_planner_config,
     _call_openrouter,
+    _call_claude_cli,
+    _call_codex_cli,
     call_openrouter_fallback,
     _post_json_with_retry,
 )
@@ -539,9 +541,15 @@ def recall_knowledge(repos: List[dict], query: str, top_k: int = KNOWLEDGE_MAX_R
 def call_gemini(prompt: str, max_tokens: int = 2048, model: Optional[str] = None) -> Optional[str]:
     if model is None:
         model = _triage_model()
-    # Route to OpenRouter when configured, keeping all triage call sites unchanged.
-    if _load_triage_config().get("triage_provider") == "openrouter":
+    # Route to another provider when configured, keeping all triage call sites
+    # unchanged. The CLI providers need no API key — they use the logged-in session.
+    provider = _load_triage_config().get("triage_provider")
+    if provider == "openrouter":
         return _call_openrouter(prompt, model=model, max_tokens=max_tokens)
+    if provider == "claude-cli":
+        return _call_claude_cli(prompt, model=model, max_tokens=max_tokens)
+    if provider == "codex-cli":
+        return _call_codex_cli(prompt, model=model, max_tokens=max_tokens)
     api_key = os.environ.get("GOOGLE_GENERATIVE_AI_API_KEY", "")
     if not api_key:
         # No Gemini key — try the OpenRouter backup before giving up.
@@ -1538,6 +1546,62 @@ def _gather_design_links(task_id: str, description: str) -> List[str]:
     return list(dict.fromkeys(links))  # dedup, newest-first
 
 
+_PAPER_READ_TOOLS = [
+    "open_file", "list_files", "get_basic_info", "get_selection", "get_node_info",
+    "get_children", "get_screenshot", "get_jsx", "get_tree_summary", "get_computed_styles",
+    "get_fill_image", "find_nodes", "get_font_family_info", "get_guide", "get_tokens",
+    "finish_working_on_nodes",
+]
+
+
+def _mcp_tool_prefix(server_name: str) -> str:
+    """Tool prefix Claude Code gives an MCP server. Plugin-provided servers are named
+    `plugin:<plugin>:<server>`, and the colons become underscores in tool names —
+    `plugin:paper-desktop:paper` serves `mcp__plugin_paper-desktop_paper__open_file`."""
+    return f"mcp__{server_name.replace(':', '_')}__"
+
+
+def _design_mcp_allowlist() -> str:
+    """Read-only design tools to expose to the summarizer, resolved from the CLI's
+    actually-connected servers.
+
+    Server names are not fixed: Paper installed as a plugin is `plugin:paper-desktop:paper`,
+    standalone it is `paper`. Hardcoding one spelling silently yields an allowlist that
+    matches nothing — the summarizer then reports the design as unreachable and triage
+    asks the user a question the tooling could have answered itself.
+    """
+    servers: List[str] = []
+    try:
+        out = subprocess.run([_claude_bin(), "mcp", "list"],
+                             capture_output=True, text=True, timeout=90,
+                             stdin=subprocess.DEVNULL)
+        for line in (out.stdout or "").splitlines():
+            name, sep, rest = line.partition(":")
+            # "<name>: <url> - ✔ Connected" — only take servers reported healthy.
+            if not sep or "Connected" not in rest or "Failed" in rest:
+                continue
+            name = line.rsplit(" - ", 1)[0].rsplit(": ", 1)[0].strip()
+            if name:
+                servers.append(name)
+    except Exception as e:
+        logging.debug(f"  Could not list MCP servers: {e}")
+
+    allowed: List[str] = []
+    for name in servers:
+        low = name.lower()
+        prefix = _mcp_tool_prefix(name)
+        if "paper" in low:
+            allowed += [prefix + t for t in _PAPER_READ_TOOLS]
+        elif "figma" in low:
+            allowed.append(prefix + "*")
+
+    if not allowed:
+        # Nothing resolvable — fall back to the bare names so a standalone install
+        # still works, and so the summarizer can report the design as unreachable.
+        allowed = [f"mcp__paper__{t}" for t in _PAPER_READ_TOOLS] + ["mcp__figma__*"]
+    return ",".join(allowed)
+
+
 def _design_prompt_section(task: dict) -> str:
     """If the ticket references a design (Paper or Figma) — in the description OR a
     comment — tell the agent to read the real spec AND extract its image assets via
@@ -1619,11 +1683,7 @@ def _design_context(task_id: str, description: str) -> str:
     # Constrain this summarizer to ONLY the design MCP's read tools — no permission
     # bypass, no Bash/Write/Edit, no design-mutating tools. It processes untrusted
     # design content, so its tool surface must stay minimal.
-    paper_read = ["open_file", "list_files", "get_basic_info", "get_selection", "get_node_info",
-                  "get_children", "get_screenshot", "get_jsx", "get_tree_summary", "get_computed_styles",
-                  "get_fill_image", "find_nodes", "get_font_family_info", "get_guide", "get_tokens",
-                  "finish_working_on_nodes"]
-    allowed = ",".join(f"mcp__paper__{t}" for t in paper_read) + ",mcp__figma__*"
+    allowed = _design_mcp_allowlist()
     try:
         out = subprocess.run(
             [_claude_bin(), "-p", "--allowedTools", allowed, "--max-turns", "25", prompt],
