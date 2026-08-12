@@ -147,7 +147,9 @@
   svg.plan-map .dlink { fill: none; stroke-width: 1.5; }
   svg.plan-map .dlink.open { stroke: var(--amber); stroke-dasharray: 4 3; }
   svg.plan-map .dlink.set { stroke: var(--green); opacity: .6; }
-  svg.plan-map .nogsd { fill: var(--amber); font-family: var(--mono); font-size: 9.5px; font-weight: 700; }
+  svg.plan-map .nogsd-edge { fill: var(--amber); }
+  svg.plan-map g.stepg { cursor: pointer; }
+  svg.plan-map g.stepg.sel rect.sbox { stroke: var(--accent); stroke-width: 2.5; }
   svg.plan-map .wv { font-family: var(--mono); font-size: 9.5px; font-weight: 700; fill: var(--ink-3); letter-spacing: .1em; }
   svg.plan-map .wv.wait { fill: var(--amber); }
   svg.plan-map .ghost rect { fill: none; stroke: var(--line); stroke-width: 1.5; stroke-dasharray: 5 4; }
@@ -156,6 +158,19 @@
   svg.plan-map .done rect.sbox { fill: var(--green-bg); stroke: var(--green); }
   svg.plan-map .blocked rect.sbox { stroke: var(--red); }
   svg.plan-map .blocked .snum { fill: var(--red); }
+  .sd { background: var(--sunk); border: 1px solid var(--line); border-radius: 12px; padding: 16px 18px; margin-bottom: 14px; }
+  .sd-head { display: flex; gap: 10px; align-items: baseline; flex-wrap: wrap; margin-bottom: 4px; }
+  .sd-num { font-family: var(--mono); font-size: 11px; font-weight: 700; color: var(--ink-3); }
+  .sd-title { font-size: 15px; font-weight: 600; letter-spacing: -.014em; }
+  .sd-close { margin-left: auto; cursor: pointer; border: none; background: none; color: var(--ink-3); font-size: 18px; line-height: 1; }
+  .sd-meta { font-family: var(--mono); font-size: 11px; color: var(--ink-3); margin-bottom: 10px; }
+  .sd-sec { margin-top: 12px; }
+  .sd-lab { font-size: 10.5px; font-weight: 700; letter-spacing: .07em; text-transform: uppercase; color: var(--ink-3); margin-bottom: 5px; }
+  .sd-body { font-size: 13.5px; color: var(--ink-2); white-space: pre-wrap; }
+  .sd-cmd { font-family: var(--mono); font-size: 11.5px; background: var(--card); border: 1px solid var(--line); border-radius: 7px; padding: 8px 10px; overflow-x: auto; white-space: pre; }
+  .sd-ac { font-size: 13px; color: var(--ink-2); padding-left: 16px; position: relative; margin-bottom: 5px; }
+  .sd-ac::before { content: "—"; position: absolute; left: 0; color: var(--ink-3); }
+  .sd-warn { background: var(--amber-bg); border: 1px solid var(--amber-line); color: var(--amber); border-radius: 8px; padding: 9px 11px; font-size: 12.5px; }
   .maplegend { display: flex; gap: 18px; flex-wrap: wrap; font-size: 12px; color: var(--ink-3); padding-bottom: 10px; }
   .maplegend span { display: flex; align-items: center; gap: 6px; }
   .maplegend i { width: 14px; height: 2px; border-radius: 1px; display: block; }
@@ -235,6 +250,7 @@ const $ = (s, el = document) => el.querySelector(s);
 const esc = s => String(s ?? "").replace(/[&<>"']/g, c =>
   ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
 const taskId = new URLSearchParams(location.search).get("id") || "";
+let selectedStep = null;
 
 const LEGS = [
   { label: "Intake",  statuses: ["inbox"] },
@@ -369,19 +385,20 @@ function planMap(plan, progress, triage) {
         : (st.status === "blocked" || st.status === "failed") ? "blocked" : "";
       // Provisional while decisions are still open — the plan may yet change.
       const ghost = open.length > 0 && !state ? "ghost" : "";
+      const sel = String(selectedStep) === String(n) ? "sel" : "";
       const model = st.agent_profile || st.category || s.category || "";
       const check = (s.verify_command || "").trim();
       // A step that produced no GSD artifacts was not spec-driven, whatever else it
       // achieved — the plan carrying the context is the whole premise.
       const noGsd = st.gsd_ran === false;
       parts.push(`
-        <g class="stepg ${state} ${ghost}" tabindex="0">
+        <g class="stepg ${state} ${ghost} ${sel}" tabindex="0" role="button" data-step="${s.step}">
           <title>${esc(s.title)}${check ? `\n\n✓ ${esc(check)}` : ""}${noGsd ? `\n\n⚠ ${esc(st.gsd_reason || "no GSD artifacts — the work was not spec-driven")}` : ""}</title>
           <rect class="sbox" x="${x}" y="${y}" width="${BOX_W}" height="${BOX_H}" rx="10"/>
           <text class="snum" x="${x + 12}" y="${y + 18}">STEP ${esc(String(s.step))}</text>
           ${model ? `<text class="srepo" x="${x + BOX_W - 12}" y="${y + 18}" text-anchor="end">${esc(clip(model, 14))}</text>` : ""}
           <text class="stitle" x="${x + 12}" y="${y + 38}">${esc(clip(s.title, 26))}</text>
-          ${noGsd ? `<text class="nogsd" x="${x + BOX_W - 12}" y="${y + 38}" text-anchor="end">no GSD</text>` : ""}
+          ${noGsd ? `<rect class="nogsd-edge" x="${x}" y="${y}" width="4" height="${BOX_H}" rx="2"/>` : ""}
           ${check ? `
             <rect class="cbox" x="${x + 12}" y="${y + 48}" width="${BOX_W - 24}" height="18" rx="5"/>
             <text class="ctext" x="${x + 18}" y="${y + 61}">✓ ${esc(clip(check.split("&&")[0].trim(), 22))}</text>` : ""}
@@ -414,10 +431,40 @@ function planMap(plan, progress, triage) {
       ${open.length ? `<span><i class="d"></i> decision open — work is provisional</span>` : ""}
       ${anyNoGsd ? `<span><i class="d"></i> no GSD — step ran without task decomposition</span>` : ""}
     </div>
+    <div id="stepdetail"></div>
     <div class="diagram-wrap">
       <svg class="plan-map" viewBox="0 0 ${width} ${height}" style="min-width:${width}px">
         ${edges.join("")}${parts.join("")}
       </svg>
+    </div>`;
+}
+
+/** Full detail for one step — the node itself is all truncation. */
+function stepDetail(plan, progress, num) {
+  const s = (plan.steps || []).find(x => String(x.step) === String(num));
+  if (!s) return "";
+  const st = (progress?.steps || {})[String(num)] || {};
+  const acs = (s.acceptance_criteria || s.done_when || []);
+  const deps = (s.depends_on || []);
+  return `
+    <div class="sd">
+      <div class="sd-head">
+        <span class="sd-num">STEP ${esc(String(s.step))}</span>
+        <span class="sd-title">${esc(s.title)}</span>
+        <button class="sd-close" id="sd-close" title="Close">×</button>
+      </div>
+      <div class="sd-meta">
+        ${esc(st.status || "pending")}
+        ${st.agent_profile ? ` · ran on ${esc(st.agent_profile)}` : ""}
+        ${st.retry_count ? ` · attempt ${st.retry_count + 1}` : ""}
+        ${deps.length ? ` · needs step ${deps.join(", ")}` : " · no dependencies"}
+        ${s.repo ? ` · ${esc(s.repo)}` : ""}
+      </div>
+      ${st.gsd_ran === false ? `<div class="sd-warn">Not spec-driven: ${esc(st.gsd_reason || "no GSD artifacts")}</div>` : ""}
+      ${st.outcome ? `<div class="sd-sec"><div class="sd-lab">Outcome</div><div class="sd-body">${esc(st.outcome)}</div></div>` : ""}
+      ${s.description ? `<div class="sd-sec"><div class="sd-lab">What it does</div><div class="sd-body">${esc(s.description)}</div></div>` : ""}
+      ${acs.length ? `<div class="sd-sec"><div class="sd-lab">Done when</div>${acs.map(c => `<div class="sd-ac">${esc(c)}</div>`).join("")}</div>` : ""}
+      ${s.verify_command ? `<div class="sd-sec"><div class="sd-lab">Checked by</div><div class="sd-cmd">${esc(s.verify_command)}</div></div>` : ""}
     </div>`;
 }
 
@@ -554,9 +601,32 @@ async function load() {
         + renderPlan(planData.plan, planData.progress, triage));
 
     if (triage && !settled) wireQuestions(triage);
+    wireGraph(planData.plan, planData.progress);
   } catch (e) {
     root.innerHTML = `<div class="err">Couldn't load this ticket: ${esc(e.message || e)}</div>`;
   }
+}
+
+/** Clicking a node opens its detail; clicking it again closes it. */
+function wireGraph(plan, progress) {
+  const detail = $("#stepdetail");
+  if (!detail || !plan) return;
+  const paint = () => {
+    detail.innerHTML = selectedStep == null ? "" : stepDetail(plan, progress, selectedStep);
+    document.querySelectorAll("g.stepg").forEach(g =>
+      g.classList.toggle("sel", String(g.dataset.step) === String(selectedStep)));
+    const close = $("#sd-close");
+    if (close) close.addEventListener("click", () => { selectedStep = null; paint(); });
+  };
+  document.querySelectorAll("g.stepg").forEach(g => {
+    const open = () => {
+      selectedStep = String(g.dataset.step) === String(selectedStep) ? null : g.dataset.step;
+      paint();
+    };
+    g.addEventListener("click", open);
+    g.addEventListener("keydown", e => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); open(); } });
+  });
+  paint();
 }
 
 // ---- BOOTSTRAP ---- everything above is pure and testable; nothing below is.

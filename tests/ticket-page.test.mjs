@@ -192,3 +192,47 @@ test("open decisions mark the work provisional rather than settled", () => {
   assert.match(openSvg, /class="dec open"/);
   assert.match(openSvg, /ghost/, "work under an open decision is drawn as provisional");
 });
+
+test("clicking a node yields full detail, since the node itself is truncated", () => {
+  const html = readFileSync(new URL("../public/ticket.html", import.meta.url), "utf8");
+  const body = /<script>([\s\S]*)<\/script>/.exec(html)[1].split("// ---- BOOTSTRAP ----")[0];
+  const shim = `
+    const document = { querySelector: () => null, querySelectorAll: () => [], addEventListener: () => {} };
+    const location = { search: "" };
+    class URLSearchParams { get() { return "x"; } }
+  `;
+  const mod = new Function(`${shim}\n${body}\nreturn { stepDetail, planMap };`)();
+
+  const plan = { steps: [{
+    step: 1,
+    title: "A title long enough that the node has to truncate it somewhere",
+    description: "The full description that never fits in a 208px box",
+    acceptance_criteria: ["first criterion", "second criterion"],
+    verify_command: "bun install && bun run check && bun run build",
+    repo: "org/repo",
+  }] };
+  const progress = { steps: { "1": {
+    status: "blocked", agent_profile: "codex", gsd_ran: false,
+    gsd_reason: "no .planning/ — the GSD workflow never ran",
+    outcome: "verify_command fails on unmodified code",
+  } } };
+
+  const d = mod.stepDetail(plan, progress, 1);
+  // Everything the node abbreviates must be recoverable here, untruncated.
+  assert.match(d, /A title long enough that the node has to truncate it somewhere/);
+  assert.match(d, /The full description that never fits/);
+  assert.match(d, /first criterion/);
+  assert.match(d, /second criterion/);
+  // The command is HTML-escaped on the way in (&& becomes &amp;&amp;), so assert on
+  // the parts rather than the raw shell text.
+  assert.match(d, /bun install/);
+  assert.match(d, /bun run build/);
+  assert.match(d, /&amp;&amp;/, "shell operators must be escaped, not injected as markup");
+  assert.match(d, /codex/);
+  assert.match(d, /no \.planning/);
+
+  // The "no GSD" mark is an edge stripe now: right-aligned text collided with the title.
+  const svg = mod.planMap(plan, progress, { questions: [] });
+  assert.match(svg, /class="nogsd-edge"/);
+  assert.doesNotMatch(svg, /no GSD<\/text>/);
+});
