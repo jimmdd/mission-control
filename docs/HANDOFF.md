@@ -1,6 +1,6 @@
 # Handoff — Mission Control v2, spec-driven execution
 
-Sessions of 2026-08-11/12. Branch `feat/deterministic-verification`, **37 commits, 164 tests
+Sessions of 2026-08-11/12. Branch `feat/deterministic-verification`, **39 commits, 177 tests
 green, `tsc` clean, nothing pushed anywhere.**
 
 Read `~/.claude/plans/kind-mixing-pixel.md` for the original plan. This document covers what
@@ -123,11 +123,9 @@ failures re-probed after 15 minutes so a repaired gate recovers on its own).
 1. **Re-run step 1** to verify the `/gsd-new-project` fix produces `.planning/` with a
    `PLAN.md` containing `<task>` blocks. Dispatch into `backend-phase0`; watch for `.planning/`.
    This is now the only thing between here and Phase 0.
-2. **Stage the plan step** — its own `claude -p` process with captured stdout, then classify:
-   plan written / questions raised / prerequisite missing / error. Rationale: a stage buried in
-   a 200-turn session cannot report why it failed; the planner produced a precise, actionable
-   question and it went to a terminal and died. The question layer below now gives that question
-   somewhere to land, but nothing yet captures it.
+2. **Call the plan stage.** `swarm/plan_stage.py` and `route_plan_stage_outcome` are built and
+   tested; what is not decided is where the stage runs relative to `_spawn_for_repos`, because
+   that depends on what the rerun shows. Do it with the rerun, not before it.
 3. Then Phase 0 proper, per `docs/phase-0-measurement.md`.
 
 The daemon is off in the current state, so nothing polls at all — turn it on before expecting
@@ -139,6 +137,15 @@ any of the loops below to fire.
 `spawn-agent.sh` and the gate probe.
 
 **Gate check on every dispatch**, not just the first, with a per-command cache.
+
+**Planning staged** (`swarm/plan_stage.py`). Its own `claude -p`, captured stdout, and one of
+four verdicts: `plan_written` / `questions_raised` / `prerequisite_missing` / `error`. Taken
+from the filesystem wherever it can answer — a plan means a `PLAN.md` with `<task>` blocks
+exists, not that the agent said so. Questions count only in the `<mc-questions>` form, because
+prose asking and prose thinking are indistinguishable. `route_plan_stage_outcome` posts raised
+questions as planner follow-ups (which is what `process_answered_followups` resumes from),
+escalates a missing GSD project as a prerequisite rather than a question, and escalates failures
+with the transcript path and `gsd_ran`. **Not yet called** — see next-step 2.
 
 **The question layer.** A question was a prompt and some options: enough to collect an answer,
 not enough to get a good one. It now carries `why` it is being asked, the `becomes` decision id
@@ -207,6 +214,7 @@ envelope + async approvals).
 | | |
 |---|---|
 | Question shape, exits, merging | `swarm/questions.py` |
+| Staged planning + verdicts | `swarm/plan_stage.py`, `bridge.route_plan_stage_outcome` |
 | Worktree env + dep seeding | `swarm/worktree_env.py` |
 | Question threads, delegation, resume | `swarm/bridge.py` → `process_open_questions`, `process_answered_followups` |
 | Question actions API | `src/routes.ts` → `/api/tasks/:id/questions/:qid/{ask,delegate,defer,reopen}` |
