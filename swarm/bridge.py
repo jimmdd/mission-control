@@ -3080,6 +3080,61 @@ def _planning_worktree(task: dict, repo_path: Path) -> Optional[Path]:
     return path
 
 
+def _planning_job_path(task_id: str) -> Path:
+    return MC_HOME / "bridge" / "plan-stage" / f"{task_id}.job.json"
+
+
+def _read_planning_job(path: Path) -> Optional[dict]:
+    """The job's current state, or None if there is no job."""
+    try:
+        return json.loads(path.read_text())
+    except (OSError, ValueError):
+        return None
+
+
+def _pid_alive(pid) -> bool:
+    """Is that process still there? A dead pid means the job died with its daemon."""
+    try:
+        os.kill(int(pid), 0)
+        return True
+    except (OSError, TypeError, ValueError):
+        return False
+
+
+def _start_planning_job(task: dict, worktree: Path, job: Path):
+    """Launch planning as its own process and return immediately.
+
+    Inline, this froze the whole bridge for the length of a planning run — tens of
+    minutes with no question servicing, no step dispatch, no escalation handling.
+    One task's planning stopped every other task on the machine.
+    """
+    task_id = task["id"]
+    payload = {
+        "task": task,
+        "worktree": str(worktree),
+        "context": _build_triage_context(task_id),
+        "model": "",
+        "state": "running",
+    }
+    try:
+        job.parent.mkdir(parents=True, exist_ok=True)
+        job.write_text(json.dumps(payload))
+        proc = subprocess.Popen(
+            [sys.executable, str(Path(__file__).resolve().parent / "plan_stage_runner.py"), str(job)],
+            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+            start_new_session=True,
+        )
+        payload["pid"] = proc.pid
+        job.write_text(json.dumps(payload))
+        logging.info(f"  Started planning for {task_id[:8]} as pid {proc.pid}")
+        mc_log_activity(task_id, "updated",
+                        "Planning started as its own run — the plan is written before "
+                        "any agent is spawned.")
+    except OSError as e:
+        logging.warning(f"  Could not start planning for {task_id[:8]}: {e}")
+        job.unlink(missing_ok=True)
+
+
 def stage_planning(task: dict, repos: List[dict]) -> Tuple[bool, str]:
     """Plan before dispatching anyone. Returns (may proceed, planning worktree).
 
@@ -3097,8 +3152,6 @@ def stage_planning(task: dict, repos: List[dict]) -> Tuple[bool, str]:
     if not _stage_planning_enabled():
         return True, ""
 
-    from plan_stage import plan_in_worktree
-
     task_id = task["id"]
     repo = repos[0] if repos else None
     repo_path = find_repo_path(repo["project"], repo["repo"]) if repo else None
@@ -3114,10 +3167,30 @@ def stage_planning(task: dict, repos: List[dict]) -> Tuple[bool, str]:
                                          "reason": "no planning worktree"})
         return True, ""
 
-    verdict = plan_in_worktree(str(worktree), task, context=_build_triage_context(task_id))
+    job = _planning_job_path(task_id)
+    state = _read_planning_job(job)
+
+    if state is None:
+        _start_planning_job(task, worktree, job)
+        return False, ""
+
+    if state.get("state") == "running":
+        if _pid_alive(state.get("pid")):
+            logging.info(f"  Planning still running for {task_id[:8]} — will check again")
+            return False, ""
+        # The process is gone and left no verdict: the daemon was restarted, or it
+        # was killed. Fail open rather than wedge the task, and say so.
+        logging.warning(f"  Planning job for {task_id[:8]} vanished without a verdict")
+        record_step_attempt(task_id, 0, {"outcome": "plan_stage_skipped", "attempt": 0,
+                                         "reason": "planning job died"})
+        job.unlink(missing_ok=True)
+        return True, ""
+
+    verdict = state.get("verdict") or {}
     for stage in verdict.get("stages", []):
         logging.info(f"  plan stage [{stage['stage']}] {stage['outcome']} "
                      f"in {stage['duration_s']}s — {stage['reason'][:120]}")
+    job.unlink(missing_ok=True)
     proceed = route_plan_stage_outcome(task, verdict)
     # Only hand the worktree on when there is actually a plan in it.
     carry = str(worktree) if verdict.get("outcome") == "plan_written" else ""

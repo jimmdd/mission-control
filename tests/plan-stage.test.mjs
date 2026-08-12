@@ -364,8 +364,9 @@ import pathlib
 bridge._stage_planning_enabled = lambda: True
 bridge.find_repo_path = lambda project, repo: pathlib.Path("/tmp")
 bridge._planning_worktree = lambda task, repo_path: pathlib.Path("/tmp")
-import plan_stage
-plan_stage.plan_in_worktree = lambda *a, **k: {"outcome": "questions_raised", "stages": []}
+bridge._planning_job_path = lambda tid: pathlib.Path("/tmp/nonexistent-job.json")
+bridge._read_planning_job = lambda path: {"state": "done",
+    "verdict": {"outcome": "questions_raised", "stages": []}}
 `);
   assert.equal(r.proceed, false);
   assert.equal(r.carry, "", "a question means there is no plan to hand on");
@@ -457,17 +458,20 @@ print(json.dumps({
 
 test("only a real plan is carried forward", () => {
   const r = python(`
-import json, pathlib, bridge, plan_stage
+import json, pathlib, bridge
 bridge._stage_planning_enabled = lambda: True
 bridge.find_repo_path = lambda project, repo: pathlib.Path("/tmp")
 bridge._planning_worktree = lambda task, repo_path: pathlib.Path("/tmp/planning-x")
 bridge._build_triage_context = lambda tid: ""
 bridge.record_step_attempt = lambda *a, **k: None
+bridge.mc_log_activity = lambda *a, **k: None
+bridge._planning_job_path = lambda tid: pathlib.Path("/tmp/nonexistent-job.json")
 bridge.route_plan_stage_outcome = lambda task, v: v["outcome"] == "plan_written"
 
 out = {}
 for outcome in ("plan_written", "questions_raised", "error"):
-    plan_stage.plan_in_worktree = lambda *a, **k: {"outcome": outcome, "stages": []}
+    bridge._read_planning_job = (lambda o: lambda path: {"state": "done",
+        "verdict": {"outcome": o, "stages": []}})(outcome)
     out[outcome] = bridge.stage_planning({"id": "t1"}, [{"project": "p", "repo": "r"}])
 print(json.dumps(out))
 `);
@@ -530,4 +534,90 @@ plan_stage.plan_in_worktree("/tmp", {"id": "t1"}, model="explicit")
 print(json.dumps(seen))
 `);
   assert.ok(r.every((m) => m === "explicit"));
+});
+
+// ─────────── planning must not freeze the daemon ───────────
+// Inline, stage_planning ran plan_in_worktree inside the single poll loop, so the
+// whole bridge stopped for the length of a planning run: no question servicing, no
+// step dispatch, no escalation handling. One task's planning froze every other task.
+
+const asyncStage = (program) => python(`
+import json, bridge
+calls = {"started": None, "metrics": [], "routed": None, "activities": 0}
+bridge._build_triage_context = lambda tid: ""
+bridge.record_step_attempt = lambda tid, n, rec: calls["metrics"].append(rec["outcome"])
+bridge.mc_log_activity = lambda *a, **k: calls.__setitem__("activities", calls["activities"] + 1)
+bridge.route_plan_stage_outcome = lambda task, v: calls.__setitem__("routed", v.get("outcome")) or (v.get("outcome") == "plan_written")
+bridge._stage_planning_enabled = lambda: True
+import pathlib
+bridge.find_repo_path = lambda project, repo: pathlib.Path("/tmp")
+bridge._planning_worktree = lambda task, repo_path: pathlib.Path("/tmp/planning-x")
+${program}
+proceed, carry = bridge.stage_planning({"id": "task-async"}, [{"project": "p", "repo": "r"}])
+print(json.dumps({"proceed": proceed, "carry": carry, **calls}))
+`);
+
+test("the first tick starts planning and returns instead of blocking", () => {
+  const r = asyncStage(`
+started = {}
+bridge._read_planning_job = lambda path: None
+bridge._start_planning_job = lambda task, wt, job: started.setdefault("yes", True)
+calls["started"] = True
+`);
+  // Not dispatched yet — but nothing was routed either, because there is no verdict.
+  assert.equal(r.proceed, false);
+  assert.equal(r.routed, null, "a wait is not a verdict");
+});
+
+test("a later tick waits while the job is alive, without re-launching it", () => {
+  const r = asyncStage(`
+bridge._read_planning_job = lambda path: {"state": "running", "pid": 4242}
+bridge._pid_alive = lambda pid: True
+def explode(*a, **k):
+    raise AssertionError("a running job must not be started twice")
+bridge._start_planning_job = explode
+`);
+  assert.equal(r.proceed, false);
+  assert.deepEqual(r.metrics, [], "waiting is not an outcome worth recording");
+});
+
+test("a job that died with its daemon fails open rather than wedging the task", () => {
+  const r = asyncStage(`
+import pathlib
+bridge._read_planning_job = lambda path: {"state": "running", "pid": 999999}
+bridge._pid_alive = lambda pid: False
+bridge._planning_job_path = lambda tid: pathlib.Path("/tmp/nonexistent-job.json")
+`);
+  assert.equal(r.proceed, true, "the queue keeps moving");
+  assert.deepEqual(r.metrics, ["plan_stage_skipped"], "and it is visible in the metrics");
+});
+
+test("a finished job is routed and its plan handed on", () => {
+  const r = asyncStage(`
+import pathlib
+bridge._read_planning_job = lambda path: {"state": "done",
+    "verdict": {"outcome": "plan_written", "stages": [{"stage": "plan", "outcome": "plan_written",
+                                                       "duration_s": 12, "reason": "ok"}]}}
+bridge._planning_job_path = lambda tid: pathlib.Path("/tmp/nonexistent-job.json")
+`);
+  assert.equal(r.proceed, true);
+  assert.equal(r.routed, "plan_written");
+  assert.equal(r.carry, "/tmp/planning-x", "the agent gets the plan that was written");
+});
+
+test("the runner leaves a verdict even when planning throws", () => {
+  const r = python(`
+import json, os, tempfile, plan_stage_runner, plan_stage
+job = os.path.join(tempfile.mkdtemp(), "j.json")
+open(job, "w").write(json.dumps({"task": {"id": "t"}, "worktree": "/tmp", "state": "running"}))
+def boom(*a, **k):
+    raise RuntimeError("planner exploded")
+plan_stage.plan_in_worktree = boom
+plan_stage_runner.main([job])
+print(json.dumps(json.load(open(job))))
+`);
+  // A crash that leaves no verdict would look identical to a job still running.
+  assert.equal(r.state, "done");
+  assert.equal(r.verdict.outcome, "error");
+  assert.match(r.verdict.reason, /crashed/);
 });
