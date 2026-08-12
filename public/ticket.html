@@ -203,8 +203,69 @@
     background: var(--card); border: 1px solid var(--line); border-radius: 9px; padding: 10px 12px;
   }
   .qadd:focus { outline: none; border-color: var(--accent); }
+  /* Why it is being asked. A question whose consequence is invisible gets answered
+     carelessly, or not at all. */
+  .qwhy { font-size: 13px; color: var(--ink-2); margin: -4px 0 11px 26px; max-width: 68ch; }
+  /* What the answer binds. An answer that binds nothing is a comment. */
+  .dchip {
+    margin-left: auto; font-family: var(--mono); font-size: 10px; font-weight: 700;
+    letter-spacing: .06em; padding: 2px 7px; border-radius: 5px; flex: 0 0 auto;
+    background: var(--sunk); color: var(--ink-3); border: 1px solid var(--line); white-space: nowrap;
+  }
+  .dchip.disc { background: var(--amber-bg); color: var(--amber); border-color: transparent; }
+
+  /* The exits. "Answer or the ticket stalls" is a false choice. */
+  .qouts { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; margin: 11px 0 0 26px; }
+  .qouts .lead { font-size: 12.5px; color: var(--ink-3); }
+  .qout {
+    font-family: inherit; font-size: 12.5px; font-weight: 500; padding: 6px 12px;
+    border-radius: 20px; border: 1px solid var(--line); background: var(--card);
+    color: var(--ink-2); cursor: pointer;
+  }
+  .qout:hover:not(:disabled) { border-color: var(--accent); color: var(--accent); background: var(--accent-bg); }
+  .qout:disabled { opacity: .5; cursor: progress; }
+
+  /* The conversation. The person who can answer is usually not the person who can
+     look it up, so the question has to be answerable in both directions. */
+  .qthread {
+    margin: 12px 0 0 26px; padding: 13px 15px; background: var(--sunk);
+    border-radius: 11px; display: flex; flex-direction: column; gap: 11px;
+  }
+  .qmsg { display: grid; grid-template-columns: auto 1fr; gap: 10px; align-items: start; }
+  .qwho {
+    font-family: var(--mono); font-size: 9.5px; letter-spacing: .06em; text-transform: uppercase;
+    color: var(--ink-3); background: var(--card); border: 1px solid var(--line);
+    padding: 3px 7px; border-radius: 5px; white-space: nowrap; margin-top: 1px;
+  }
+  .qmsg.me .qwho { background: var(--accent-bg); border-color: transparent; color: var(--accent); }
+  .qbody { font-size: 13.5px; color: var(--ink-2); line-height: 1.55; white-space: pre-wrap; }
+  .qpending {
+    display: flex; align-items: center; gap: 9px; padding: 9px 12px; border-radius: 9px;
+    background: var(--card); border: 1px dashed var(--line); font-size: 12.5px; color: var(--ink-3);
+  }
+  .qpending .st { margin-left: auto; font-family: var(--mono); font-size: 11px; color: var(--accent); }
+  .qask { display: flex; gap: 8px; align-items: center; }
+  .qask input {
+    flex: 1; min-width: 0; font-family: inherit; font-size: 13.5px; color: var(--ink);
+    background: var(--card); border: 1px solid var(--line); border-radius: 9px; padding: 9px 12px;
+  }
+  .qask input:focus { outline: none; border-color: var(--accent); }
+
   .qdone { margin-left: 26px; padding: 10px 12px; border-radius: 9px; background: var(--green-bg); font-size: 13.5px; color: var(--ink-2); }
   .qdone .fby { font-size: 11px; color: var(--ink-3); display: block; margin-top: 4px; }
+  /* A delegated pick reads as delegated, not decided — and can be taken back. */
+  .qdone.byagent { background: var(--amber-bg); border: 1px solid var(--amber-line); display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
+  .qdone .pickmark { font-size: 14px; font-weight: 600; color: var(--ink); }
+  .qdone .bychip {
+    font-family: var(--mono); font-size: 10px; font-weight: 700; letter-spacing: .06em;
+    text-transform: uppercase; color: var(--amber); background: var(--card);
+    border: 1px solid var(--amber-line); padding: 3px 8px; border-radius: 5px;
+  }
+  .qdone .undo { margin-left: auto; }
+  .qreason { margin: 8px 0 0 26px; font-size: 12.5px; color: var(--ink-2); line-height: 1.55; max-width: 68ch; }
+  .qreason b { color: var(--ink); }
+  .qset { margin: 10px 0 0 26px; font-size: 12.5px; color: var(--ink-3); display: flex; align-items: center; gap: 10px; }
+  .qbox.deferred .qtext { color: var(--ink-3); }
 
   .footbar { display: flex; gap: 10px; align-items: center; flex-wrap: wrap; padding-top: 16px; margin-top: 4px; border-top: 1px solid var(--line-soft); }
   .btn {
@@ -550,9 +611,85 @@ function renderFound(triage) {
   </div>`;
 }
 
-/** Questions raised by the planner, not by triage. Only the unanswered ones. */
+/** Questions raised by the planner, not by triage. Deferred ones no longer block. */
 function followUps(qs) {
-  return qs.filter(q => !q.answer && (q.source === "planner" || q.round > 1));
+  return qs.filter(q => !q.answer && !q.deferred && (q.source === "planner" || q.round > 1));
+}
+
+/** The conversation about a question, plus the box to add to it. */
+function renderThread(q) {
+  const msgs = (q.thread || []).map(m => `
+    <div class="qmsg${m.role === "you" ? " me" : ""}">
+      <span class="qwho">${m.role === "you" ? "you" : "research"}</span>
+      <span class="qbody">${esc(m.text)}</span>
+    </div>`).join("");
+  // The last word being the human's means a reply is owed. Saying so beats an empty
+  // box that looks like nothing happened.
+  const owed = (q.thread || []).length && q.thread[q.thread.length - 1].role === "you";
+  const pending = owed
+    ? `<div class="qpending"><span>Working out an answer</span><span class="st">in progress</span></div>`
+    : "";
+  return `<div class="qthread" data-thread="${esc(q.id)}">${msgs}${pending}
+    <div class="qask">
+      <input type="text" data-ask="${esc(q.id)}" placeholder="Ask about this…"
+             aria-label="Ask about ${esc(q.question)}">
+      <button class="qout" data-act="ask" data-q="${esc(q.id)}">Send</button>
+    </div>
+  </div>`;
+}
+
+/**
+ * One question, whatever state it is in. Shared by the follow-up card and the
+ * triage card so an answered question never looks different depending on where
+ * it is read.
+ */
+function renderQuestion(q, label) {
+  const chip = q.becomes
+    ? `<span class="dchip${q.answered_by === "agent" ? " disc" : ""}">${esc(q.becomes)}${q.answer ? "" : " when answered"}</span>`
+    : "";
+  const head = `<div class="qhead"><span class="qnum">${esc(label)}</span>
+    <span class="qtext">${esc(q.question)}</span>${chip}</div>`;
+  const why = q.why ? `<p class="qwhy">${esc(q.why)}</p>` : "";
+
+  if (q.answer) {
+    const byAgent = q.answered_by === "agent";
+    const body = byAgent
+      ? `<div class="qdone byagent">
+           <span class="pickmark">${esc(q.answer)}</span>
+           <span class="bychip">chosen by the agent</span>
+           <button class="qout undo" data-act="reopen" data-q="${esc(q.id)}">Change it</button>
+         </div>`
+      : `<div class="qdone">${esc(q.answer)}
+           <span class="fby">answered by ${esc(q.answered_by || "you")}</span></div>`;
+    const reason = q.reason ? `<p class="qreason"><b>Why:</b> ${esc(q.reason)}</p>` : "";
+    return `<div class="qbox">${head}${why}${body}${reason}</div>`;
+  }
+
+  if (q.deferred) {
+    return `<div class="qbox deferred">${head}${why}
+      <div class="qset"><span>Set aside — this is not blocking anything.</span>
+        <button class="qout" data-act="undefer" data-q="${esc(q.id)}">Bring it back</button></div>
+    </div>`;
+  }
+
+  const choices = (q.options || []).map(o => `
+    <label class="choice"><input type="radio" name="q-${esc(q.id)}" value="${esc(o)}"><span>${esc(o)}</span></label>`).join("");
+  const delegated = q.delegate_requested
+    ? `<div class="qpending"><span>Handed over — the agent is deciding</span><span class="st">in progress</span></div>`
+    : "";
+  const thread = (q.thread || []).length ? renderThread(q) : "";
+  // The exits go last, after the ways to answer, so answering stays the default.
+  const outs = `<div class="qouts">
+      <span class="lead">Not sure?</span>
+      ${thread ? "" : `<button class="qout" data-act="ask" data-q="${esc(q.id)}">Ask about this</button>`}
+      <button class="qout" data-act="delegate" data-q="${esc(q.id)}">Decide for me</button>
+      <button class="qout" data-act="defer" data-q="${esc(q.id)}">Decide later</button>
+    </div>`;
+
+  return `<div class="qbox">${head}${why}
+    <div class="choices">${choices}</div>
+    <textarea class="qadd" data-free="${esc(q.id)}" placeholder="Or answer in your own words."></textarea>
+    ${delegated}${thread}${outs}</div>`;
 }
 
 function renderFollowUps(open) {
@@ -561,15 +698,7 @@ function renderFollowUps(open) {
       <span class="gn">${open.length} open</span></div>
     <p class="fu-why">The plan cannot be written until these are settled, and no code
       should be written before the plan. Answering them resumes planning.</p>
-    ${open.map((q, i) => {
-      const head = `<div class="qhead"><span class="qnum">F${String(i + 1).padStart(2, "0")}</span>
-        <span class="qtext">${esc(q.question)}</span>
-        <span class="qfrom">${esc(q.category || "planner")}</span></div>`;
-      const choices = (q.options || []).map(o => `
-        <label class="choice"><input type="radio" name="q-${esc(q.id)}" value="${esc(o)}"><span>${esc(o)}</span></label>`).join("");
-      return `<div class="qbox">${head}<div class="choices">${choices}</div>
-        <textarea class="qadd" data-free="${esc(q.id)}" placeholder="Or answer in your own words."></textarea></div>`;
-    }).join("")}
+    ${open.map((q, i) => renderQuestion(q, `F${String(i + 1).padStart(2, "0")}`)).join("")}
     <div class="footbar">
       <button class="btn primary" id="submit" disabled>Submit answers</button>
       <span class="why" id="hint">Answer all ${open.length} to resume planning.</span>
@@ -591,28 +720,81 @@ function renderSettled(qs) {
 
 function renderQuestions(triage) {
   const qs = (triage?.questions || []);
-  const open = qs.filter(q => !q.answer);
-  const body = qs.length === 0 ? `<p class="empty">No open questions.</p>` : qs.map((q, i) => {
-    const head = `<div class="qhead"><span class="qnum">${String(i + 1).padStart(2, "0")}</span>
-      <span class="qtext">${esc(q.question)}</span><span class="qfrom">${esc(q.category || "")}</span></div>`;
-    if (q.answer) {
-      return `<div class="qbox">${head}<div class="qdone">${esc(q.answer)}
-        <span class="fby">answered by ${esc(q.answered_by || "you")}</span></div></div>`;
-    }
-    const choices = (q.options || []).map(o => `
-      <label class="choice"><input type="radio" name="q-${esc(q.id)}" value="${esc(o)}"><span>${esc(o)}</span></label>`).join("");
-    return `<div class="qbox">${head}<div class="choices">${choices}</div>
-      <textarea class="qadd" data-free="${esc(q.id)}" placeholder="Or answer in your own words — this wins over the options above."></textarea></div>`;
-  }).join("");
+  // Deferred questions are not open. Counting them would make "Decide later" a lie.
+  const open = qs.filter(q => !q.answer && !q.deferred);
+  const body = qs.length === 0
+    ? `<p class="empty">No open questions.</p>`
+    : qs.map((q, i) => renderQuestion(q, String(i + 1).padStart(2, "0"))).join("");
 
+  // Count what was answered, not what stopped blocking — a set-aside question is
+  // not a settled one, and saying "1/1" about it would misreport the ticket.
+  const answered = qs.filter(q => q.answer).length;
+  const aside = qs.filter(q => q.deferred && !q.answer).length;
   return `<div class="card">
     <div class="glab">${open.length ? "Answer these to start" : "Questions"}
-      <span class="gn">${qs.length - open.length}/${qs.length}</span></div>
+      <span class="gn">${answered}/${qs.length}${aside ? ` · ${aside} set aside` : ""}</span></div>
     ${body}
     ${open.length ? `<div class="footbar">
       <button class="btn primary" id="submit" disabled>Submit answers</button>
       <span class="why" id="hint">Answer all ${open.length} to continue.</span></div>` : ""}
   </div>`;
+}
+
+/**
+ * The exits, and the thread. Each posts to the question's own endpoint rather than
+ * rewriting the whole triage state, so one person answering cannot clobber another's
+ * conversation.
+ */
+function wireQuestionActions() {
+  document.addEventListener("click", async (ev) => {
+    const btn = ev.target.closest("[data-act][data-q]");
+    if (!btn) return;
+    const { act, q: qid } = btn.dataset;
+    let action = act;
+    let payload = {};
+
+    if (act === "ask") {
+      const field = document.querySelector(`[data-ask="${CSS.escape(qid)}"]`);
+      // The first "Ask about this" click opens the thread; there is nothing to send yet.
+      if (!field) { openThread(qid); return; }
+      const text = field.value.trim();
+      if (!text) { field.focus(); return; }
+      payload = { text };
+    } else if (act === "undefer") {
+      // Bringing a question back is the same edit as taking an answer back: reopen
+      // clears the answer and the deferral together.
+      action = "reopen";
+    }
+
+    btn.disabled = true;
+    try {
+      const res = await fetch(
+        `/api/tasks/${encodeURIComponent(taskId)}/questions/${encodeURIComponent(qid)}/${action}`,
+        { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(payload) },
+      );
+      if (!res.ok) throw new Error(`${action} failed (${res.status})`);
+      load();
+    } catch (e) {
+      btn.disabled = false;
+      const hint = $("#hint");
+      if (hint) hint.textContent = String(e.message || e);
+    }
+  });
+}
+
+/** Reveal the conversation box without a round trip — nothing to save yet. */
+function openThread(qid) {
+  const box = document.querySelector(`[data-free="${CSS.escape(qid)}"]`)?.closest(".qbox");
+  if (!box || box.querySelector("[data-thread]")) return;
+  const thread = document.createElement("div");
+  thread.className = "qthread";
+  thread.dataset.thread = qid;
+  thread.innerHTML = `<div class="qask">
+    <input type="text" data-ask="${qid}" placeholder="Ask about this…">
+    <button class="qout" data-act="ask" data-q="${qid}">Send</button>
+  </div>`;
+  box.querySelector(".qouts")?.before(thread);
+  thread.querySelector("input")?.focus();
 }
 
 function wireQuestions(triage) {
@@ -720,6 +902,8 @@ function wireGraph(plan, progress) {
 }
 
 // ---- BOOTSTRAP ---- everything above is pure and testable; nothing below is.
+// Delegated once, not per render: the question list is replaced on every poll.
+wireQuestionActions();
 load();
 // The bridge changes this ticket out of band, so re-read it periodically.
 setInterval(load, 15000);

@@ -1261,11 +1261,16 @@ async function handleApiRequest(
               } else {
                 // reopen: the answer goes, the reasoning stays. Someone overriding an
                 // agent's pick should be able to read why it picked that while deciding.
+                // It also un-defers, so "bring it back" is the same edit as "change it".
+                const wasDeferred = question.deferred === true;
                 question.answer = null;
                 question.answered_at = null;
                 question.answered_by = null;
                 question.delegate_requested = false;
-                activityMessage = `Answer to "${String(question.question ?? questionId).slice(0, 120)}" taken back.`;
+                question.deferred = false;
+                activityMessage = wasDeferred
+                  ? `Question "${String(question.question ?? questionId).slice(0, 120)}" is back in play.`
+                  : `Answer to "${String(question.question ?? questionId).slice(0, 120)}" taken back.`;
               }
 
               const next = db.replaceTriageState(taskId, { ...state, questions, updated_at: now });

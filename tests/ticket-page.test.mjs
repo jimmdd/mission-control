@@ -308,3 +308,214 @@ test("the canvas grows to fit its decisions instead of clipping them", () => {
   // Every decision is drawn — a placeholder saying "+N more" explained nothing.
   assert.equal((svg.match(/class="dec /g) || []).length, 9);
 });
+
+// ─────────── the question block ───────────
+// A question used to be a prompt and some options: enough to collect an answer, not
+// enough to get a good one. These cover what it carries now, and the three exits
+// that stop one unanswerable question holding up the other eight.
+
+/** The page's pure render helpers, extracted headlessly. */
+function questionHelpers() {
+  const html = readFileSync(new URL("../public/ticket.html", import.meta.url), "utf8");
+  const body = /<script>([\s\S]*)<\/script>/.exec(html)[1].split("// ---- BOOTSTRAP ----")[0];
+  const shim = `
+    const document = { querySelector: () => null, querySelectorAll: () => [], addEventListener: () => {} };
+    const location = { search: "" };
+    class URLSearchParams { get() { return "x"; } }
+  `;
+  return new Function(`${shim}\n${body}\nreturn { renderQuestion, renderQuestions, followUps };`)();
+}
+
+test("a question says why it is being asked and what its answer binds", () => {
+  const { renderQuestion } = questionHelpers();
+  const out = renderQuestion({
+    id: "q1",
+    question: "Which font licence did we buy?",
+    why: "Adobe Fonts terms forbid self-hosting; the implementation differs per licence.",
+    becomes: "D-01",
+    options: ["Web Project", "Desktop only"],
+  }, "01");
+
+  assert.match(out, /Adobe Fonts terms forbid self-hosting/, "the reason is shown");
+  assert.match(out, /D-01/, "the decision it locks is named");
+  // Without this the answer is a comment; with it, it is a spec.
+  assert.match(out, /when answered/);
+});
+
+test("every open question offers the three exits", () => {
+  const { renderQuestion } = questionHelpers();
+  const out = renderQuestion({ id: "q1", question: "Page size?" }, "01");
+  assert.match(out, /Ask about this/);
+  assert.match(out, /Decide for me/);
+  assert.match(out, /Decide later/);
+  // Answering stays the default: the exits come after the ways to answer.
+  assert.ok(out.indexOf("qadd") < out.indexOf("qouts"), "the exits follow the answer box");
+});
+
+test("an agent's pick reads as delegated, shows its reasoning, and can be taken back", () => {
+  const { renderQuestion } = questionHelpers();
+  const out = renderQuestion({
+    id: "q3", question: "Default page size?", answer: "50",
+    answered_by: "agent", reason: "the list renders 20 and prefetches one page ahead",
+  }, "03");
+
+  assert.match(out, /chosen by the agent/);
+  assert.match(out, /Why:.*prefetches one page ahead/s, "the reasoning is legible enough to disagree with");
+  assert.match(out, /data-act="reopen"/, "it can be taken back");
+});
+
+test("a human's answer is not dressed up as a delegated one", () => {
+  const { renderQuestion } = questionHelpers();
+  const out = renderQuestion({ id: "q1", question: "Which licence?", answer: "Web Project", answered_by: "you" }, "01");
+  assert.doesNotMatch(out, /chosen by the agent/);
+  assert.doesNotMatch(out, /data-act="reopen"/);
+});
+
+test("a deferred question is set aside, not counted as open", () => {
+  const { renderQuestion, renderQuestions, followUps } = questionHelpers();
+  const q = { id: "q2", question: "Rate limit?", deferred: true, source: "planner" };
+
+  const out = renderQuestion(q, "02");
+  assert.match(out, /not blocking anything/);
+  assert.match(out, /Bring it back/);
+  assert.doesNotMatch(out, /Decide for me/, "a set-aside question offers no exits");
+
+  // Counting it would make "Decide later" a lie.
+  assert.equal(followUps([q]).length, 0, "deferred follow-ups stop blocking");
+  // But it is not answered either, and the header must not claim it was.
+  const card = renderQuestions({ questions: [q] });
+  assert.match(card, /0\/1/);
+  assert.match(card, /1 set aside/);
+});
+
+test("a thread shows both sides, and says when a reply is owed", () => {
+  const { renderQuestion } = questionHelpers();
+  const out = renderQuestion({
+    id: "q2", question: "Cursor on created_at or id?",
+    thread: [
+      { role: "you", text: "what would you pick, and why?" },
+      { role: "research", text: "created_at, with id as a tiebreaker." },
+      { role: "you", text: "is created_at indexed on that hypertable?" },
+    ],
+  }, "02");
+
+  assert.match(out, /what would you pick/);
+  assert.match(out, /created_at, with id as a tiebreaker/);
+  // The last word is the human's, so an answer is owed — saying so beats an empty
+  // box that looks like nothing happened.
+  assert.match(out, /Working out an answer/);
+  // The thread is already open, so the button that opens it is redundant — the
+  // input's own placeholder still reads "Ask about this…".
+  assert.doesNotMatch(out, /<button[^>]*>Ask about this<\/button>/);
+});
+
+test("a settled thread does not claim a reply is coming", () => {
+  const { renderQuestion } = questionHelpers();
+  const out = renderQuestion({
+    id: "q2", question: "Cursor?",
+    thread: [{ role: "you", text: "?" }, { role: "research", text: "created_at" }],
+  }, "02");
+  assert.doesNotMatch(out, /Working out an answer/);
+});
+
+test("a delegated question shows the handover instead of pretending to wait on you", () => {
+  const { renderQuestion } = questionHelpers();
+  const out = renderQuestion({ id: "q1", question: "Page size?", delegate_requested: true }, "01");
+  assert.match(out, /the agent is deciding/);
+});
+
+// ─────────── the question endpoints ───────────
+
+/** POST an action to one question and return the parsed response. */
+async function act(handler, taskId, qid, action, body) {
+  const res = mockRes();
+  await handler(mockReq({
+    url: `/api/tasks/${taskId}/questions/${qid}/${action}`,
+    method: "POST",
+    body: body ?? {},
+  }), res);
+  return res;
+}
+
+const seedQuestions = (db, task) => db.replaceTriageState(task.id, {
+  questions: [{ id: "q1", question: "Which font licence?", source: "planner" }],
+});
+
+test("asking back appends to the thread rather than answering", async () => {
+  await withHandler(async (handler, db) => {
+    const task = db.createTask({ title: "fonts" });
+    seedQuestions(db, task);
+
+    const res = await act(handler, task.id, "q1", "ask", { text: "what are the options?" });
+    assert.equal(res.statusCode, 200);
+    const q = JSON.parse(res.body).triage_state.questions[0];
+    assert.equal(q.thread.length, 1);
+    assert.equal(q.thread[0].role, "you");
+    assert.equal(q.answer, undefined, "asking is not answering");
+  });
+});
+
+test("an empty ask is refused rather than stored", async () => {
+  await withHandler(async (handler, db) => {
+    const task = db.createTask({ title: "fonts" });
+    seedQuestions(db, task);
+    const res = await act(handler, task.id, "q1", "ask", { text: "   " });
+    assert.equal(res.statusCode, 400);
+  });
+});
+
+test("delegating and deferring are mutually exclusive", async () => {
+  await withHandler(async (handler, db) => {
+    const task = db.createTask({ title: "fonts" });
+    seedQuestions(db, task);
+
+    let q = JSON.parse((await act(handler, task.id, "q1", "delegate")).body).triage_state.questions[0];
+    assert.equal(q.delegate_requested, true);
+    assert.equal(q.deferred, false);
+
+    q = JSON.parse((await act(handler, task.id, "q1", "defer")).body).triage_state.questions[0];
+    assert.equal(q.deferred, true);
+    assert.equal(q.delegate_requested, false, "deferring cancels the handover");
+  });
+});
+
+test("reopening clears the answer and the deferral, and keeps the reasoning", async () => {
+  await withHandler(async (handler, db) => {
+    const task = db.createTask({ title: "fonts" });
+    db.replaceTriageState(task.id, {
+      questions: [{
+        id: "q1", question: "Page size?", answer: "50",
+        answered_by: "agent", reason: "easiest to reverse", deferred: true,
+      }],
+    });
+
+    const q = JSON.parse((await act(handler, task.id, "q1", "reopen")).body).triage_state.questions[0];
+    assert.equal(q.answer, null);
+    assert.equal(q.deferred, false, "bringing it back is the same edit");
+    // Whoever overrides the pick should be able to read why it was made.
+    assert.equal(q.reason, "easiest to reverse");
+  });
+});
+
+test("an unknown action or question is refused, not silently applied", async () => {
+  await withHandler(async (handler, db) => {
+    const task = db.createTask({ title: "fonts" });
+    seedQuestions(db, task);
+    assert.equal((await act(handler, task.id, "q1", "destroy")).statusCode, 400);
+    assert.equal((await act(handler, task.id, "nope", "defer")).statusCode, 404);
+  });
+});
+
+test("each action leaves a trace on the ticket", async () => {
+  await withHandler(async (handler, db) => {
+    const task = db.createTask({ title: "fonts" });
+    seedQuestions(db, task);
+    await act(handler, task.id, "q1", "ask", { text: "what changes?" });
+    await act(handler, task.id, "q1", "delegate");
+
+    const types = db.listActivities(task.id).map(a => a.activity_type);
+    // A dedicated type so the bridge can see a reply is owed.
+    assert.ok(types.includes("question_asked"), types.join(","));
+    assert.ok(types.includes("question_delegated"), types.join(","));
+  });
+});
