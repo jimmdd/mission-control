@@ -109,6 +109,17 @@ def build_init_prompt(task: Dict, context: str = "") -> str:
         f"Run `{gsd_backend.init_command()}`. When {gsd_backend.planning_dir_name()}/ "
         f"exists with the project documents in it, say so and stop."
     )
+    # Scope, or the roadmap becomes a programme. Told only to start a "new project",
+    # GSD read one ticket as a body of work and produced a six-phase roadmap — then
+    # planning phase one alone wrote 220KB across three plans. Most of the cost, and
+    # most of the scope, was work nobody had asked for.
+    parts.append(
+        "SCOPE: this is one ticket, not a programme of work. The roadmap must cover "
+        "what this ticket asks for and nothing beyond it — prefer a single phase, and "
+        "only split into more when the ticket genuinely contains separable pieces with "
+        "a dependency between them. Do not add phases for adjacent improvements, "
+        "follow-up polish, or work the ticket implies but does not request."
+    )
     return "\n\n".join(parts)
 
 
