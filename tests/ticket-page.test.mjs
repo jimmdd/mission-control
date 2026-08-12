@@ -136,3 +136,59 @@ test("the dashboard routes to the ticket page from both the card and the drawer"
   assert.match(appJs, /TICKET[^`]*|onclick="event\.stopPropagation\(\)"/);
   assert.match(indexHtml, /id="drawer-ticket-link"/, "the drawer must link out too");
 });
+
+// The plan graph is built client-side, so serving the page proves nothing about it.
+// This extracts the page's own script and renders the map headlessly against a real
+// plan shape — the earlier version shipped as flat cards with no edges at all.
+test("the plan map draws steps, decisions and their dependency edges", async () => {
+  const html = readFileSync(new URL("../public/ticket.html", import.meta.url), "utf8");
+  // Cut at the bootstrap marker: the render helpers above it are pure, everything
+  // below touches the live DOM. A string-replace of "load();" hits the call inside
+  // the click handler instead, leaving the page bootstrap to run under the test.
+  const body = /<script>([\s\S]*)<\/script>/.exec(html)[1].split("// ---- BOOTSTRAP ----")[0];
+
+  const shim = `
+    const document = { querySelector: () => null, querySelectorAll: () => [], addEventListener: () => {} };
+    const location = { search: "" };
+    class URLSearchParams { get() { return "x"; } }
+  `;
+  const mod = new Function(`${shim}\n${body}\nreturn { planMap };`)();
+
+  const plan = {
+    steps: [
+      { step: 1, title: "tokens", verify_command: "bun test && bun build" },
+      { step: 2, title: "apply", depends_on: [1] },
+      { step: 3, title: "page", depends_on: [1] },
+      { step: 4, title: "verify", depends_on: [2, 3] },
+    ],
+    parallel_groups: [[1], [2, 3], [4]],
+  };
+  const triage = { questions: [{ id: "q1", question: "Which app?", answer: "apps/new-ui" }] };
+  const svg = mod.planMap(plan, { steps: { "2": { status: "in_progress" } } }, triage);
+
+  assert.equal((svg.match(/class="stepg/g) || []).length, 4, "one node per step");
+  assert.equal((svg.match(/class="flow"/g) || []).length, 4, "one edge per declared dependency");
+  assert.match(svg, /class="dec set"/, "an answered decision renders as locked");
+  assert.match(svg, /viewBox="0 0 \d+ \d+"/, "the map needs a viewBox to scale");
+  // A verify_command is the gate; it belongs on the node, not hidden in a tooltip only.
+  assert.match(svg, /class="ctext"/);
+});
+
+test("open decisions mark the work provisional rather than settled", () => {
+  const html = readFileSync(new URL("../public/ticket.html", import.meta.url), "utf8");
+  // Cut at the bootstrap marker: the render helpers above it are pure, everything
+  // below touches the live DOM. A string-replace of "load();" hits the call inside
+  // the click handler instead, leaving the page bootstrap to run under the test.
+  const body = /<script>([\s\S]*)<\/script>/.exec(html)[1].split("// ---- BOOTSTRAP ----")[0];
+  const shim = `
+    const document = { querySelector: () => null, querySelectorAll: () => [], addEventListener: () => {} };
+    const location = { search: "" };
+    class URLSearchParams { get() { return "x"; } }
+  `;
+  const mod = new Function(`${shim}\n${body}\nreturn { planMap };`)();
+
+  const plan = { steps: [{ step: 1, title: "a" }], parallel_groups: [[1]] };
+  const openSvg = mod.planMap(plan, {}, { questions: [{ id: "q", question: "?", answer: null }] });
+  assert.match(openSvg, /class="dec open"/);
+  assert.match(openSvg, /ghost/, "work under an open decision is drawn as provisional");
+});

@@ -4,254 +4,244 @@
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <title>Ticket · Mission Control</title>
-  <link rel="icon" type="image/svg+xml" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='6' fill='%23111318'/%3E%3Cpath d='M8 20h16M8 20l4-8 4 5 3-4 5 7' stroke='%234f7cff' stroke-width='1.8' fill='none' stroke-linejoin='round'/%3E%3C/svg%3E">
+  <link rel="icon" type="image/svg+xml" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='6' fill='%231A1F29'/%3E%3Cpath d='M8 20h16M8 20l4-8 4 5 3-4 5 7' stroke='%232563EB' stroke-width='1.8' fill='none' stroke-linejoin='round'/%3E%3C/svg%3E">
   <style>
-    :root {
-      --bg: #f6f6f4;
-      --surface: #ffffff;
-      --recess: #f0f0ed;
-      --line: #e2e2dd;
-      --line-strong: #cfcfc8;
-      --ink: #16171a;
-      --ink-2: #4a4d55;
-      --ink-3: #83868f;
-      --accent: #3b5bdb;
-      --accent-soft: #eaeeff;
-      --ok: #1f7a4d;
-      --ok-soft: #e6f4ec;
-      --warn: #9a6414;
-      --warn-soft: #fdf1dd;
-      --stop: #a32c2c;
-      --radius: 10px;
-      --mono: ui-monospace, SFMono-Regular, "SF Mono", Menlo, monospace;
-      --sans: -apple-system, BlinkMacSystemFont, "Segoe UI", Inter, system-ui, sans-serif;
+  :root {
+    --ground:   #F7F8FA;
+    --card:     #FFFFFF;
+    --sunk:     #F2F4F7;
+    --line:     #E5E8EE;
+    --line-soft:#EFF1F5;
+    --ink:      #1A1F29;
+    --ink-2:    #5B6673;
+    --ink-3:    #8B95A3;
+    --accent:   #2563EB;
+    --accent-bg:#EFF4FE;
+    --accent-line:#C7D9FC;
+    --amber:    #B45309;
+    --amber-bg: #FEF6EC;
+    --amber-line:#F5DFC0;
+    --green:    #16794C;
+    --green-bg: #EDF7F1;
+    --cyan:     #0E7490;
+    --cyan-bg:  #ECF7FA;
+    --red:      #B42318;
+    --red-bg:   #FEF0EE;
+    --shadow:   0 1px 2px rgba(26,31,41,.04), 0 1px 3px rgba(26,31,41,.03);
+    --shadow-lift: 0 2px 4px rgba(26,31,41,.05), 0 8px 20px -12px rgba(26,31,41,.18);
+    --ui: "Avenir Next", "Segoe UI", system-ui, -apple-system, sans-serif;
+    --mono: ui-monospace, "SF Mono", "JetBrains Mono", Menlo, monospace;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root:not([data-theme="light"]) {
+      --ground:#1B2029; --card:#232935; --sunk:#1F2530; --line:#333B49; --line-soft:#2B323E;
+      --ink:#EDF0F5; --ink-2:#A9B4C2; --ink-3:#7C8798;
+      --accent:#7BA5FA; --accent-bg:#293448; --accent-line:#3D4F6E;
+      --amber:#F0B45E; --amber-bg:#3A3226; --amber-line:#5C4B32;
+      --green:#5FCB94; --green-bg:#26362F; --cyan:#4FC7DD; --cyan-bg:#22363C;
+      --red:#F0918A; --red-bg:#3A2725;
     }
-    @media (prefers-color-scheme: dark) {
-      :root:not([data-theme="light"]) {
-        --bg: #121317;
-        --surface: #1a1c21;
-        --recess: #16181c;
-        --line: #2a2d34;
-        --line-strong: #3a3e47;
-        --ink: #e8e9ec;
-        --ink-2: #a9adb6;
-        --ink-3: #767a84;
-        --accent: #7d97ff;
-        --accent-soft: #1e2436;
-        --ok: #5fcf95;
-        --ok-soft: #16281f;
-        --warn: #e0b063;
-        --warn-soft: #2a2318;
-        --stop: #e08585;
-      }
-    }
-    :root[data-theme="dark"] {
-      --bg: #121317; --surface: #1a1c21; --recess: #16181c; --line: #2a2d34;
-      --line-strong: #3a3e47; --ink: #e8e9ec; --ink-2: #a9adb6; --ink-3: #767a84;
-      --accent: #7d97ff; --accent-soft: #1e2436; --ok: #5fcf95; --ok-soft: #16281f;
-      --warn: #e0b063; --warn-soft: #2a2318; --stop: #e08585;
-    }
+  }
+  :root[data-theme="dark"] {
+    --ground:#1B2029; --card:#232935; --sunk:#1F2530; --line:#333B49; --line-soft:#2B323E;
+    --ink:#EDF0F5; --ink-2:#A9B4C2; --ink-3:#7C8798;
+    --accent:#7BA5FA; --accent-bg:#293448; --accent-line:#3D4F6E;
+    --amber:#F0B45E; --amber-bg:#3A3226; --amber-line:#5C4B32;
+    --green:#5FCB94; --green-bg:#26362F; --cyan:#4FC7DD; --cyan-bg:#22363C;
+    --red:#F0918A; --red-bg:#3A2725;
+  }
 
-    * { box-sizing: border-box; }
-    body {
-      margin: 0; background: var(--bg); color: var(--ink);
-      font-family: var(--sans); font-size: 14px; line-height: 1.55;
-      -webkit-font-smoothing: antialiased;
-    }
-    .wrap { max-width: 1240px; margin: 0 auto; padding: 28px 22px 80px; }
-    a { color: var(--accent); }
-    h1, h2, h3 { margin: 0; font-weight: 600; letter-spacing: -0.01em; }
-    .eyebrow {
-      font-size: 11px; font-weight: 600; letter-spacing: 0.08em;
-      text-transform: uppercase; color: var(--ink-3);
-    }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; background: var(--ground); color: var(--ink);
+    font-family: var(--ui); font-size: 14px; line-height: 1.55;
+    -webkit-font-smoothing: antialiased;
+  }
+  .page { max-width: 1180px; margin: 0 auto; padding: 26px 22px 90px; }
+  a { color: var(--accent); }
+  h1, h2 { margin: 0; font-weight: 600; }
+  .crumb { display: flex; justify-content: space-between; align-items: center; margin-bottom: 16px; font-size: 12.5px; }
+  .crumb .brand { font-weight: 700; letter-spacing: .08em; text-transform: uppercase; color: var(--ink-3); font-size: 11px; }
 
-    /* ---- Ticket brief ---- */
-    .brief {
-      background: var(--surface); border: 1px solid var(--line);
-      border-radius: var(--radius); overflow: hidden; margin-bottom: 22px;
-    }
-    .brief-top {
-      display: flex; gap: 22px; align-items: flex-start;
-      padding: 20px 22px 18px; border-bottom: 1px dashed var(--line);
-    }
-    .stub {
-      flex: 0 0 auto; padding-right: 22px; border-right: 1px dashed var(--line);
-      min-width: 132px;
-    }
-    .ref { font-family: var(--mono); font-size: 20px; font-weight: 600; letter-spacing: -0.02em; }
-    .brief-main { flex: 1 1 auto; min-width: 0; }
-    .brief-main h1 { font-size: 19px; line-height: 1.35; margin-bottom: 6px; }
-    .brief-desc {
-      color: var(--ink-2); font-size: 13.5px;
-      display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden;
-    }
-    .facts { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 12px; }
-    .fact {
-      font-family: var(--mono); font-size: 11.5px; color: var(--ink-2);
-      background: var(--recess); border: 1px solid var(--line);
-      border-radius: 6px; padding: 3px 8px;
-    }
-    .fact b { color: var(--ink); font-weight: 600; }
+  /* ─────────── ticket ─────────── */
+  .ticket {
+    background: var(--card); border: 1px solid var(--line); border-radius: 14px;
+    padding: 26px 28px 24px; box-shadow: var(--shadow);
+  }
+  .tk-row1 { display: flex; align-items: center; gap: 12px; margin-bottom: 12px; flex-wrap: wrap; }
+  .tk-id {
+    display: inline-flex; align-items: center; gap: 7px; font-family: var(--mono);
+    font-size: 12px; font-weight: 600; color: var(--ink-2); text-decoration: none;
+  }
+  .tk-id:hover { color: var(--accent); }
+  .state { font-size: 12px; font-weight: 600; padding: 4px 11px; border-radius: 20px; display: inline-flex; align-items: center; gap: 6px; }
+  .state i { width: 7px; height: 7px; border-radius: 50%; background: currentColor; }
+  .state.s-plan { color: var(--amber); background: var(--amber-bg); }
+  .state.s-run  { color: var(--cyan);  background: var(--cyan-bg); }
+  .state.s-rev  { color: var(--green); background: var(--green-bg); }
+  .tk-meta { margin-left: auto; display: flex; gap: 18px; font-size: 12.5px; color: var(--ink-3); flex-wrap: wrap; }
+  .tk-meta b { color: var(--ink-2); font-weight: 500; font-family: var(--mono); }
+  h1.tk-title { font-size: 25px; letter-spacing: -.028em; margin: 0 0 9px; line-height: 1.22; }
+  .tk-desc { font-size: 14.5px; color: var(--ink-2); margin: 0; max-width: 74ch; }
 
-    /* ---- Tracker ---- */
-    .tracker { padding: 26px 22px 20px; overflow-x: auto; }
-    .rail { display: flex; align-items: flex-start; min-width: 720px; }
-    .leg { flex: 1 1 0; display: flex; flex-direction: column; align-items: center; position: relative; }
-    .leg::before, .leg::after {
-      content: ""; position: absolute; top: 7px; height: 1.5px; background: var(--line-strong);
-    }
-    .leg::before { left: 0; right: 50%; }
-    .leg::after { left: 50%; right: 0; }
-    .leg:first-child::before, .leg:last-child::after { display: none; }
-    .leg.done::before, .leg.done::after, .leg.now::before { background: var(--accent); }
-    .dot {
-      width: 15px; height: 15px; border-radius: 50%; background: var(--bg);
-      border: 1.5px solid var(--line-strong); position: relative; z-index: 1;
-    }
-    .leg.done .dot { background: var(--accent); border-color: var(--accent); }
-    .leg.now .dot {
-      background: var(--surface); border-color: var(--accent); border-width: 2px;
-      box-shadow: 0 0 0 4px var(--accent-soft);
-    }
-    .leg-label { font-size: 11.5px; color: var(--ink-3); margin-top: 9px; text-align: center; }
-    .leg.done .leg-label, .leg.now .leg-label { color: var(--ink); font-weight: 500; }
+  /* ─────────── progress track ─────────── */
+  .tracker { margin-top: 24px; padding-top: 8px; border-top: 1px solid var(--line-soft); }
+  /* overflow-x:auto clips vertically too, so the pill's headroom must live on the
+     scrolling element itself — negative margin keeps it from pushing the layout down */
+  .track-scroll { overflow-x: auto; overflow-y: hidden; padding: 48px 10px 2px; margin: -6px -10px 0; }
+  .track-inner { min-width: 700px; }
+  .tk-bar { position: relative; height: 6px; border-radius: 3px; background: var(--line); }
+  .tk-fill { position: absolute; left: 0; top: 0; bottom: 0; border-radius: 3px; background: var(--cyan); transition: width .45s cubic-bezier(.4,0,.2,1); }
+  .tk-bar.finished .tk-fill { background: var(--green); }
+  .tk-tick { position: absolute; top: 50%; width: 3px; height: 3px; border-radius: 50%; background: var(--card); transform: translate(-50%,-50%); opacity: .8; }
+  .tk-knob {
+    position: absolute; top: 50%; width: 17px; height: 17px; border-radius: 50%;
+    background: var(--card); border: 3px solid var(--cyan);
+    transform: translate(-50%,-50%); z-index: 3; transition: left .45s cubic-bezier(.4,0,.2,1);
+  }
+  .tk-bar.finished .tk-knob { border-color: var(--green); }
+  .tk-pill {
+    position: absolute; bottom: 21px; left: 50%; transform: translateX(-50%);
+    white-space: nowrap; background: var(--ink); color: var(--ground);
+    font-size: 12px; font-weight: 600; padding: 5px 11px; border-radius: 8px;
+  }
+  .tk-pill .dim { opacity: .6; font-weight: 500; margin-right: 5px; }
+  .tk-pill::after { content: ""; position: absolute; top: 100%; left: 50%; transform: translateX(-50%); border: 5px solid transparent; border-top-color: var(--ink); }
+  .tk-labels { display: grid; grid-auto-flow: column; grid-auto-columns: 1fr; margin-top: 13px; }
+  .tk-labels span { display: flex; flex-direction: column; gap: 1px; align-items: center; text-align: center; }
+  .tk-labels .n { font-size: 12px; color: var(--ink-3); }
+  .tk-labels .done .n { color: var(--ink-2); }
+  .tk-labels .now .n { color: var(--cyan); font-weight: 600; }
 
-    /* ---- Columns ---- */
-    .cols { display: grid; grid-template-columns: 1fr 2fr; gap: 18px; margin-bottom: 22px; align-items: start; }
-    @media (max-width: 900px) { .cols { grid-template-columns: 1fr; } }
+  /* ─────────── cards ─────────── */
+  .card { background: var(--card); border: 1px solid var(--line); border-radius: 14px; padding: 20px 22px; box-shadow: var(--shadow); margin-top: 20px; }
+  .card.sunk { background: var(--sunk); box-shadow: none; }
+  .glab {
+    font-size: 11.5px; font-weight: 700; letter-spacing: .07em; text-transform: uppercase;
+    color: var(--ink-3); margin: 0 0 13px; display: flex; align-items: center; gap: 8px;
+  }
+  .glab .gn { margin-left: auto; font-family: var(--mono); font-size: 11px; letter-spacing: 0; font-weight: 500; }
+  .cols { display: grid; grid-template-columns: 1fr 1.9fr; gap: 18px; align-items: start; }
+  @media (max-width: 900px) { .cols { grid-template-columns: 1fr; } }
 
-    .panel { border-radius: var(--radius); border: 1px solid var(--line); }
-    .panel-recessed { background: var(--recess); }
-    .panel-raised { background: var(--surface); box-shadow: 0 1px 2px rgba(0,0,0,0.04); }
-    .panel-head {
-      padding: 14px 16px; border-bottom: 1px solid var(--line);
-      display: flex; align-items: baseline; justify-content: space-between; gap: 10px;
-    }
-    .panel-head h2 { font-size: 13.5px; }
-    .panel-body { padding: 14px 16px; }
+  /* ─────────── plan map (SVG) ─────────── */
+  .diagram-wrap { overflow-x: auto; padding: 4px 0 10px; }
+  svg.plan-map { display: block; width: 100%; height: auto; }
+  svg.plan-map text { font-family: var(--ui); }
+  svg.plan-map .sbox { fill: var(--card); stroke: var(--line); stroke-width: 1.5; }
+  svg.plan-map g.stepg:hover .sbox { stroke: var(--accent); }
+  svg.plan-map .snum { fill: var(--ink-3); font-size: 11px; font-weight: 700; font-family: var(--mono); }
+  svg.plan-map .stitle { fill: var(--ink); font-size: 13px; font-weight: 600; }
+  svg.plan-map .srepo { fill: var(--ink-3); font-size: 11px; font-family: var(--mono); }
+  svg.plan-map .flow { stroke: var(--ink-3); stroke-width: 1.5; fill: none; }
+  svg.plan-map .cbox { fill: var(--green-bg); stroke: none; }
+  svg.plan-map .ctext { fill: var(--green); font-size: 11.5px; font-weight: 600; font-family: var(--mono); }
+  svg.plan-map .clab { fill: var(--ink-3); font-size: 10.5px; font-weight: 600; letter-spacing: .1em; font-family: var(--mono); }
+  svg.plan-map .dec rect { stroke-width: 1.5; }
+  svg.plan-map .dec.open rect { fill: var(--amber-bg); stroke: var(--amber); stroke-dasharray: 4 3; }
+  svg.plan-map .dec.set rect { fill: var(--green-bg); stroke: var(--green); }
+  svg.plan-map .dec .dt { font-family: var(--mono); font-size: 11px; font-weight: 700; }
+  svg.plan-map .dec.open .dt, svg.plan-map .dec.open .ds { fill: var(--amber); }
+  svg.plan-map .dec.set .dt, svg.plan-map .dec.set .ds { fill: var(--green); }
+  svg.plan-map .dec .ds { font-size: 10.5px; }
+  svg.plan-map .dlink { fill: none; stroke-width: 1.5; }
+  svg.plan-map .dlink.open { stroke: var(--amber); stroke-dasharray: 4 3; }
+  svg.plan-map .dlink.set { stroke: var(--green); opacity: .6; }
+  svg.plan-map .wv { font-family: var(--mono); font-size: 9.5px; font-weight: 700; fill: var(--ink-3); letter-spacing: .1em; }
+  svg.plan-map .wv.wait { fill: var(--amber); }
+  svg.plan-map .ghost rect { fill: none; stroke: var(--line); stroke-width: 1.5; stroke-dasharray: 5 4; }
+  svg.plan-map .ghost .stitle, svg.plan-map .ghost .srepo { opacity: .55; }
+  svg.plan-map .run rect.sbox { stroke: var(--cyan); stroke-width: 2; }
+  svg.plan-map .done rect.sbox { fill: var(--green-bg); stroke: var(--green); }
+  svg.plan-map .blocked rect.sbox { stroke: var(--red); }
+  svg.plan-map .blocked .snum { fill: var(--red); }
+  .maplegend { display: flex; gap: 18px; flex-wrap: wrap; font-size: 12px; color: var(--ink-3); padding-bottom: 10px; }
+  .maplegend span { display: flex; align-items: center; gap: 6px; }
+  .maplegend i { width: 14px; height: 2px; border-radius: 1px; display: block; }
+  .maplegend i.f { background: var(--ink-3); }
+  .maplegend i.d { background: var(--amber); }
+  .maplegend i.s { background: var(--green); opacity: .6; }
 
-    .found-item { padding: 11px 0; border-bottom: 1px solid var(--line); }
-    .found-item:last-child { border-bottom: 0; padding-bottom: 0; }
-    .found-item:first-child { padding-top: 0; }
-    .found-kind {
-      font-size: 10.5px; font-weight: 600; letter-spacing: 0.06em; text-transform: uppercase;
-      color: var(--warn); background: var(--warn-soft); border-radius: 4px;
-      padding: 1px 6px; display: inline-block; margin-bottom: 5px;
-    }
-    .found-kind.learned { color: var(--ok); background: var(--ok-soft); }
-    .found-text { font-size: 13px; color: var(--ink-2); }
+  /* ─────────── questions ─────────── */
+  .qbox { border-bottom: 1px solid var(--line-soft); padding: 16px 0; }
+  .qbox:first-of-type { padding-top: 0; }
+  .qbox:last-of-type { border-bottom: none; padding-bottom: 0; }
+  .qhead { display: flex; gap: 9px; align-items: baseline; margin-bottom: 11px; }
+  .qnum { font-family: var(--mono); font-size: 11px; color: var(--ink-3); flex: 0 0 auto; }
+  .qtext { font-size: 14.5px; letter-spacing: -.012em; line-height: 1.42; }
+  .qfrom { font-family: var(--mono); font-size: 10.5px; color: var(--ink-3); border: 1px solid var(--line); border-radius: 4px; padding: 0 5px; flex: 0 0 auto; }
+  .choices { display: flex; flex-direction: column; gap: 7px; margin-left: 26px; }
+  .choice {
+    display: flex; gap: 9px; align-items: flex-start; padding: 10px 12px;
+    border: 1px solid var(--line); border-radius: 9px; cursor: pointer;
+    background: var(--card); font-size: 13.5px; transition: border-color .12s, background .12s;
+  }
+  .choice:hover { border-color: var(--accent-line); }
+  .choice.on { border-color: var(--accent); background: var(--accent-bg); }
+  .choice input { margin-top: 3px; accent-color: var(--accent); flex: 0 0 auto; }
+  .qadd {
+    margin: 8px 0 0 26px; width: calc(100% - 26px); min-height: 54px; resize: vertical;
+    font-family: inherit; font-size: 13.5px; color: var(--ink);
+    background: var(--card); border: 1px solid var(--line); border-radius: 9px; padding: 10px 12px;
+  }
+  .qadd:focus { outline: none; border-color: var(--accent); }
+  .qdone { margin-left: 26px; padding: 10px 12px; border-radius: 9px; background: var(--green-bg); font-size: 13.5px; color: var(--ink-2); }
+  .qdone .fby { font-size: 11px; color: var(--ink-3); display: block; margin-top: 4px; }
 
-    /* ---- Questions ---- */
-    .q { padding: 16px 0; border-bottom: 1px solid var(--line); }
-    .q:first-child { padding-top: 0; }
-    .q:last-child { border-bottom: 0; padding-bottom: 0; }
-    .q-head { display: flex; gap: 9px; align-items: baseline; margin-bottom: 10px; }
-    .q-num {
-      font-family: var(--mono); font-size: 11px; color: var(--ink-3);
-      flex: 0 0 auto; padding-top: 2px;
-    }
-    .q-text { font-size: 14px; color: var(--ink); }
-    .q-tag {
-      font-family: var(--mono); font-size: 10.5px; color: var(--ink-3);
-      border: 1px solid var(--line); border-radius: 4px; padding: 0 5px; flex: 0 0 auto;
-    }
-    .opts { display: flex; flex-direction: column; gap: 7px; margin-left: 26px; }
-    .opt {
-      display: flex; gap: 9px; align-items: flex-start; padding: 9px 11px;
-      border: 1px solid var(--line); border-radius: 7px; cursor: pointer;
-      background: var(--surface); font-size: 13.5px; transition: border-color .12s, background .12s;
-    }
-    .opt:hover { border-color: var(--line-strong); }
-    .opt.picked { border-color: var(--accent); background: var(--accent-soft); }
-    .opt input { margin-top: 3px; accent-color: var(--accent); flex: 0 0 auto; }
-    .q textarea {
-      margin: 8px 0 0 26px; width: calc(100% - 26px); min-height: 54px; resize: vertical;
-      font-family: inherit; font-size: 13.5px; color: var(--ink);
-      background: var(--surface); border: 1px solid var(--line);
-      border-radius: 7px; padding: 9px 11px;
-    }
-    .q textarea:focus { outline: none; border-color: var(--accent); }
-    .answered {
-      margin-left: 26px; padding: 9px 11px; border-radius: 7px;
-      background: var(--ok-soft); border: 1px solid var(--line);
-      font-size: 13.5px; color: var(--ink-2);
-    }
-    .answered .by { font-size: 11px; color: var(--ink-3); display: block; margin-top: 4px; }
+  .footbar { display: flex; gap: 10px; align-items: center; flex-wrap: wrap; padding-top: 16px; margin-top: 4px; border-top: 1px solid var(--line-soft); }
+  .btn {
+    font-family: inherit; font-size: 13px; font-weight: 600; cursor: pointer;
+    border-radius: 9px; padding: 9px 16px; border: 1px solid var(--line); background: var(--card); color: var(--ink);
+  }
+  .btn.primary { background: var(--accent); border-color: var(--accent); color: #fff; }
+  .btn:disabled { opacity: .45; cursor: not-allowed; }
+  .why { font-size: 12.5px; color: var(--ink-3); }
 
-    .actions {
-      display: flex; gap: 9px; align-items: center; flex-wrap: wrap;
-      padding: 14px 16px; border-top: 1px solid var(--line);
-    }
-    button {
-      font-family: inherit; font-size: 13px; font-weight: 500; cursor: pointer;
-      border-radius: 7px; padding: 8px 14px; border: 1px solid var(--line-strong);
-      background: var(--surface); color: var(--ink);
-    }
-    button.primary { background: var(--accent); border-color: var(--accent); color: #fff; }
-    button:disabled { opacity: .45; cursor: not-allowed; }
-    .hint { font-size: 12.5px; color: var(--ink-3); }
+  /* ─────────── settled decisions ─────────── */
+  .qdone-wrap { margin-top: 20px; }
+  details.settled { background: var(--sunk); border: 1px solid var(--line); border-radius: 14px; }
+  details.settled > summary { list-style: none; cursor: pointer; padding: 15px 20px; display: flex; gap: 10px; align-items: baseline; flex-wrap: wrap; }
+  details.settled > summary::-webkit-details-marker { display: none; }
+  details.settled > summary::before { content: "▸"; color: var(--ink-3); }
+  details.settled[open] > summary::before { content: "▾"; }
+  details.settled .sct { font-size: 14px; font-weight: 600; }
+  .dlist { padding: 0 20px 16px; }
+  .drow { padding: 11px 0; border-top: 1px solid var(--line-soft); display: flex; gap: 11px; }
+  .dtag { font-family: var(--mono); font-size: 10.5px; font-weight: 700; color: var(--green); background: var(--green-bg); border-radius: 4px; padding: 1px 6px; height: fit-content; flex: 0 0 auto; }
+  .dq { font-size: 13px; color: var(--ink-3); }
+  .da { font-size: 13.5px; color: var(--ink); margin-top: 2px; }
 
-    /* ---- Plan ---- */
-    .rounds { display: flex; flex-direction: column; gap: 14px; }
-    .round-label {
-      font-family: var(--mono); font-size: 11px; color: var(--ink-3);
-      text-transform: uppercase; letter-spacing: 0.07em; margin-bottom: 8px;
-    }
-    .steps { display: grid; grid-template-columns: repeat(auto-fit, minmax(280px, 1fr)); gap: 12px; }
-    .step {
-      position: relative; background: var(--surface); border: 1px solid var(--line);
-      border-radius: 9px; padding: 13px 14px;
-    }
-    .step.running { border-color: var(--accent); }
-    .step.done { background: var(--ok-soft); }
-    .step-model {
-      position: absolute; top: 10px; right: 12px;
-      font-family: var(--mono); font-size: 10.5px; color: var(--ink-3);
-    }
-    .step-title { font-size: 13.5px; font-weight: 600; padding-right: 76px; margin-bottom: 7px; }
-    .step-meta { font-family: var(--mono); font-size: 11px; color: var(--ink-3); margin-bottom: 9px; }
-    .verify {
-      font-family: var(--mono); font-size: 11px; color: var(--ink-2);
-      background: var(--recess); border: 1px solid var(--line); border-radius: 6px;
-      padding: 6px 8px; overflow-x: auto; white-space: pre; margin-bottom: 9px;
-    }
-    .ac { font-size: 12.5px; color: var(--ink-2); padding-left: 15px; position: relative; margin-bottom: 4px; }
-    .ac::before { content: "—"; position: absolute; left: 0; color: var(--ink-3); }
-
-    .empty { color: var(--ink-3); font-size: 13px; padding: 6px 0; }
-    .err {
-      background: var(--warn-soft); border: 1px solid var(--line); color: var(--warn);
-      padding: 11px 14px; border-radius: 8px; margin-bottom: 16px; font-size: 13px;
-    }
-    .topbar { display: flex; justify-content: space-between; align-items: center; margin-bottom: 18px; }
+  .fitem { padding: 11px 0; border-bottom: 1px solid var(--line-soft); }
+  .fitem:last-child { border-bottom: none; padding-bottom: 0; }
+  .fitem:first-child { padding-top: 0; }
+  .fk { font-size: 10.5px; font-weight: 700; letter-spacing: .06em; text-transform: uppercase; color: var(--amber); background: var(--amber-bg); border-radius: 4px; padding: 1px 6px; display: inline-block; margin-bottom: 5px; }
+  .ftx { font-size: 13px; color: var(--ink-2); }
+  .empty { color: var(--ink-3); font-size: 13px; }
+  .err { background: var(--amber-bg); border: 1px solid var(--amber-line); color: var(--amber); padding: 12px 16px; border-radius: 10px; font-size: 13px; }
   </style>
 </head>
 <body>
-  <div class="wrap">
-    <div class="topbar">
-      <span class="eyebrow">Mission Control</span>
-      <a href="/" style="font-size:13px;">← All tasks</a>
+  <div class="page">
+    <div class="crumb">
+      <span class="brand">Mission Control</span>
+      <a href="/">← All tasks</a>
     </div>
     <div id="root"><p class="empty">Loading…</p></div>
   </div>
 
 <script>
-const $ = (sel, el = document) => el.querySelector(sel);
+const $ = (s, el = document) => el.querySelector(s);
 const esc = s => String(s ?? "").replace(/[&<>"']/g, c =>
   ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
-
 const taskId = new URLSearchParams(location.search).get("id") || "";
 
-// Ticket lifecycle, in the order a human experiences it. `status` maps onto this;
-// anything unknown lands at intake rather than throwing the tracker off.
 const LEGS = [
-  { key: "intake",   label: "Intake",    statuses: ["inbox"] },
-  { key: "triage",   label: "Triage",    statuses: ["planning"] },
-  { key: "plan",     label: "Plan",      statuses: ["assigned"] },
-  { key: "build",    label: "Build",     statuses: ["in_progress"] },
-  { key: "review",   label: "Review",    statuses: ["review", "in_review"] },
-  { key: "done",     label: "Done",      statuses: ["done", "completed", "merged"] },
+  { label: "Intake",  statuses: ["inbox"] },
+  { label: "Triage",  statuses: ["planning"] },
+  { label: "Plan",    statuses: ["assigned"] },
+  { label: "Build",   statuses: ["in_progress"] },
+  { label: "Review",  statuses: ["review", "in_review", "testing"] },
+  { label: "Done",    statuses: ["done", "completed", "merged"] },
 ];
 
 async function getJson(path) {
@@ -266,190 +256,255 @@ function parseTriage(task) {
   try { return typeof raw === "string" ? JSON.parse(raw) : raw; } catch { return null; }
 }
 
-/** Base branch and target app, pulled from the same "Base branch:" line the bridge reads. */
-function briefFacts(task, triage) {
-  const facts = [];
-  const repos = (triage && triage.triage_repos) || [];
-  repos.forEach(r => facts.push(["repo", `${r.project}/${r.repo}`]));
-  const m = /^\s*base[- ]?branch:\s*(\S+)\s*$/im.exec(task.description || "");
-  if (m) facts.push(["base", m[1]]);
-  const app = /^\s*target app:\s*`?([^`\n]+)`?/im.exec(task.description || "");
-  if (app) facts.push(["app", app[1].split(" ")[0]]);
-  if (task.priority) facts.push(["priority", task.priority]);
-  return facts;
-}
+const pick = (re, s) => (re.exec(s || "") || [])[1] || "";
 
-function renderBrief(task, triage) {
+function renderTicket(task, triage) {
   const legIndex = Math.max(0, LEGS.findIndex(l => l.statuses.includes(task.status)));
-  const rail = LEGS.map((leg, i) => {
-    const state = i < legIndex ? "done" : i === legIndex ? "now" : "";
-    return `<div class="leg ${state}"><div class="dot"></div><div class="leg-label">${esc(leg.label)}</div></div>`;
-  }).join("");
+  const finished = legIndex >= LEGS.length - 1;
+  // Knob sits at the centre of the current leg's slice.
+  const pct = ((legIndex + 0.5) / LEGS.length) * 100;
+  const stateClass = legIndex >= 4 ? "s-rev" : legIndex >= 3 ? "s-run" : "s-plan";
 
-  // The first paragraph is the human summary; the rest is machine detail.
-  const desc = (task.description || "").split("\n").filter(l =>
-    l.trim() && !/^\s*(base[- ]?branch|target app)\s*:/i.test(l)).slice(0, 2).join(" ");
+  const repos = [...new Set(((triage && triage.triage_repos) || []).map(r => `${r.project}/${r.repo}`))];
+  const base = pick(/^\s*base[- ]?branch:\s*(\S+)\s*$/im, task.description);
+  const app = pick(/^\s*target app:\s*`?([^`\s(]+)/im, task.description);
+
+  const desc = (task.description || "").split("\n")
+    .filter(l => l.trim() && !/^\s*(base[- ]?branch|target app)\s*:/i.test(l)).slice(0, 2).join(" ");
+
+  const ticks = LEGS.map((_, i) => i === 0 ? "" :
+    `<div class="tk-tick" style="left:${(i / LEGS.length) * 100}%"></div>`).join("");
+  const labels = LEGS.map((l, i) =>
+    `<span class="${i < legIndex ? "done" : i === legIndex ? "now" : ""}"><span class="n">${esc(l.label)}</span></span>`).join("");
 
   return `
-    <div class="brief">
-      <div class="brief-top">
-        <div class="stub">
-          <div class="eyebrow">Ticket</div>
-          <div class="ref">${esc(task.external_id || task.id.slice(0, 8))}</div>
-          ${task.external_url ? `<a href="${esc(task.external_url)}" target="_blank" rel="noopener"
-             style="font-size:11.5px;">Open in Linear ↗</a>` : ""}
-        </div>
-        <div class="brief-main">
-          <h1>${esc(task.title)}</h1>
-          <div class="brief-desc">${esc(desc)}</div>
-          <div class="facts">
-            ${briefFacts(task, triage).map(([k, v]) =>
-              `<span class="fact">${esc(k)} <b>${esc(v)}</b></span>`).join("")}
-          </div>
+    <div class="ticket">
+      <div class="tk-row1">
+        ${task.external_url
+          ? `<a class="tk-id" href="${esc(task.external_url)}" target="_blank" rel="noopener">${esc(task.external_id || task.id.slice(0, 8))} ↗</a>`
+          : `<span class="tk-id">${esc(task.external_id || task.id.slice(0, 8))}</span>`}
+        <span class="state ${stateClass}"><i></i>${esc((task.status || "").replace("_", " "))}</span>
+        <div class="tk-meta">
+          ${repos.length ? `<span>repo <b>${esc(repos.join(", "))}</b></span>` : ""}
+          ${base ? `<span>branch <b>${esc(base)}</b></span>` : ""}
+          ${app ? `<span>app <b>${esc(app)}</b></span>` : ""}
         </div>
       </div>
-      <div class="tracker"><div class="rail">${rail}</div></div>
+      <h1 class="tk-title">${esc(task.title)}</h1>
+      <p class="tk-desc">${esc(desc)}</p>
+      <div class="tracker">
+        <div class="track-scroll"><div class="track-inner">
+          <div class="tk-bar ${finished ? "finished" : ""}">
+            <div class="tk-fill" style="width:${pct}%"></div>
+            ${ticks}
+            <div class="tk-knob" style="left:${pct}%">
+              <div class="tk-pill"><span class="dim">now</span>${esc(LEGS[legIndex].label)}</div>
+            </div>
+          </div>
+          <div class="tk-labels">${labels}</div>
+        </div></div>
+      </div>
     </div>`;
 }
 
-/** What triage worked out on its own — the reasoning, plus questions it self-answered. */
+/* ─────────── the plan, as a map ─────────── */
+
+const BOX_W = 208, BOX_H = 74, GAP_Y = 20, GAP_X = 74, PAD = 14, DEC_H = 46;
+
+function planMap(plan, progress, triage) {
+  const stepById = Object.fromEntries(plan.steps.map(s => [s.step, s]));
+  const rounds = (plan.parallel_groups && plan.parallel_groups.length)
+    ? plan.parallel_groups : plan.steps.map(s => [s.step]);
+
+  const decisions = (triage?.questions || []);
+  const open = decisions.filter(q => !q.answer);
+  const cols = [decisions.length ? decisions : null, ...rounds].filter(Boolean);
+
+  const colX = i => PAD + i * (BOX_W + GAP_X);
+  const tallest = Math.max(
+    decisions.length ? decisions.length * (DEC_H + 12) : 0,
+    ...rounds.map(g => g.length * (BOX_H + GAP_Y)));
+  const height = PAD * 2 + 26 + tallest;
+  const width = PAD * 2 + cols.length * BOX_W + (cols.length - 1) * GAP_X;
+
+  const centre = (n, count, h) => PAD + 26 + (tallest - count * (h + GAP_Y)) / 2 + n * (h + GAP_Y);
+  const pos = {};
+  const parts = [];
+  const hasDec = decisions.length > 0;
+
+  // Decisions column
+  if (hasDec) {
+    const x = colX(0);
+    parts.push(`<text class="clab" x="${x}" y="${PAD + 12}">DECISIONS</text>`);
+    decisions.forEach((q, i) => {
+      const y = centre(i, decisions.length, DEC_H);
+      pos[`d${i}`] = { x, y, w: BOX_W, h: DEC_H };
+      const set = !!q.answer;
+      const label = set ? (q.answer || "") : q.question;
+      parts.push(`
+        <g class="dec ${set ? "set" : "open"}">
+          <rect x="${x}" y="${y}" width="${BOX_W}" height="${DEC_H}" rx="9"/>
+          <text class="dt" x="${x + 12}" y="${y + 18}">D-${String(i + 1).padStart(2, "0")}</text>
+          <text class="ds" x="${x + 12}" y="${y + 34}">${esc(clip(label, 30))}</text>
+        </g>`);
+    });
+  }
+
+  // Rounds
+  rounds.forEach((group, gi) => {
+    const ci = gi + (hasDec ? 1 : 0);
+    const x = colX(ci);
+    const waiting = group.some(n => !(stepById[n] || {}).step ? false : false);
+    parts.push(`<text class="wv ${waiting ? "wait" : ""}" x="${x}" y="${PAD + 12}">ROUND ${gi + 1}${group.length > 1 ? ` · ${group.length}×` : ""}</text>`);
+    group.forEach((n, i) => {
+      const s = stepById[n];
+      if (!s) return;
+      const st = (progress?.steps || {})[String(n)] || {};
+      const y = centre(i, group.length, BOX_H);
+      pos[`s${n}`] = { x, y, w: BOX_W, h: BOX_H };
+      const state = st.status === "completed" ? "done"
+        : st.status === "in_progress" ? "run"
+        : (st.status === "blocked" || st.status === "failed") ? "blocked" : "";
+      // Provisional while decisions are still open — the plan may yet change.
+      const ghost = open.length > 0 && !state ? "ghost" : "";
+      const model = st.agent_profile || st.category || s.category || "";
+      const check = (s.verify_command || "").trim();
+      parts.push(`
+        <g class="stepg ${state} ${ghost}" tabindex="0">
+          <title>${esc(s.title)}${check ? `\n\n✓ ${esc(check)}` : ""}</title>
+          <rect class="sbox" x="${x}" y="${y}" width="${BOX_W}" height="${BOX_H}" rx="10"/>
+          <text class="snum" x="${x + 12}" y="${y + 18}">STEP ${esc(String(s.step))}</text>
+          ${model ? `<text class="srepo" x="${x + BOX_W - 12}" y="${y + 18}" text-anchor="end">${esc(clip(model, 14))}</text>` : ""}
+          <text class="stitle" x="${x + 12}" y="${y + 38}">${esc(clip(s.title, 26))}</text>
+          ${check ? `
+            <rect class="cbox" x="${x + 12}" y="${y + 48}" width="${BOX_W - 24}" height="18" rx="5"/>
+            <text class="ctext" x="${x + 18}" y="${y + 61}">✓ ${esc(clip(check.split("&&")[0].trim(), 22))}</text>` : ""}
+        </g>`);
+    });
+  });
+
+  // Edges: step → step from declared dependencies, decisions → the roots.
+  const edges = [];
+  const link = (a, b, cls) => {
+    if (!a || !b) return;
+    const x1 = a.x + a.w, y1 = a.y + a.h / 2, x2 = b.x, y2 = b.y + b.h / 2;
+    const dx = Math.max(20, (x2 - x1) / 2);
+    edges.push(`<path class="${cls}" d="M ${x1} ${y1} C ${x1 + dx} ${y1}, ${x2 - dx} ${y2}, ${x2} ${y2}"/>`);
+  };
+  for (const s of plan.steps) {
+    for (const dep of s.depends_on || []) link(pos[`s${dep}`], pos[`s${s.step}`], "flow");
+  }
+  if (hasDec) {
+    const roots = plan.steps.filter(s => !(s.depends_on || []).length);
+    decisions.forEach((q, i) => {
+      for (const r of roots) link(pos[`d${i}`], pos[`s${r.step}`], `dlink ${q.answer ? "set" : "open"}`);
+    });
+  }
+
+  return `
+    <div class="maplegend">
+      <span><i class="f"></i> depends on</span>
+      ${hasDec ? `<span><i class="s"></i> decision locked</span>` : ""}
+      ${open.length ? `<span><i class="d"></i> decision open — work is provisional</span>` : ""}
+    </div>
+    <div class="diagram-wrap">
+      <svg class="plan-map" viewBox="0 0 ${width} ${height}" style="min-width:${width}px">
+        ${edges.join("")}${parts.join("")}
+      </svg>
+    </div>`;
+}
+
+const clip = (s, n) => (String(s).length > n ? String(s).slice(0, n - 1) + "…" : String(s));
+
+function renderPlan(plan, progress, triage) {
+  if (!plan || !(plan.steps || []).length) {
+    return `<div class="card">
+      <div class="glab">The plan</div>
+      <p class="empty">No plan yet — it's written once the questions are answered.</p></div>`;
+  }
+  const rounds = (plan.parallel_groups && plan.parallel_groups.length) ? plan.parallel_groups.length : plan.steps.length;
+  return `<div class="card">
+    <div class="glab">The plan <span class="gn">${plan.steps.length} steps · ${rounds} rounds</span></div>
+    ${planMap(plan, progress, triage)}
+  </div>`;
+}
+
+/* ─────────── findings and questions ─────────── */
+
 function renderFound(triage) {
   const items = [];
-  if (triage && triage.triage_reasoning) {
-    items.push({ kind: "issue", text: triage.triage_reasoning });
-  }
-  (triage?.questions || []).filter(q => q.answer && q.answered_by === "agent").forEach(q => {
-    items.push({ kind: "learned", text: `${q.question}\n→ ${q.answer}` });
-  });
-  const body = items.length
-    ? items.map(i => `
-        <div class="found-item">
-          <span class="found-kind ${i.kind === "learned" ? "learned" : ""}">${i.kind === "learned" ? "Worked out" : "Blocking"}</span>
-          <div class="found-text">${esc(i.text)}</div>
-        </div>`).join("")
-    : `<p class="empty">Nothing yet — triage hasn't run.</p>`;
-  return `
-    <section class="panel panel-recessed">
-      <div class="panel-head"><h2>What we found</h2></div>
-      <div class="panel-body">${body}</div>
-    </section>`;
+  if (triage?.triage_reasoning) items.push({ kind: "Blocking", text: triage.triage_reasoning });
+  (triage?.questions || []).filter(q => q.answer && q.answered_by === "agent")
+    .forEach(q => items.push({ kind: "Worked out", text: `${q.question}\n→ ${q.answer}` }));
+  return `<div class="card sunk">
+    <div class="glab">What we found</div>
+    ${items.length ? items.map(i => `<div class="fitem"><span class="fk">${esc(i.kind)}</span><div class="ftx">${esc(i.text)}</div></div>`).join("")
+      : `<p class="empty">Nothing yet — triage hasn't run.</p>`}
+  </div>`;
+}
+
+function renderSettled(qs) {
+  return `<div class="qdone-wrap"><details class="settled">
+    <summary><span class="sct">${qs.length} decisions locked</span>
+      <span class="why">Answered — the plan below is built on them.</span></summary>
+    <div class="dlist">${qs.map((q, i) => `
+      <div class="drow">
+        <span class="dtag">D-${String(i + 1).padStart(2, "0")}</span>
+        <div><div class="dq">${esc(q.question)}</div><div class="da">${esc(q.answer || "")}</div></div>
+      </div>`).join("")}</div>
+  </details></div>`;
 }
 
 function renderQuestions(triage) {
   const qs = (triage?.questions || []);
   const open = qs.filter(q => !q.answer);
-  const body = qs.length === 0
-    ? `<p class="empty">No open questions.</p>`
-    : qs.map((q, i) => {
-        const num = `<span class="q-num">${String(i + 1).padStart(2, "0")}</span>`;
-        const head = `<div class="q-head">${num}
-            <span class="q-text">${esc(q.question)}</span>
-            <span class="q-tag">${esc(q.category || "")}</span></div>`;
-        if (q.answer) {
-          return `<div class="q">${head}
-            <div class="answered">${esc(q.answer)}
-              <span class="by">answered by ${esc(q.answered_by || "you")}</span></div></div>`;
-        }
-        const opts = (q.options || []).map((o, oi) => `
-          <label class="opt" data-q="${esc(q.id)}">
-            <input type="radio" name="q-${esc(q.id)}" value="${esc(o)}" data-oi="${oi}">
-            <span>${esc(o)}</span>
-          </label>`).join("");
-        return `<div class="q" data-qid="${esc(q.id)}">${head}
-            <div class="opts">${opts}</div>
-            <textarea data-free="${esc(q.id)}" placeholder="Or answer in your own words — this wins over the options above."></textarea>
-          </div>`;
-      }).join("");
-
-  return `
-    <section class="panel panel-raised">
-      <div class="panel-head">
-        <h2>${open.length ? "Answer these to start" : "Questions"}</h2>
-        <span class="hint">${qs.length - open.length}/${qs.length} answered</span>
-      </div>
-      <div class="panel-body">${body}</div>
-      ${open.length ? `<div class="actions">
-        <button class="primary" id="submit" disabled>Submit answers</button>
-        <span class="hint" id="submit-hint">Answer all ${open.length} to continue.</span>
-      </div>` : ""}
-    </section>`;
-}
-
-function renderPlan(plan, progress) {
-  if (!plan || !(plan.steps || []).length) {
-    return `<section class="panel panel-raised">
-        <div class="panel-head"><h2>The plan</h2></div>
-        <div class="panel-body"><p class="empty">No plan yet — it's written once the questions are answered.</p></div>
-      </section>`;
-  }
-  const stepById = Object.fromEntries(plan.steps.map(s => [s.step, s]));
-  // parallel_groups is the planner's own statement of what may run together.
-  const groups = (plan.parallel_groups && plan.parallel_groups.length)
-    ? plan.parallel_groups
-    : plan.steps.map(s => [s.step]);
-
-  const rounds = groups.map((group, gi) => {
-    const cards = group.map(n => {
-      const s = stepById[n];
-      if (!s) return "";
-      const st = (progress?.steps || {})[String(n)] || {};
-      const cls = st.status === "completed" ? "done" : st.status === "in_progress" ? "running" : "";
-      const acs = (s.acceptance_criteria || s.done_when || []).slice(0, 3)
-        .map(c => `<div class="ac">${esc(c)}</div>`).join("");
-      const deps = (s.depends_on || []).length ? `needs ${s.depends_on.join(", ")}` : "no dependencies";
-      return `<article class="step ${cls}">
-          <span class="step-model">${esc(st.category || s.category || "")}</span>
-          <div class="step-title">${esc(s.title)}</div>
-          <div class="step-meta">step ${esc(s.step)} · ${esc(deps)}${st.status ? ` · ${esc(st.status)}` : ""}</div>
-          ${s.verify_command ? `<div class="verify">${esc(s.verify_command)}</div>` : ""}
-          ${acs}
-        </article>`;
-    }).join("");
-    return `<div><div class="round-label">Round ${gi + 1}${group.length > 1 ? ` · ${group.length} in parallel` : ""}</div>
-      <div class="steps">${cards}</div></div>`;
+  const body = qs.length === 0 ? `<p class="empty">No open questions.</p>` : qs.map((q, i) => {
+    const head = `<div class="qhead"><span class="qnum">${String(i + 1).padStart(2, "0")}</span>
+      <span class="qtext">${esc(q.question)}</span><span class="qfrom">${esc(q.category || "")}</span></div>`;
+    if (q.answer) {
+      return `<div class="qbox">${head}<div class="qdone">${esc(q.answer)}
+        <span class="fby">answered by ${esc(q.answered_by || "you")}</span></div></div>`;
+    }
+    const choices = (q.options || []).map(o => `
+      <label class="choice"><input type="radio" name="q-${esc(q.id)}" value="${esc(o)}"><span>${esc(o)}</span></label>`).join("");
+    return `<div class="qbox">${head}<div class="choices">${choices}</div>
+      <textarea class="qadd" data-free="${esc(q.id)}" placeholder="Or answer in your own words — this wins over the options above."></textarea></div>`;
   }).join("");
 
-  return `
-    <section class="panel panel-raised">
-      <div class="panel-head">
-        <h2>The plan</h2>
-        <span class="hint">${plan.steps.length} steps · ${esc(plan.estimated_complexity || "")}</span>
-      </div>
-      <div class="panel-body"><div class="rounds">${rounds}</div></div>
-    </section>`;
+  return `<div class="card">
+    <div class="glab">${open.length ? "Answer these to start" : "Questions"}
+      <span class="gn">${qs.length - open.length}/${qs.length}</span></div>
+    ${body}
+    ${open.length ? `<div class="footbar">
+      <button class="btn primary" id="submit" disabled>Submit answers</button>
+      <span class="why" id="hint">Answer all ${open.length} to continue.</span></div>` : ""}
+  </div>`;
 }
 
-/** Enable submit only when every open question has an option or free text. */
 function wireQuestions(triage) {
   const btn = $("#submit");
   if (!btn) return;
   const open = (triage.questions || []).filter(q => !q.answer);
-
   const answerFor = q => {
-    const free = $(`[data-free="${CSS.escape(q.id)}"]`);
+    const free = document.querySelector(`[data-free="${CSS.escape(q.id)}"]`);
     if (free && free.value.trim()) return free.value.trim();
     const picked = document.querySelector(`input[name="q-${CSS.escape(q.id)}"]:checked`);
     return picked ? picked.value : "";
   };
-
   const refresh = () => {
-    document.querySelectorAll(".opt").forEach(o => {
-      o.classList.toggle("picked", !!o.querySelector("input")?.checked);
-    });
+    document.querySelectorAll(".choice").forEach(o => o.classList.toggle("on", !!o.querySelector("input")?.checked));
     const filled = open.filter(q => answerFor(q)).length;
     btn.disabled = filled < open.length;
-    $("#submit-hint").textContent = btn.disabled
-      ? `${filled}/${open.length} answered.`
+    $("#hint").textContent = btn.disabled ? `${filled}/${open.length} answered.`
       : "Ready — this hands the ticket to the planner.";
   };
-
   document.addEventListener("input", refresh);
   document.addEventListener("change", refresh);
   refresh();
 
   btn.addEventListener("click", async () => {
     btn.disabled = true;
-    $("#submit-hint").textContent = "Saving…";
+    $("#hint").textContent = "Saving…";
     const now = new Date().toISOString();
     const next = JSON.parse(JSON.stringify(triage));
     next.questions.forEach(q => {
@@ -459,14 +514,12 @@ function wireQuestions(triage) {
     });
     try {
       const res = await fetch(`/api/tasks/${encodeURIComponent(taskId)}/triage-state`, {
-        method: "PUT",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(next),
+        method: "PUT", headers: { "Content-Type": "application/json" }, body: JSON.stringify(next),
       });
       if (!res.ok) throw new Error(`save failed (${res.status})`);
       load();
     } catch (e) {
-      $("#submit-hint").textContent = String(e.message || e);
+      $("#hint").textContent = String(e.message || e);
       btn.disabled = false;
     }
   });
@@ -475,26 +528,31 @@ function wireQuestions(triage) {
 async function load() {
   const root = $("#root");
   if (!taskId) {
-    root.innerHTML = `<div class="err">No ticket id. Open this page as <code>/ticket?id=&lt;task-id&gt;</code>.</div>`;
+    root.innerHTML = `<div class="err">No ticket id. Open as <code>/ticket?id=&lt;task-id&gt;</code>.</div>`;
     return;
   }
   try {
     const task = await getJson(`/api/tasks/${encodeURIComponent(taskId)}`);
-    // The plan lives on disk and may not exist yet; never let that hide the ticket.
     const planData = await getJson(`/api/tasks/${encodeURIComponent(taskId)}/plan`).catch(() => ({}));
     const triage = parseTriage(task);
+    const qs = (triage?.questions || []);
+    // Settled = nothing left to answer, or the work has already moved past asking.
+    const settled = (qs.length > 0 && qs.every(q => q.answer))
+      || ["assigned", "in_progress", "review", "in_review", "done", "completed", "merged"].includes(task.status);
 
-    root.innerHTML =
-      renderBrief(task, triage) +
-      `<div class="cols">${renderFound(triage)}${renderQuestions(triage)}</div>` +
-      renderPlan(planData.plan, planData.progress);
+    root.innerHTML = renderTicket(task, triage) + (settled
+      // Once the decisions are made the plan is the thing; they collapse above it.
+      ? renderSettled(qs) + renderPlan(planData.plan, planData.progress, triage)
+      : `<div class="cols">${renderFound(triage)}${renderQuestions(triage)}</div>`
+        + renderPlan(planData.plan, planData.progress, triage));
 
-    if (triage) wireQuestions(triage);
+    if (triage && !settled) wireQuestions(triage);
   } catch (e) {
     root.innerHTML = `<div class="err">Couldn't load this ticket: ${esc(e.message || e)}</div>`;
   }
 }
 
+// ---- BOOTSTRAP ---- everything above is pure and testable; nothing below is.
 load();
 // The bridge changes this ticket out of band, so re-read it periodically.
 setInterval(load, 15000);
