@@ -2,6 +2,14 @@
 
 The current supported backend is GSD Core. Keep all command spellings here so
 future gsd-pi support can be added without rewriting planner/bridge prompts.
+
+Spelling matters more than it looks. GSD ships its workflows as skills named
+`gsd-plan-phase` (hyphen) in ~/.claude/skills; the older `/gsd:plan-phase` colon
+form resolves to nothing. A prompt citing a command that does not exist produces
+no error — the agent simply ignores that section and works from the prose around
+it. That is exactly what happened: agents ran as plain sessions with no GSD
+decomposition, no .planning/ artifacts, and no per-task automated checks, while
+the logs looked healthy.
 """
 
 from __future__ import annotations
@@ -37,23 +45,23 @@ def ensure_supported_backend() -> str:
 def plan_command(greenfield: bool = False) -> str:
     ensure_supported_backend()
     if greenfield:
-        return "/gsd:new-project --auto"
-    return "/gsd:plan-phase --prd"
+        return "/gsd-new-project --auto"
+    return "/gsd-plan-phase --prd"
 
 
 def gap_plan_command() -> str:
     ensure_supported_backend()
-    return "/gsd:plan-phase --gaps"
+    return "/gsd-plan-phase --gaps"
 
 
 def execute_command() -> str:
     ensure_supported_backend()
-    return "/gsd:execute-phase"
+    return "/gsd-execute-phase"
 
 
 def verify_command() -> str:
     ensure_supported_backend()
-    return "/gsd:verify-work"
+    return "/gsd-verify-work"
 
 
 def planning_dir_name() -> str:

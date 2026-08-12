@@ -84,7 +84,7 @@ in Mission Control:
 workflow.plan_review_convergence: true
 ```
 
-`/gsd:plan-review-convergence --claude --codex` then reviews the plans with both CLIs
+`/gsd-plan-review-convergence --claude --codex` then reviews the plans with both CLIs
 and replans until the concerns are resolved, with stall detection and an escalation gate.
 
 Two failure modes to design for rather than discover:
