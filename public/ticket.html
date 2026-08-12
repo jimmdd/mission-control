@@ -1,0 +1,503 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Ticket · Mission Control</title>
+  <link rel="icon" type="image/svg+xml" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='6' fill='%23111318'/%3E%3Cpath d='M8 20h16M8 20l4-8 4 5 3-4 5 7' stroke='%234f7cff' stroke-width='1.8' fill='none' stroke-linejoin='round'/%3E%3C/svg%3E">
+  <style>
+    :root {
+      --bg: #f6f6f4;
+      --surface: #ffffff;
+      --recess: #f0f0ed;
+      --line: #e2e2dd;
+      --line-strong: #cfcfc8;
+      --ink: #16171a;
+      --ink-2: #4a4d55;
+      --ink-3: #83868f;
+      --accent: #3b5bdb;
+      --accent-soft: #eaeeff;
+      --ok: #1f7a4d;
+      --ok-soft: #e6f4ec;
+      --warn: #9a6414;
+      --warn-soft: #fdf1dd;
+      --stop: #a32c2c;
+      --radius: 10px;
+      --mono: ui-monospace, SFMono-Regular, "SF Mono", Menlo, monospace;
+      --sans: -apple-system, BlinkMacSystemFont, "Segoe UI", Inter, system-ui, sans-serif;
+    }
+    @media (prefers-color-scheme: dark) {
+      :root:not([data-theme="light"]) {
+        --bg: #121317;
+        --surface: #1a1c21;
+        --recess: #16181c;
+        --line: #2a2d34;
+        --line-strong: #3a3e47;
+        --ink: #e8e9ec;
+        --ink-2: #a9adb6;
+        --ink-3: #767a84;
+        --accent: #7d97ff;
+        --accent-soft: #1e2436;
+        --ok: #5fcf95;
+        --ok-soft: #16281f;
+        --warn: #e0b063;
+        --warn-soft: #2a2318;
+        --stop: #e08585;
+      }
+    }
+    :root[data-theme="dark"] {
+      --bg: #121317; --surface: #1a1c21; --recess: #16181c; --line: #2a2d34;
+      --line-strong: #3a3e47; --ink: #e8e9ec; --ink-2: #a9adb6; --ink-3: #767a84;
+      --accent: #7d97ff; --accent-soft: #1e2436; --ok: #5fcf95; --ok-soft: #16281f;
+      --warn: #e0b063; --warn-soft: #2a2318; --stop: #e08585;
+    }
+
+    * { box-sizing: border-box; }
+    body {
+      margin: 0; background: var(--bg); color: var(--ink);
+      font-family: var(--sans); font-size: 14px; line-height: 1.55;
+      -webkit-font-smoothing: antialiased;
+    }
+    .wrap { max-width: 1240px; margin: 0 auto; padding: 28px 22px 80px; }
+    a { color: var(--accent); }
+    h1, h2, h3 { margin: 0; font-weight: 600; letter-spacing: -0.01em; }
+    .eyebrow {
+      font-size: 11px; font-weight: 600; letter-spacing: 0.08em;
+      text-transform: uppercase; color: var(--ink-3);
+    }
+
+    /* ---- Ticket brief ---- */
+    .brief {
+      background: var(--surface); border: 1px solid var(--line);
+      border-radius: var(--radius); overflow: hidden; margin-bottom: 22px;
+    }
+    .brief-top {
+      display: flex; gap: 22px; align-items: flex-start;
+      padding: 20px 22px 18px; border-bottom: 1px dashed var(--line);
+    }
+    .stub {
+      flex: 0 0 auto; padding-right: 22px; border-right: 1px dashed var(--line);
+      min-width: 132px;
+    }
+    .ref { font-family: var(--mono); font-size: 20px; font-weight: 600; letter-spacing: -0.02em; }
+    .brief-main { flex: 1 1 auto; min-width: 0; }
+    .brief-main h1 { font-size: 19px; line-height: 1.35; margin-bottom: 6px; }
+    .brief-desc {
+      color: var(--ink-2); font-size: 13.5px;
+      display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden;
+    }
+    .facts { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 12px; }
+    .fact {
+      font-family: var(--mono); font-size: 11.5px; color: var(--ink-2);
+      background: var(--recess); border: 1px solid var(--line);
+      border-radius: 6px; padding: 3px 8px;
+    }
+    .fact b { color: var(--ink); font-weight: 600; }
+
+    /* ---- Tracker ---- */
+    .tracker { padding: 26px 22px 20px; overflow-x: auto; }
+    .rail { display: flex; align-items: flex-start; min-width: 720px; }
+    .leg { flex: 1 1 0; display: flex; flex-direction: column; align-items: center; position: relative; }
+    .leg::before, .leg::after {
+      content: ""; position: absolute; top: 7px; height: 1.5px; background: var(--line-strong);
+    }
+    .leg::before { left: 0; right: 50%; }
+    .leg::after { left: 50%; right: 0; }
+    .leg:first-child::before, .leg:last-child::after { display: none; }
+    .leg.done::before, .leg.done::after, .leg.now::before { background: var(--accent); }
+    .dot {
+      width: 15px; height: 15px; border-radius: 50%; background: var(--bg);
+      border: 1.5px solid var(--line-strong); position: relative; z-index: 1;
+    }
+    .leg.done .dot { background: var(--accent); border-color: var(--accent); }
+    .leg.now .dot {
+      background: var(--surface); border-color: var(--accent); border-width: 2px;
+      box-shadow: 0 0 0 4px var(--accent-soft);
+    }
+    .leg-label { font-size: 11.5px; color: var(--ink-3); margin-top: 9px; text-align: center; }
+    .leg.done .leg-label, .leg.now .leg-label { color: var(--ink); font-weight: 500; }
+
+    /* ---- Columns ---- */
+    .cols { display: grid; grid-template-columns: 1fr 2fr; gap: 18px; margin-bottom: 22px; align-items: start; }
+    @media (max-width: 900px) { .cols { grid-template-columns: 1fr; } }
+
+    .panel { border-radius: var(--radius); border: 1px solid var(--line); }
+    .panel-recessed { background: var(--recess); }
+    .panel-raised { background: var(--surface); box-shadow: 0 1px 2px rgba(0,0,0,0.04); }
+    .panel-head {
+      padding: 14px 16px; border-bottom: 1px solid var(--line);
+      display: flex; align-items: baseline; justify-content: space-between; gap: 10px;
+    }
+    .panel-head h2 { font-size: 13.5px; }
+    .panel-body { padding: 14px 16px; }
+
+    .found-item { padding: 11px 0; border-bottom: 1px solid var(--line); }
+    .found-item:last-child { border-bottom: 0; padding-bottom: 0; }
+    .found-item:first-child { padding-top: 0; }
+    .found-kind {
+      font-size: 10.5px; font-weight: 600; letter-spacing: 0.06em; text-transform: uppercase;
+      color: var(--warn); background: var(--warn-soft); border-radius: 4px;
+      padding: 1px 6px; display: inline-block; margin-bottom: 5px;
+    }
+    .found-kind.learned { color: var(--ok); background: var(--ok-soft); }
+    .found-text { font-size: 13px; color: var(--ink-2); }
+
+    /* ---- Questions ---- */
+    .q { padding: 16px 0; border-bottom: 1px solid var(--line); }
+    .q:first-child { padding-top: 0; }
+    .q:last-child { border-bottom: 0; padding-bottom: 0; }
+    .q-head { display: flex; gap: 9px; align-items: baseline; margin-bottom: 10px; }
+    .q-num {
+      font-family: var(--mono); font-size: 11px; color: var(--ink-3);
+      flex: 0 0 auto; padding-top: 2px;
+    }
+    .q-text { font-size: 14px; color: var(--ink); }
+    .q-tag {
+      font-family: var(--mono); font-size: 10.5px; color: var(--ink-3);
+      border: 1px solid var(--line); border-radius: 4px; padding: 0 5px; flex: 0 0 auto;
+    }
+    .opts { display: flex; flex-direction: column; gap: 7px; margin-left: 26px; }
+    .opt {
+      display: flex; gap: 9px; align-items: flex-start; padding: 9px 11px;
+      border: 1px solid var(--line); border-radius: 7px; cursor: pointer;
+      background: var(--surface); font-size: 13.5px; transition: border-color .12s, background .12s;
+    }
+    .opt:hover { border-color: var(--line-strong); }
+    .opt.picked { border-color: var(--accent); background: var(--accent-soft); }
+    .opt input { margin-top: 3px; accent-color: var(--accent); flex: 0 0 auto; }
+    .q textarea {
+      margin: 8px 0 0 26px; width: calc(100% - 26px); min-height: 54px; resize: vertical;
+      font-family: inherit; font-size: 13.5px; color: var(--ink);
+      background: var(--surface); border: 1px solid var(--line);
+      border-radius: 7px; padding: 9px 11px;
+    }
+    .q textarea:focus { outline: none; border-color: var(--accent); }
+    .answered {
+      margin-left: 26px; padding: 9px 11px; border-radius: 7px;
+      background: var(--ok-soft); border: 1px solid var(--line);
+      font-size: 13.5px; color: var(--ink-2);
+    }
+    .answered .by { font-size: 11px; color: var(--ink-3); display: block; margin-top: 4px; }
+
+    .actions {
+      display: flex; gap: 9px; align-items: center; flex-wrap: wrap;
+      padding: 14px 16px; border-top: 1px solid var(--line);
+    }
+    button {
+      font-family: inherit; font-size: 13px; font-weight: 500; cursor: pointer;
+      border-radius: 7px; padding: 8px 14px; border: 1px solid var(--line-strong);
+      background: var(--surface); color: var(--ink);
+    }
+    button.primary { background: var(--accent); border-color: var(--accent); color: #fff; }
+    button:disabled { opacity: .45; cursor: not-allowed; }
+    .hint { font-size: 12.5px; color: var(--ink-3); }
+
+    /* ---- Plan ---- */
+    .rounds { display: flex; flex-direction: column; gap: 14px; }
+    .round-label {
+      font-family: var(--mono); font-size: 11px; color: var(--ink-3);
+      text-transform: uppercase; letter-spacing: 0.07em; margin-bottom: 8px;
+    }
+    .steps { display: grid; grid-template-columns: repeat(auto-fit, minmax(280px, 1fr)); gap: 12px; }
+    .step {
+      position: relative; background: var(--surface); border: 1px solid var(--line);
+      border-radius: 9px; padding: 13px 14px;
+    }
+    .step.running { border-color: var(--accent); }
+    .step.done { background: var(--ok-soft); }
+    .step-model {
+      position: absolute; top: 10px; right: 12px;
+      font-family: var(--mono); font-size: 10.5px; color: var(--ink-3);
+    }
+    .step-title { font-size: 13.5px; font-weight: 600; padding-right: 76px; margin-bottom: 7px; }
+    .step-meta { font-family: var(--mono); font-size: 11px; color: var(--ink-3); margin-bottom: 9px; }
+    .verify {
+      font-family: var(--mono); font-size: 11px; color: var(--ink-2);
+      background: var(--recess); border: 1px solid var(--line); border-radius: 6px;
+      padding: 6px 8px; overflow-x: auto; white-space: pre; margin-bottom: 9px;
+    }
+    .ac { font-size: 12.5px; color: var(--ink-2); padding-left: 15px; position: relative; margin-bottom: 4px; }
+    .ac::before { content: "—"; position: absolute; left: 0; color: var(--ink-3); }
+
+    .empty { color: var(--ink-3); font-size: 13px; padding: 6px 0; }
+    .err {
+      background: var(--warn-soft); border: 1px solid var(--line); color: var(--warn);
+      padding: 11px 14px; border-radius: 8px; margin-bottom: 16px; font-size: 13px;
+    }
+    .topbar { display: flex; justify-content: space-between; align-items: center; margin-bottom: 18px; }
+  </style>
+</head>
+<body>
+  <div class="wrap">
+    <div class="topbar">
+      <span class="eyebrow">Mission Control</span>
+      <a href="/" style="font-size:13px;">← All tasks</a>
+    </div>
+    <div id="root"><p class="empty">Loading…</p></div>
+  </div>
+
+<script>
+const $ = (sel, el = document) => el.querySelector(sel);
+const esc = s => String(s ?? "").replace(/[&<>"']/g, c =>
+  ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
+
+const taskId = new URLSearchParams(location.search).get("id") || "";
+
+// Ticket lifecycle, in the order a human experiences it. `status` maps onto this;
+// anything unknown lands at intake rather than throwing the tracker off.
+const LEGS = [
+  { key: "intake",   label: "Intake",    statuses: ["inbox"] },
+  { key: "triage",   label: "Triage",    statuses: ["planning"] },
+  { key: "plan",     label: "Plan",      statuses: ["assigned"] },
+  { key: "build",    label: "Build",     statuses: ["in_progress"] },
+  { key: "review",   label: "Review",    statuses: ["review", "in_review"] },
+  { key: "done",     label: "Done",      statuses: ["done", "completed", "merged"] },
+];
+
+async function getJson(path) {
+  const res = await fetch(path);
+  if (!res.ok) throw new Error(`${path} → ${res.status}`);
+  return res.json();
+}
+
+function parseTriage(task) {
+  const raw = task.triage_state;
+  if (!raw) return null;
+  try { return typeof raw === "string" ? JSON.parse(raw) : raw; } catch { return null; }
+}
+
+/** Base branch and target app, pulled from the same "Base branch:" line the bridge reads. */
+function briefFacts(task, triage) {
+  const facts = [];
+  const repos = (triage && triage.triage_repos) || [];
+  repos.forEach(r => facts.push(["repo", `${r.project}/${r.repo}`]));
+  const m = /^\s*base[- ]?branch:\s*(\S+)\s*$/im.exec(task.description || "");
+  if (m) facts.push(["base", m[1]]);
+  const app = /^\s*target app:\s*`?([^`\n]+)`?/im.exec(task.description || "");
+  if (app) facts.push(["app", app[1].split(" ")[0]]);
+  if (task.priority) facts.push(["priority", task.priority]);
+  return facts;
+}
+
+function renderBrief(task, triage) {
+  const legIndex = Math.max(0, LEGS.findIndex(l => l.statuses.includes(task.status)));
+  const rail = LEGS.map((leg, i) => {
+    const state = i < legIndex ? "done" : i === legIndex ? "now" : "";
+    return `<div class="leg ${state}"><div class="dot"></div><div class="leg-label">${esc(leg.label)}</div></div>`;
+  }).join("");
+
+  // The first paragraph is the human summary; the rest is machine detail.
+  const desc = (task.description || "").split("\n").filter(l =>
+    l.trim() && !/^\s*(base[- ]?branch|target app)\s*:/i.test(l)).slice(0, 2).join(" ");
+
+  return `
+    <div class="brief">
+      <div class="brief-top">
+        <div class="stub">
+          <div class="eyebrow">Ticket</div>
+          <div class="ref">${esc(task.external_id || task.id.slice(0, 8))}</div>
+          ${task.external_url ? `<a href="${esc(task.external_url)}" target="_blank" rel="noopener"
+             style="font-size:11.5px;">Open in Linear ↗</a>` : ""}
+        </div>
+        <div class="brief-main">
+          <h1>${esc(task.title)}</h1>
+          <div class="brief-desc">${esc(desc)}</div>
+          <div class="facts">
+            ${briefFacts(task, triage).map(([k, v]) =>
+              `<span class="fact">${esc(k)} <b>${esc(v)}</b></span>`).join("")}
+          </div>
+        </div>
+      </div>
+      <div class="tracker"><div class="rail">${rail}</div></div>
+    </div>`;
+}
+
+/** What triage worked out on its own — the reasoning, plus questions it self-answered. */
+function renderFound(triage) {
+  const items = [];
+  if (triage && triage.triage_reasoning) {
+    items.push({ kind: "issue", text: triage.triage_reasoning });
+  }
+  (triage?.questions || []).filter(q => q.answer && q.answered_by === "agent").forEach(q => {
+    items.push({ kind: "learned", text: `${q.question}\n→ ${q.answer}` });
+  });
+  const body = items.length
+    ? items.map(i => `
+        <div class="found-item">
+          <span class="found-kind ${i.kind === "learned" ? "learned" : ""}">${i.kind === "learned" ? "Worked out" : "Blocking"}</span>
+          <div class="found-text">${esc(i.text)}</div>
+        </div>`).join("")
+    : `<p class="empty">Nothing yet — triage hasn't run.</p>`;
+  return `
+    <section class="panel panel-recessed">
+      <div class="panel-head"><h2>What we found</h2></div>
+      <div class="panel-body">${body}</div>
+    </section>`;
+}
+
+function renderQuestions(triage) {
+  const qs = (triage?.questions || []);
+  const open = qs.filter(q => !q.answer);
+  const body = qs.length === 0
+    ? `<p class="empty">No open questions.</p>`
+    : qs.map((q, i) => {
+        const num = `<span class="q-num">${String(i + 1).padStart(2, "0")}</span>`;
+        const head = `<div class="q-head">${num}
+            <span class="q-text">${esc(q.question)}</span>
+            <span class="q-tag">${esc(q.category || "")}</span></div>`;
+        if (q.answer) {
+          return `<div class="q">${head}
+            <div class="answered">${esc(q.answer)}
+              <span class="by">answered by ${esc(q.answered_by || "you")}</span></div></div>`;
+        }
+        const opts = (q.options || []).map((o, oi) => `
+          <label class="opt" data-q="${esc(q.id)}">
+            <input type="radio" name="q-${esc(q.id)}" value="${esc(o)}" data-oi="${oi}">
+            <span>${esc(o)}</span>
+          </label>`).join("");
+        return `<div class="q" data-qid="${esc(q.id)}">${head}
+            <div class="opts">${opts}</div>
+            <textarea data-free="${esc(q.id)}" placeholder="Or answer in your own words — this wins over the options above."></textarea>
+          </div>`;
+      }).join("");
+
+  return `
+    <section class="panel panel-raised">
+      <div class="panel-head">
+        <h2>${open.length ? "Answer these to start" : "Questions"}</h2>
+        <span class="hint">${qs.length - open.length}/${qs.length} answered</span>
+      </div>
+      <div class="panel-body">${body}</div>
+      ${open.length ? `<div class="actions">
+        <button class="primary" id="submit" disabled>Submit answers</button>
+        <span class="hint" id="submit-hint">Answer all ${open.length} to continue.</span>
+      </div>` : ""}
+    </section>`;
+}
+
+function renderPlan(plan, progress) {
+  if (!plan || !(plan.steps || []).length) {
+    return `<section class="panel panel-raised">
+        <div class="panel-head"><h2>The plan</h2></div>
+        <div class="panel-body"><p class="empty">No plan yet — it's written once the questions are answered.</p></div>
+      </section>`;
+  }
+  const stepById = Object.fromEntries(plan.steps.map(s => [s.step, s]));
+  // parallel_groups is the planner's own statement of what may run together.
+  const groups = (plan.parallel_groups && plan.parallel_groups.length)
+    ? plan.parallel_groups
+    : plan.steps.map(s => [s.step]);
+
+  const rounds = groups.map((group, gi) => {
+    const cards = group.map(n => {
+      const s = stepById[n];
+      if (!s) return "";
+      const st = (progress?.steps || {})[String(n)] || {};
+      const cls = st.status === "completed" ? "done" : st.status === "in_progress" ? "running" : "";
+      const acs = (s.acceptance_criteria || s.done_when || []).slice(0, 3)
+        .map(c => `<div class="ac">${esc(c)}</div>`).join("");
+      const deps = (s.depends_on || []).length ? `needs ${s.depends_on.join(", ")}` : "no dependencies";
+      return `<article class="step ${cls}">
+          <span class="step-model">${esc(st.category || s.category || "")}</span>
+          <div class="step-title">${esc(s.title)}</div>
+          <div class="step-meta">step ${esc(s.step)} · ${esc(deps)}${st.status ? ` · ${esc(st.status)}` : ""}</div>
+          ${s.verify_command ? `<div class="verify">${esc(s.verify_command)}</div>` : ""}
+          ${acs}
+        </article>`;
+    }).join("");
+    return `<div><div class="round-label">Round ${gi + 1}${group.length > 1 ? ` · ${group.length} in parallel` : ""}</div>
+      <div class="steps">${cards}</div></div>`;
+  }).join("");
+
+  return `
+    <section class="panel panel-raised">
+      <div class="panel-head">
+        <h2>The plan</h2>
+        <span class="hint">${plan.steps.length} steps · ${esc(plan.estimated_complexity || "")}</span>
+      </div>
+      <div class="panel-body"><div class="rounds">${rounds}</div></div>
+    </section>`;
+}
+
+/** Enable submit only when every open question has an option or free text. */
+function wireQuestions(triage) {
+  const btn = $("#submit");
+  if (!btn) return;
+  const open = (triage.questions || []).filter(q => !q.answer);
+
+  const answerFor = q => {
+    const free = $(`[data-free="${CSS.escape(q.id)}"]`);
+    if (free && free.value.trim()) return free.value.trim();
+    const picked = document.querySelector(`input[name="q-${CSS.escape(q.id)}"]:checked`);
+    return picked ? picked.value : "";
+  };
+
+  const refresh = () => {
+    document.querySelectorAll(".opt").forEach(o => {
+      o.classList.toggle("picked", !!o.querySelector("input")?.checked);
+    });
+    const filled = open.filter(q => answerFor(q)).length;
+    btn.disabled = filled < open.length;
+    $("#submit-hint").textContent = btn.disabled
+      ? `${filled}/${open.length} answered.`
+      : "Ready — this hands the ticket to the planner.";
+  };
+
+  document.addEventListener("input", refresh);
+  document.addEventListener("change", refresh);
+  refresh();
+
+  btn.addEventListener("click", async () => {
+    btn.disabled = true;
+    $("#submit-hint").textContent = "Saving…";
+    const now = new Date().toISOString();
+    const next = JSON.parse(JSON.stringify(triage));
+    next.questions.forEach(q => {
+      if (q.answer) return;
+      const a = answerFor(q);
+      if (a) { q.answer = a; q.answered_at = now; q.answered_by = "you"; }
+    });
+    try {
+      const res = await fetch(`/api/tasks/${encodeURIComponent(taskId)}/triage-state`, {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(next),
+      });
+      if (!res.ok) throw new Error(`save failed (${res.status})`);
+      load();
+    } catch (e) {
+      $("#submit-hint").textContent = String(e.message || e);
+      btn.disabled = false;
+    }
+  });
+}
+
+async function load() {
+  const root = $("#root");
+  if (!taskId) {
+    root.innerHTML = `<div class="err">No ticket id. Open this page as <code>/ticket?id=&lt;task-id&gt;</code>.</div>`;
+    return;
+  }
+  try {
+    const task = await getJson(`/api/tasks/${encodeURIComponent(taskId)}`);
+    // The plan lives on disk and may not exist yet; never let that hide the ticket.
+    const planData = await getJson(`/api/tasks/${encodeURIComponent(taskId)}/plan`).catch(() => ({}));
+    const triage = parseTriage(task);
+
+    root.innerHTML =
+      renderBrief(task, triage) +
+      `<div class="cols">${renderFound(triage)}${renderQuestions(triage)}</div>` +
+      renderPlan(planData.plan, planData.progress);
+
+    if (triage) wireQuestions(triage);
+  } catch (e) {
+    root.innerHTML = `<div class="err">Couldn't load this ticket: ${esc(e.message || e)}</div>`;
+  }
+}
+
+load();
+// The bridge changes this ticket out of band, so re-read it periodically.
+setInterval(load, 15000);
+</script>
+</body>
+</html>

@@ -638,6 +638,22 @@ function serveDashboard(res: ServerResponse): void {
   res.end(html);
 }
 
+// Serves a page from public/ by fixed name. Callers pass a literal, never user input.
+function servePage(res: ServerResponse, filename: string): void {
+  try {
+    const thisDir = dirname(fileURLToPath(import.meta.url));
+    const html = readFileSync(join(thisDir, "..", "public", filename), "utf-8");
+    res.statusCode = 200;
+    res.setHeader("Content-Type", "text/html; charset=utf-8");
+    res.setHeader("Cache-Control", "no-cache");
+    res.end(html);
+  } catch {
+    res.statusCode = 404;
+    res.setHeader("Content-Type", "text/plain");
+    res.end(`${filename} not found`);
+  }
+}
+
 function getSpaceHtml(): string | null {
   try {
     const thisDir = dirname(fileURLToPath(import.meta.url));
@@ -748,6 +764,13 @@ export function createHandler(
 
     if (pathname === "/space" || pathname === "/space/") {
       serveSpace(res);
+      return;
+    }
+
+    // One ticket, end to end: brief, what triage found, the questions, the plan.
+    // /ticket?id=<task-id> — the page fetches the task itself.
+    if (pathname === "/ticket" || pathname === "/ticket/") {
+      servePage(res, "ticket.html");
       return;
     }
 
@@ -1311,6 +1334,25 @@ async function handleApiRequest(
                 sendJson(res, 200, progress);
                 return;
               }
+            }
+
+            // The plan and its per-step progress live on disk, written by the Python
+            // planner (bridge/plans, bridge/progress). Until they move into SQLite,
+            // the ticket page reads them through here rather than reinventing paths.
+            if (segments.length === 3 && segments[2] === "plan" && method === "GET") {
+              const readJson = (kind: string): unknown => {
+                // taskId comes off the URL, so keep it to the id shape db ids use —
+                // anything else could walk out of the directory.
+                if (!/^[A-Za-z0-9_-]+$/.test(taskId)) return null;
+                try {
+                  const path = resolveRuntimePath("bridge", kind, `${taskId}.json`);
+                  return existsSync(path) ? JSON.parse(readFileSync(path, "utf-8")) : null;
+                } catch {
+                  return null;
+                }
+              };
+              sendJson(res, 200, { plan: readJson("plans"), progress: readJson("progress") });
+              return;
             }
 
             if (segments.length === 3 && segments[2] === "children" && method === "GET") {
