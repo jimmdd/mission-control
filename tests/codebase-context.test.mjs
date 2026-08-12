@@ -211,3 +211,34 @@ print(json.dumps(bridge._attachment_triage_context({"id": "t"})))
 `);
   assert.equal(ctx, "");
 });
+
+test("attachments are framed as reference, never as the stack to adopt", () => {
+  // A supplied prototype routinely uses a different framework from the target app.
+  // Telling a builder to "integrate as-is" invites it to drag React into a Svelte app.
+  const dir = mkdtempSync(join(tmpdir(), "mc-att2-"));
+  writeFileSync(join(dir, "App.tsx"), "export default () => null;\n");
+  const sections = python(`
+import json, bridge
+bridge._download_task_attachments = lambda task: [
+    {"label": "h.zip -> App.tsx", "path": ${JSON.stringify(join(dir, "App.tsx"))}, "kind": "zip-member"},
+]
+print(json.dumps({
+    "builder": bridge._attachment_prompt_section({"id": "t"}),
+    "triage": bridge._attachment_triage_context({"id": "t"}),
+}))
+`);
+  assert.match(sections.builder, /repository's stack wins/i);
+  assert.doesNotMatch(sections.builder, /integrate it as-is/i);
+  // Triage must not turn a framework difference into a question for the human.
+  assert.match(sections.triage, /not raise the framework difference as a question/i);
+  // ...and it must say so narrowly. Framing the whole package as "already answered"
+  // made triage return ready with no questions and dispatch unscoped work.
+  assert.match(sections.triage, /settles the framework and NOTHING else/i);
+  assert.match(sections.triage, /does not remove the duty to ask/i);
+  // But a stack change the ticket itself asks for stays available, and stays gated:
+  // it needs an explicit request plus a human's approval, never an inference.
+  assert.match(sections.builder, /explicit, approved stack change/i);
+  assert.match(sections.builder, /carries no authority/i);
+  assert.match(sections.triage, /ask the human to confirm/i);
+  rmSync(dir, { recursive: true, force: true });
+});

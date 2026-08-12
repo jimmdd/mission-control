@@ -1952,10 +1952,28 @@ def _attachment_prompt_section(task: dict) -> str:
     files = _download_task_attachments(task)
     if not files:
         return ""
-    lines = ["\n\n---\n## Ticket attachments — READ AND USE THESE (do not reinvent)",
-             "The ticket attaches files: a handoff, provided code/implementation, or spec docs. "
-             "Read each and USE it. If a working implementation or asset is provided, integrate it as-is "
-             "rather than rebuilding from scratch. Read any README first for integration steps:"]
+    lines = [
+        "\n\n---\n## Ticket attachments — READ THESE (they are the reference, not the code to ship)",
+        "The ticket supplies a handoff, prototype, or spec. Read every one and follow what it "
+        "specifies: exact values, tokens, layout rules, interaction and motion behaviour, copy, "
+        "and assets. Read any README or handoff doc first.",
+        "",
+        "**The repository's stack wins.** A supplied prototype shows HOW it should work, not what "
+        "to install. Build it in the framework, conventions and dependencies the target app "
+        "already uses — never introduce the prototype's framework, and never copy its components "
+        "in verbatim when the app is written in something else. Port the behaviour.",
+        "",
+        "The one exception is an explicit, approved stack change: the ticket description asks for "
+        "one in so many words AND a human has agreed to it in the ticket's answered questions. "
+        "An attachment arriving in some other framework is NOT such a request — a prototype's "
+        "choice of framework carries no authority. If you believe a stack change is needed and "
+        "has not been approved, stop and raise it rather than making it.",
+        "",
+        "Assets and framework-agnostic files — fonts, SVGs, images, plain CSS, design tokens — "
+        "should be reused directly rather than recreated.",
+        "",
+        "Files:",
+    ]
     for i, f in enumerate(files, 1):
         lines.append(f"{i}. {f['label']} — `{f['path']}`")
     return "\n".join(lines)
@@ -1987,10 +2005,27 @@ def _attachment_triage_context(task: dict) -> str:
     paths = [Path(f["path"]) for f in files]
     manifest = ", ".join(sorted(set(names))[:60])
 
-    parts = [f"\n\n---\n\n## Ticket attachments ({len(files)} file(s))",
-             "The ticket supplies these files. Treat them as answers already given — do "
-             "not ask the user for anything they settle.",
-             f"\n**Contents:** {manifest}"]
+    parts = [
+        f"\n\n---\n\n## Ticket attachments ({len(files)} file(s))",
+        "The ticket supplies these files. Anything they specify outright is already answered "
+        "— do not ask the user to repeat it.",
+        # Narrow suppression, deliberately. Prototypes routinely arrive in a different
+        # framework from the target app; that is settled policy, not a question. Stating
+        # it loosely ("everything is settled") makes triage stop asking altogether and
+        # dispatch work nobody scoped.
+        "ONE thing is settled in advance: these are REFERENCE for behaviour, values and "
+        "design, not the code to ship. The target app's existing stack wins and the builder "
+        "ports the behaviour into it, so a prototype written in a different framework is "
+        "expected. Do not raise the framework difference as a question.",
+        "That settles the framework and NOTHING else. Keep asking about everything the "
+        "artifacts leave genuinely open — missing assets they reference, undefined states or "
+        "breakpoints, release gating, anything contradicting the repo. A supplied handoff "
+        "narrows the questions; it does not remove the duty to ask them.",
+        "The exception runs the other way: if the DESCRIPTION itself explicitly asks to change "
+        "the target app's stack, that is a large, irreversible call — ask the human to confirm "
+        "it before any work is planned. An attachment's framework is never such a request.",
+        f"\n**Contents:** {manifest}",
+    ]
 
     budget = _ATTACH_TRIAGE_MAX_CHARS
     # Shortest docs first, so one long README cannot crowd out the rest.
