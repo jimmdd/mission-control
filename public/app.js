@@ -1082,6 +1082,11 @@
                 }
 
                 // Link to the PR the agent opened (captured once the task hits review).
+                // Route straight from the card to the ticket page — where the questions
+                // are answered and the plan is readable. stopPropagation so it opens the
+                // page rather than toggling the card underneath it.
+                const ticketLinkHtml = `<a href="/ticket?id=${encodeURIComponent(task.id)}" onclick="event.stopPropagation()" class="badge" title="Open the full ticket page" style="background: rgba(0,212,255,0.16); color: var(--accent); font-size:9px; padding:1px 6px; font-weight:600; text-decoration:none;">TICKET ↗</a>`;
+
                 let prButtonHtml = '';
                 if (task.pr_url) {
                     prButtonHtml = `<a href="${escapeHtml(task.pr_url)}" target="_blank" rel="noopener" onclick="event.stopPropagation()" class="badge" title="Open pull request on GitHub" style="background: rgba(99,102,241,0.18); color:#a5b4fc; font-size:9px; padding:1px 6px; font-weight:600; text-decoration:none;">↗ PR</a>`;
@@ -1123,6 +1128,7 @@
                             <div class="card-subtitle">
                                 <div class="badge badge-status ${task.status}">${task.status.replace('_', ' ')}</div>
                                 ${needsHumanBadge}
+                                ${ticketLinkHtml}
                                 ${prButtonHtml}
                                 ${previewHtml}
                                 ${progressBadgeHtml}

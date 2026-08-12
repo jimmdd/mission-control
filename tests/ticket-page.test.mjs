@@ -122,3 +122,17 @@ test("the plan endpoint refuses to walk out of the plans directory", async () =>
     }
   });
 });
+
+test("the dashboard routes to the ticket page from both the card and the drawer", () => {
+  // The page shipped once with no route to it at all — reachable only by typing the
+  // URL. Both entry points are asserted because the card is the one people actually use.
+  const appJs = readFileSync(new URL("../public/app.js", import.meta.url), "utf8");
+  const indexHtml = readFileSync(new URL("../public/index.html", import.meta.url), "utf8");
+
+  assert.match(appJs, /\/ticket\?id=\$\{encodeURIComponent\(task\.id\)\}/,
+    "cards must link to the ticket page");
+  assert.match(appJs, /TICKET/, "the card link needs a visible label");
+  // Without stopPropagation the click toggles the card instead of following the link.
+  assert.match(appJs, /TICKET[^`]*|onclick="event\.stopPropagation\(\)"/);
+  assert.match(indexHtml, /id="drawer-ticket-link"/, "the drawer must link out too");
+});
