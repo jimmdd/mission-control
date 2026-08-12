@@ -1849,32 +1849,51 @@ def _gather_attachment_links(task: dict) -> List[Tuple[str, str]]:
     return out
 
 
+# Media inside a handoff is bulky and rarely what the agent needs to read. Source
+# and docs are the point of the package, so they get first claim on the budget.
+_BULK_MEMBER_EXTS = _VIDEO_EXTS + (".png", ".jpg", ".jpeg", ".gif", ".webp",
+                                   ".woff", ".woff2", ".ttf", ".otf", ".zip", ".pdf")
+
+
 def _safe_extract_zip(zip_path: "Path", dest: "Path") -> List["Path"]:
     """Extract a zip, rejecting path-traversal ('zip slip') entries and capping total
-    size. Returns the extracted file paths."""
+    size. Returns the extracted file paths.
+
+    Members are taken smallest-useful-first: text and source ahead of media. A member
+    that would blow the budget is skipped and extraction continues, rather than
+    stopping — a couple of large videos early in the archive would otherwise consume
+    the whole cap and drop the handoff doc and source the package exists to deliver.
+    """
     import zipfile
     extracted: List["Path"] = []
+    skipped: List[str] = []
     dest_root = dest.resolve()
     total = 0
     try:
         with zipfile.ZipFile(zip_path) as z:
-            for info in z.infolist():
-                if info.is_dir():
-                    continue
+            members = [i for i in z.infolist() if not i.is_dir()]
+            members.sort(key=lambda i: (i.filename.lower().endswith(_BULK_MEMBER_EXTS),
+                                        i.file_size, i.filename))
+            for info in members:
                 target = (dest / info.filename).resolve()
                 if not str(target).startswith(str(dest_root) + os.sep) and target != dest_root:
                     logging.warning(f"  Skipping unsafe zip entry {info.filename}")
                     continue
+                if total + info.file_size > _ATTACH_MAX_BYTES:
+                    skipped.append(info.filename)
+                    continue
                 total += info.file_size
-                if total > _ATTACH_MAX_BYTES:
-                    logging.warning("  Zip exceeds size cap — stopping extraction")
-                    break
                 target.parent.mkdir(parents=True, exist_ok=True)
                 with z.open(info) as src, open(target, "wb") as dst:
                     dst.write(src.read())
                 extracted.append(target)
     except Exception as e:
         logging.warning(f"  Failed to extract zip {zip_path.name}: {e}")
+    if skipped:
+        # Never silent: an agent told to "use the provided implementation" needs to
+        # know which parts of it it never received.
+        logging.warning(f"  Zip size cap reached — skipped {len(skipped)} member(s): "
+                        + ", ".join(skipped[:5]) + ("…" if len(skipped) > 5 else ""))
     return extracted
 
 

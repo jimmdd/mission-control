@@ -121,3 +121,65 @@ print(json.dumps(bridge._tree_from_paths(paths)))
 `);
   assert.ok(lines.some(l => l.includes("zzz-last")), "the last app must not be truncated away");
 });
+
+// A handoff zip is the ticket's provided implementation. The size cap used to abort
+// on the first member that overflowed it, in raw archive order — so a couple of large
+// videos near the front consumed the budget and the spec and source never extracted,
+// while the agent was still told "use the provided implementation, don't reinvent".
+
+test("zip extraction takes source and docs before media", () => {
+  const zipDir = mkdtempSync(join(tmpdir(), "mc-zip-"));
+  const out = join(zipDir, "out");
+  // Two files whose names sort media-first, so only the ordering can save the doc.
+  const big = join(zipDir, "aaa-video.mp4");
+  const small = join(zipDir, "zzz-SPEC.md");
+  writeFileSync(big, Buffer.alloc(24 * 1024 * 1024));
+  writeFileSync(small, "# the spec that matters\n");
+  execFileSync("zip", ["-q", "-j", join(zipDir, "h.zip"), big, small]);
+
+  const names = python(`
+import json, pathlib, bridge
+paths = bridge._safe_extract_zip(pathlib.Path(${JSON.stringify(join(zipDir, "h.zip"))}),
+                                 pathlib.Path(${JSON.stringify(out)}))
+print(json.dumps(sorted(p.name for p in paths)))
+`);
+  assert.ok(names.includes("zzz-SPEC.md"), "the doc must survive a media-heavy archive");
+  rmSync(zipDir, { recursive: true, force: true });
+});
+
+test("an oversized member is skipped, not treated as the end of the archive", () => {
+  const zipDir = mkdtempSync(join(tmpdir(), "mc-zip2-"));
+  const out = join(zipDir, "out");
+  const huge = join(zipDir, "a-huge.bin");
+  const after = join(zipDir, "b-after.md");
+  // Incompressible, so it really costs its size on the way out.
+  writeFileSync(huge, Buffer.alloc(30 * 1024 * 1024).map(() => Math.floor(Math.random() * 256)));
+  writeFileSync(after, "still needed\n");
+  execFileSync("zip", ["-q", "-j", "-0", join(zipDir, "h.zip"), huge, after]);
+
+  const names = python(`
+import json, pathlib, bridge
+paths = bridge._safe_extract_zip(pathlib.Path(${JSON.stringify(join(zipDir, "h.zip"))}),
+                                 pathlib.Path(${JSON.stringify(out)}))
+print(json.dumps(sorted(p.name for p in paths)))
+`);
+  assert.ok(names.includes("b-after.md"), "a member past the oversized one must still extract");
+  assert.ok(!names.includes("a-huge.bin"), "the oversized member itself must be skipped");
+  rmSync(zipDir, { recursive: true, force: true });
+});
+
+test("zip slip entries are rejected", () => {
+  const zipDir = mkdtempSync(join(tmpdir(), "mc-zip3-"));
+  const out = join(zipDir, "out");
+  const names = python(`
+import json, pathlib, zipfile, bridge
+zp = pathlib.Path(${JSON.stringify(join(zipDir, "evil.zip"))})
+with zipfile.ZipFile(zp, "w") as z:
+    z.writestr("../escaped.txt", "nope")
+    z.writestr("fine.txt", "ok")
+paths = bridge._safe_extract_zip(zp, pathlib.Path(${JSON.stringify(out)}))
+print(json.dumps(sorted(p.name for p in paths)))
+`);
+  assert.deepEqual(names, ["fine.txt"]);
+  rmSync(zipDir, { recursive: true, force: true });
+});
