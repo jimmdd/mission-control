@@ -332,6 +332,8 @@ function renderTicket(task, triage) {
 /* ─────────── the plan, as a map ─────────── */
 
 const BOX_W = 208, BOX_H = 74, GAP_Y = 20, GAP_X = 74, PAD = 14, DEC_H = 46;
+// Beyond this the decisions column dwarfs the work; the rest stay in the list above.
+const MAX_DEC = 5;
 
 function planMap(plan, progress, triage) {
   const stepById = Object.fromEntries(plan.steps.map(s => [s.step, s]));
@@ -344,8 +346,12 @@ function planMap(plan, progress, triage) {
   const cols = [decisions.length ? decisions : null, ...rounds].filter(Boolean);
 
   const colX = i => PAD + i * (BOX_W + GAP_X);
+  // Every column is laid out at (height + GAP_Y) per node, so the canvas must be
+  // measured the same way — reserving less clipped the decisions column top and bottom
+  // as soon as answered questions accumulated.
+  const decShown = Math.min(decisions.length, MAX_DEC);
   const tallest = Math.max(
-    decisions.length ? decisions.length * (DEC_H + 12) : 0,
+    decShown * (DEC_H + GAP_Y) + (decisions.length > MAX_DEC ? DEC_H + GAP_Y : 0),
     ...rounds.map(g => g.length * (BOX_H + GAP_Y)));
   const height = PAD * 2 + 26 + tallest;
   const width = PAD * 2 + cols.length * BOX_W + (cols.length - 1) * GAP_X;
@@ -359,8 +365,8 @@ function planMap(plan, progress, triage) {
   if (hasDec) {
     const x = colX(0);
     parts.push(`<text class="clab" x="${x}" y="${PAD + 12}">DECISIONS</text>`);
-    decisions.forEach((q, i) => {
-      const y = centre(i, decisions.length, DEC_H);
+    decisions.slice(0, MAX_DEC).forEach((q, i) => {
+      const y = centre(i, decShown + (decisions.length > MAX_DEC ? 1 : 0), DEC_H);
       pos[`d${i}`] = { x, y, w: BOX_W, h: DEC_H };
       const set = !!q.answer;
       const label = set ? (q.answer || "") : q.question;
@@ -371,6 +377,14 @@ function planMap(plan, progress, triage) {
           <text class="ds" x="${x + 12}" y="${y + 34}">${esc(clip(label, 30))}</text>
         </g>`);
     });
+    if (decisions.length > MAX_DEC) {
+      const y = centre(MAX_DEC, decShown + 1, DEC_H);
+      parts.push(`
+        <g class="dec set">
+          <rect x="${x}" y="${y}" width="${BOX_W}" height="${DEC_H}" rx="9"/>
+          <text class="ds" x="${x + 12}" y="${y + 28}">+${decisions.length - MAX_DEC} more, listed above</text>
+        </g>`);
+    }
   }
 
   // Rounds
@@ -409,6 +423,14 @@ function planMap(plan, progress, triage) {
             <text class="ctext" x="${x + 18}" y="${y + 61}">✓ ${esc(clip(check.split("&&")[0].trim(), 22))}</text>` : ""}
         </g>`);
     });
+    if (decisions.length > MAX_DEC) {
+      const y = centre(MAX_DEC, decShown + 1, DEC_H);
+      parts.push(`
+        <g class="dec set">
+          <rect x="${x}" y="${y}" width="${BOX_W}" height="${DEC_H}" rx="9"/>
+          <text class="ds" x="${x + 12}" y="${y + 28}">+${decisions.length - MAX_DEC} more, listed above</text>
+        </g>`);
+    }
   });
 
   // Edges: step → step from declared dependencies, decisions → the roots.

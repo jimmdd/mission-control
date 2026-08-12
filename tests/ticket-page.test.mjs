@@ -281,3 +281,30 @@ test("the board flags a task whose planning is blocked, at any status", () => {
   // Malformed state on one task must not take down the whole board.
   assert.match(appJs, /malformed triage_state must not break the board/);
 });
+
+test("the canvas grows to fit its decisions instead of clipping them", () => {
+  // Height was reserved at (DEC_H + 12) per decision while layout placed them
+  // (DEC_H + GAP_Y) apart, so the column overflowed top and bottom as answers piled up.
+  const html = readFileSync(new URL("../public/ticket.html", import.meta.url), "utf8");
+  const body = /<script>([\s\S]*)<\/script>/.exec(html)[1].split("// ---- BOOTSTRAP ----")[0];
+  const shim = `
+    const document = { querySelector: () => null, querySelectorAll: () => [], addEventListener: () => {} };
+    const location = { search: "" };
+    class URLSearchParams { get() { return "x"; } }
+  `;
+  const mod = new Function(`${shim}\n${body}\nreturn { planMap };`)();
+
+  const plan = { steps: [{ step: 1, title: "one" }], parallel_groups: [[1]] };
+  const many = { questions: Array.from({ length: 9 }, (_, i) => ({ id: `q${i}`, question: `Q${i}`, answer: `A${i}` })) };
+  const svg = mod.planMap(plan, {}, many);
+
+  const height = Number(/viewBox="0 0 \d+ (\d+)"/.exec(svg)[1]);
+  const ys = [...svg.matchAll(/<rect[^>]*y="(\d+)"[^>]*height="(\d+)"/g)]
+    .map(m => Number(m[1]) + Number(m[2]));
+  assert.ok(Math.max(...ys) <= height, `a node ends at ${Math.max(...ys)} beyond canvas ${height}`);
+  const tops = [...svg.matchAll(/<rect[^>]*y="(-?\d+)"/g)].map(m => Number(m[1]));
+  assert.ok(Math.min(...tops) >= 0, "no node may start above the canvas");
+
+  // Nine locked decisions would dwarf a one-step plan, so the column is capped.
+  assert.match(svg, /\+4 more, listed above/);
+});
