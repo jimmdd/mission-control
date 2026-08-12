@@ -22,7 +22,10 @@ unmodified code, which is in the target repo, not here.
 - Daemon **off**, no agents running, no worktrees, nothing pushed.
 - MC server on `http://127.0.0.1:18900` (restart with `npm start`).
 - Ticket MET-635 = task `34581c3d-9abc-4993-9974-05fe066146b1`, status `in_progress`,
-  step 1 `blocked`, 8 triage decisions answered, 1 open follow-up (font licence).
+  step 1 `blocked`, 9/9 questions answered. The font-licence follow-up was answered
+  **Adobe Fonts — switch to a Web Project (use.typekit.net) and remove the committed
+  binaries**, which is the decision the font work needs. Nothing acted on that answer;
+  see next-step 5.
 - `~/GitProjects/metadao/backend-phase0` — clone with **push URL `DISABLED://phase0-no-push`**.
   Verified: `git push` fails. Delete it when done (ask first).
 - `no_pr: true` in local `swarm-config.json`, so agents are told not to push or open PRs.
@@ -116,7 +119,26 @@ Fix that before further runs.
    went to a terminal and died.
 4. **Route planner questions to the UI** with `source: "planner"`. The section already exists
    and is tested; nothing writes that field yet.
-5. Then Phase 0 proper, per `docs/phase-0-measurement.md`.
+5. **Close the loop: answering a follow-up must resume planning.** This is missing entirely and
+   is the half that makes the feature real. Today the section renders, the answer is stored in
+   `triage_state`, and then nothing happens — no code watches for a follow-up becoming answered,
+   so planning stays stopped until a human notices and re-dispatches by hand. Verified live: the
+   font-licence follow-up was answered and the ticket did not move.
+
+   What it needs:
+   - A watcher on the planning path (`process_planning_tasks` is the natural home) that fires
+     when a step is held on follow-ups and all of them now have answers.
+   - Re-dispatch of the *plan stage only*, not the whole step — the answer changes the spec, not
+     the work already done.
+   - The answers must reach the planner's prompt. `_build_triage_context` already folds answered
+     questions in, so this mostly works; confirm follow-ups are included and labelled as
+     decisions rather than triage answers.
+   - A guard against loops: a planner that raises a follow-up, gets an answer, and raises the
+     same one again should escalate rather than cycle.
+
+   Note the daemon is off in the current state, so nothing polls at all — turn it on before
+   expecting any of this to trigger.
+6. Then Phase 0 proper, per `docs/phase-0-measurement.md`.
 
 Design rules settled this session, worth not relitigating:
 
