@@ -495,3 +495,39 @@ test("the spawn script copies the plan in, and only when there is one", () => {
   assert.match(sh, /\[ -d "\$\{MC_PLANNING_DIR\}\/\.planning" \]/);
   assert.match(sh, /agent will plan for itself/);
 });
+
+test("planning's model is a setting, not whatever the CLI defaults to", () => {
+  // The stage passed no --model at all, so planning_model in swarm-config.json had
+  // no effect and the model in use would move if the CLI's default ever did. That is
+  // the one setting Phase 0 must control.
+  const r = python(`
+import json, plan_stage
+seen = {}
+def fake_run(worktree, prompt, transcript, timeout, model=""):
+    seen.setdefault("models", []).append(model)
+    return {"output": "", "returncode": 0, "timed_out": False, "duration_s": 1, "failed": None}
+plan_stage._run_claude = fake_run
+plan_stage._configured_model = lambda role: "configured-" + role
+plan_stage.gsd_backend.project_initialised = lambda w: False
+plan_stage.gsd_backend.workflow_ran = lambda w: (False, "")
+plan_stage.plan_in_worktree("/tmp", {"id": "t1"})
+print(json.dumps(seen))
+`);
+  assert.ok(r.models.length >= 1);
+  assert.ok(r.models.every((m) => m === "configured-planning"), JSON.stringify(r.models));
+});
+
+test("an explicit model beats the configured one", () => {
+  const r = python(`
+import json, plan_stage
+seen = []
+plan_stage._run_claude = lambda w, p, t, to, model="": (seen.append(model),
+    {"output": "", "returncode": 0, "timed_out": False, "duration_s": 1, "failed": None})[1]
+plan_stage._configured_model = lambda role: "configured"
+plan_stage.gsd_backend.project_initialised = lambda w: False
+plan_stage.gsd_backend.workflow_ran = lambda w: (False, "")
+plan_stage.plan_in_worktree("/tmp", {"id": "t1"}, model="explicit")
+print(json.dumps(seen))
+`);
+  assert.ok(r.every((m) => m === "explicit"));
+});

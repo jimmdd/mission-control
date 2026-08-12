@@ -425,6 +425,23 @@ def run_plan_stage(worktree: str, task: Dict, context: str = "",
     return verdict
 
 
+def _configured_model(role: str) -> str:
+    """The model MC has been told to use for a role, or "" to accept the CLI default.
+
+    The stage used to pass no `--model` at all, so it silently ran on whatever the
+    `claude` CLI defaulted to — `planning_model` in swarm-config.json had no effect,
+    and the model in use would change under you if the CLI's default ever moved.
+    That is the one setting Phase 0 must control: the thesis is that a strong model
+    plans and a cheaper one executes, and it cannot be measured if planning's model
+    is whatever happened to be default that week.
+    """
+    try:
+        from planner import _get_config
+        return str(_get_config().get(f"{role}_model", "") or "")
+    except Exception:
+        return ""
+
+
 def plan_in_worktree(worktree: str, task: Dict, context: str = "",
                      model: str = "") -> Dict:
     """Get from a bare repo to a plan: initialise if needed, then plan.
@@ -437,6 +454,8 @@ def plan_in_worktree(worktree: str, task: Dict, context: str = "",
     each stage's own verdict so a post-mortem can see where the time went.
     """
     stages = []
+    # Explicit, so planning's model is a decision rather than a default.
+    model = model or _configured_model("planning")
 
     init = run_init_stage(worktree, task, context, model=model)
     stages.append(init)
