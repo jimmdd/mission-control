@@ -13,6 +13,7 @@ Run modes:
 """
 
 import argparse
+import hashlib
 import json
 import logging
 import os
@@ -1166,30 +1167,35 @@ def post_planning_questions(task_id: str, questions: List[dict], triage_result: 
 
     now = datetime.now(timezone.utc).isoformat()
 
-    existing_repos = []
-    existing_questions: List[dict] = []
+    prior: dict = {}
     try:
-        existing_state = mc_request("GET", f"/api/tasks/{task_id}/triage-state")
-        if existing_state and existing_state.get("triage_repos"):
-            existing_repos = existing_state["triage_repos"]
-        if existing_state and existing_state.get("questions"):
-            existing_questions = existing_state["questions"]
+        fetched = mc_request("GET", f"/api/tasks/{task_id}/triage-state")
+        if isinstance(fetched, dict):
+            prior = fetched
     except Exception:
         pass
 
+    existing_repos = prior.get("triage_repos") or []
+    existing_questions = prior.get("questions") or []
     new_repos = triage_result.get("repos", []) if triage_result else []
 
+    # Merge rather than rebuild — of the whole state, not just the questions.
+    # Listing the fields by hand dropped everything this function did not know
+    # about. On the questions that meant an agent's reasoning, a deferral, or the
+    # conversation that was the reason one was still open. On their siblings it was
+    # worse and quieter: `confirmed` reset a task to "answered but unconfirmed"
+    # forever, `resume_log` reset the loop guard so it could never trip, and
+    # `promotion` reset made a promoted investigation undispatchable.
     triage_state = {
-        # Merge rather than rebuild. Listing the fields by hand dropped everything
-        # this function did not know about — an agent's reasoning, a deferral, the
-        # conversation that was the reason a question was still open — so a second
-        # round quietly erased the first.
+        **prior,
         "questions": merge_questions(existing_questions, questions),
-        "triage_reasoning": triage_result.get("reasoning", "") if triage_result else "",
         "triage_repos": existing_repos if existing_repos else new_repos,
-        "created_at": now,
+        "created_at": prior.get("created_at") or now,
         "updated_at": now,
     }
+    reasoning = triage_result.get("reasoning", "") if triage_result else ""
+    if reasoning or "triage_reasoning" not in triage_state:
+        triage_state["triage_reasoning"] = reasoning or triage_state.get("triage_reasoning", "")
 
     try:
         mc_request("PUT", f"/api/tasks/{task_id}/triage-state", triage_state)
@@ -3459,8 +3465,11 @@ def validate_plan_gates(task: dict, plan: dict, repos: List[dict],
     repo = repos[0] if repos else None
     repo_path = find_repo_path(repo["project"], repo["repo"]) if repo else None
     if not repo_path:
+        # `findings`, not []: a gate already known to be broken stays broken whether
+        # or not we can probe the rest. Returning [] here dispatched it as healthy,
+        # which is the exact cost the cache exists to avoid.
         logging.warning("  Cannot validate plan gates — no repo path")
-        return []
+        return findings
 
     base = _resolve_base_branch(task, repo_path)
     probe = Path(str(repo_path).rstrip("/")).parent / "worktrees" / f"gatecheck-{task['id'][:8]}"
@@ -3469,7 +3478,7 @@ def validate_plan_gates(task: dict, plan: dict, repos: List[dict],
                        cwd=str(repo_path), capture_output=True, text=True, timeout=600, check=True)
     except (subprocess.CalledProcessError, subprocess.TimeoutExpired, OSError) as e:
         logging.warning(f"  Could not create gate-check worktree at {base}: {e}")
-        return []
+        return findings
 
     # A worktree holds tracked files only, so it starts with no `.env`. Without this
     # the probe reports every build gate as unusable and blames the base commit.
@@ -4446,8 +4455,35 @@ def _service_task_questions(task: dict) -> bool:
     if not changed:
         return False
 
+    # Re-read before writing. A reply takes a deep-model call to produce, and in that
+    # window a human can answer the question or add to its thread through the
+    # per-question endpoints — writing back the array we fetched beforehand would
+    # discard exactly what those endpoints exist to protect.
     try:
-        mc_request("PUT", f"/api/tasks/{task_id}/triage-state", {**state, "questions": questions})
+        fresh = mc_request("GET", f"/api/tasks/{task_id}/triage-state") or state
+    except Exception:
+        fresh = state
+    updated = {q["id"]: q for q in questions if q.get("id")}
+    merged = []
+    for current in (fresh.get("questions") or []):
+        ours = updated.pop(current.get("id"), None)
+        if not ours:
+            merged.append(current)
+            continue
+        # Anything the human did while we were thinking wins outright.
+        if current.get("answer") and not ours.get("answer"):
+            merged.append(current)
+            continue
+        theirs = current.get("thread") or []
+        ours_thread = ours.get("thread") or []
+        if len(theirs) > len(ours_thread):
+            merged.append(current)
+            continue
+        merged.append(ours)
+    merged.extend(updated.values())
+
+    try:
+        mc_request("PUT", f"/api/tasks/{task_id}/triage-state", {**fresh, "questions": merged})
     except Exception as e:
         logging.warning(f"  Could not save question updates for {task_id[:8]}: {e}")
         return False
@@ -4624,7 +4660,10 @@ def process_planning_tasks():
         # agent's auto-suggestions) before anything dispatches. The all-answered check
         # is also what makes a follow-up question park the task here until answered.
         if state and state.get("questions"):
-            unanswered = [q for q in state["questions"] if not q.get("answer")]
+            # blocking(), not "unanswered": a deferred question is set aside on
+            # purpose. Counting it here removed it from the page while parking the
+            # task in planning forever, which makes "Decide later" a trap.
+            unanswered = blocking_questions(state["questions"])
             if unanswered:
                 logging.info(f"  {task_id[:8]} has {len(unanswered)} unanswered question(s) — waiting")
                 continue
@@ -5257,7 +5296,10 @@ def process_human_escalations():
         # Raised after planning, by an agent that stopped — so it leads the ticket
         # rather than sitting among the opening triage questions.
         questions = [{
-            "id": "agent_escalation",
+            # Derived from the message, not a constant. A constant id merged the
+            # second escalation into the first and let it inherit that answer, so it
+            # arrived pre-answered, showed nobody anything, and dispatch resumed.
+            "id": f"agent_escalation_{hashlib.sha1(escalation_msg.encode()).hexdigest()[:8]}",
             "question": escalation_msg,
             "category": "technical",
             "question_type": "text",

@@ -29,6 +29,7 @@ people to click through, which is how the second kind stops being read.
 
 from __future__ import annotations
 
+import hashlib
 import json
 import logging
 import os
@@ -128,27 +129,53 @@ def build_prompt(task: Dict, context: str = "") -> str:
     return "\n\n".join(parts)
 
 
-def find_plan(worktree: str) -> Optional[Path]:
-    """The plan GSD wrote, if it wrote one with tasks in it.
+def find_plan(worktree: str, since: Optional[float] = None) -> Optional[Path]:
+    """The plan GSD wrote, if *this run* wrote one with tasks in it.
 
     Presence of `.planning/` is not enough and neither is the agent's word: the run
     that produced no plan at all still reported progress in its transcript.
+
+    `since` is the wall-clock the run started, and it is what stops a plan from
+    somebody else's work being read as this one's. `.planning/` is tracked, so the
+    second ticket in a GSD repo starts from a checkout that already contains a prior
+    phase's PLAN.md — and the planning worktree is reused across attempts, so a
+    retry starts with the previous attempt's. Without the floor the verdict is
+    `plan_written` whatever this run did, and because a plan outranks a question, a
+    `<mc-questions>` block the planner emitted is discarded with it.
     """
     root = Path(worktree) / gsd_backend.planning_dir_name()
     if not root.is_dir():
         return None
     # Newest first: a repo with several planned phases should report the plan this
     # run produced, not whichever phase sorts first by name.
-    candidates = sorted(root.rglob("PLAN.md"),
-                        key=lambda p: p.stat().st_mtime if p.exists() else 0,
-                        reverse=True)
-    for path in candidates:
+    candidates = []
+    for path in root.rglob("PLAN.md"):
+        try:
+            mtime = path.stat().st_mtime
+        except OSError:
+            continue
+        if since is not None and mtime < since:
+            continue
+        candidates.append((mtime, path))
+
+    for _, path in sorted(candidates, reverse=True):
         try:
             if TASK_BLOCK.search(path.read_text(errors="replace")):
                 return path
         except OSError:
             continue
     return None
+
+
+def _question_id(question: str) -> str:
+    """A stable id for a question, derived from its text.
+
+    Same question asked twice is the same question — so re-asking something already
+    answered still collapses onto the answer, which is what we want. A different
+    question gets a different id and therefore reaches a human.
+    """
+    digest = hashlib.sha1(" ".join(question.lower().split()).encode()).hexdigest()
+    return f"plan_{digest[:10]}"
 
 
 def parse_questions(output: str) -> List[Dict]:
@@ -168,7 +195,12 @@ def parse_questions(output: str) -> List[Dict]:
             if not isinstance(q, dict) or not q.get("question"):
                 continue
             out.append({
-                "id": q.get("id") or f"plan_q{i}",
+                # Derived from the question text, not its position. `questions.merge`
+                # matches by id and lets an existing answer win, so a positional
+                # `plan_q1` meant round two's *different* question inherited round
+                # one's answer: it read as settled, never reached anyone, and went to
+                # the planner as a binding decision it had never made.
+                "id": q.get("id") or _question_id(q["question"]),
                 "question": q["question"],
                 "why": q.get("why", ""),
                 "options": q.get("options") or None,
@@ -183,9 +215,13 @@ def parse_questions(output: str) -> List[Dict]:
     return []
 
 
-def classify(worktree: str, output: str, returncode: Optional[int]) -> Dict:
-    """Turn a finished run into a verdict, preferring the filesystem to the transcript."""
-    plan_path = find_plan(worktree)
+def classify(worktree: str, output: str, returncode: Optional[int],
+             since: Optional[float] = None) -> Dict:
+    """Turn a finished run into a verdict, preferring the filesystem to the transcript.
+
+    `since` scopes "is there a plan" to this run — see `find_plan`.
+    """
+    plan_path = find_plan(worktree, since=since)
     if plan_path:
         return {"outcome": "plan_written", "plan_path": str(plan_path),
                 "questions": [], "reason": f"plan at {plan_path}"}
@@ -340,6 +376,9 @@ def run_plan_stage(worktree: str, task: Dict, context: str = "",
                    timeout: int = PLAN_TIMEOUT, model: str = "") -> Dict:
     """Plan in `worktree` as its own process. Assumes the GSD project exists."""
     transcript = _transcript_path(task["id"], "plan")
+    # Stamped before the run so only a plan this run wrote can count. One second of
+    # slack absorbs filesystem timestamp granularity.
+    since = time.time() - 1
     run = _run_claude(worktree, build_prompt(task, context), transcript, timeout, model)
 
     if run["failed"]:
@@ -351,7 +390,8 @@ def run_plan_stage(worktree: str, task: Dict, context: str = "",
         # throwing either away because the process overran would repeat the failure
         # this whole stage replaces.
         verdict = classify(worktree, run["output"],
-                           None if run["timed_out"] else run["returncode"])
+                           None if run["timed_out"] else run["returncode"],
+                           since=since)
         if run["timed_out"] and verdict["outcome"] == "error":
             verdict["reason"] = f"planning timed out after {timeout}s"
 

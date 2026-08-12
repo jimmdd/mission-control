@@ -789,9 +789,11 @@ function openThread(qid) {
   const thread = document.createElement("div");
   thread.className = "qthread";
   thread.dataset.thread = qid;
+  // esc() like every other id site: ids come from planner-emitted JSON, so a quote
+  // in one would break out of the attribute.
   thread.innerHTML = `<div class="qask">
-    <input type="text" data-ask="${qid}" placeholder="Ask about this…">
-    <button class="qout" data-act="ask" data-q="${qid}">Send</button>
+    <input type="text" data-ask="${esc(qid)}" placeholder="Ask about this…">
+    <button class="qout" data-act="ask" data-q="${esc(qid)}">Send</button>
   </div>`;
   box.querySelector(".qouts")?.before(thread);
   thread.querySelector("input")?.focus();

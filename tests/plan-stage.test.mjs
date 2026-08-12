@@ -380,3 +380,50 @@ bridge.find_repo_path = explode
   assert.equal(r.proceed, true);
   assert.deepEqual(r.metrics, []);
 });
+
+// ─────────── found by review, not by running ───────────
+
+test("a plan from an earlier run is not claimed as this run's", () => {
+  // .planning/ is tracked, so the second ticket in a GSD repo starts from a
+  // checkout that already holds a prior phase's plan — and the planning worktree
+  // is reused, so a retry starts with the previous attempt's. Without a floor the
+  // verdict is plan_written whatever this run did.
+  const dir = worktree({ planning: true, planText: "<task>someone else's work</task>" });
+  try {
+    const future = python(`
+import json, time, plan_stage
+print(json.dumps({"found": plan_stage.find_plan(${JSON.stringify(dir)}, since=time.time() + 60) is not None,
+                  "unscoped": plan_stage.find_plan(${JSON.stringify(dir)}) is not None}))
+`);
+    assert.equal(future.found, false, "a plan older than the run does not count");
+    assert.equal(future.unscoped, true, "…but it is still found when nothing is scoped");
+  } finally { rmSync(dir, { recursive: true, force: true }); }
+});
+
+test("a stale plan no longer swallows the question this run raised", () => {
+  const dir = worktree({ planning: true, planText: "<task>old</task>" });
+  try {
+    const v = python(`
+import json, time, plan_stage
+out = '<mc-questions>[{"question": "Which licence?"}]</mc-questions>'
+print(json.dumps(plan_stage.classify(${JSON.stringify(dir)}, out, 0, since=time.time() + 60)))
+`);
+    // A plan outranks a question, so an unscoped match discarded it silently.
+    assert.equal(v.outcome, "questions_raised");
+  } finally { rmSync(dir, { recursive: true, force: true }); }
+});
+
+test("a different question in a later round gets a different id", () => {
+  const r = python(`
+import json, plan_stage
+first = plan_stage.parse_questions('<mc-questions>[{"question": "Which font licence?"}]</mc-questions>')
+second = plan_stage.parse_questions('<mc-questions>[{"question": "What page size?"}]</mc-questions>')
+same = plan_stage.parse_questions('<mc-questions>[{"question": "which   FONT licence?"}]</mc-questions>')
+print(json.dumps({"first": first[0]["id"], "second": second[0]["id"], "same": same[0]["id"]}))
+`);
+  // Positional ids meant round two's question inherited round one's answer: it read
+  // as settled, reached nobody, and went to the planner as a binding decision.
+  assert.notEqual(r.first, r.second);
+  // The same question re-asked is the same question, and still collapses onto its answer.
+  assert.equal(r.first, r.same);
+});

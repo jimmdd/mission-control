@@ -131,3 +131,66 @@ test("the summary separates what blocks from what was set aside", () => {
   // b, d and e block; the answered one and the deferred one do not.
   assert.equal(s.blocking, 3);
 });
+
+// ─────────── found by review, not by running ───────────
+
+test("state kept beside the questions survives a new round", () => {
+  // The questions merged, but post_planning_questions still rebuilt the dict around
+  // them field by field. Losing `confirmed` parked a task at "answered but not
+  // confirmed" forever; losing `resume_log` reset the loop guard so it could never
+  // trip; losing `promotion` made a promoted investigation undispatchable.
+  const program = `
+import json, sys
+sys.path.insert(0, ${JSON.stringify(SWARM)})
+import bridge
+
+existing = {
+    "confirmed": True,
+    "resume_log": [{"at": "t", "question_ids": ["p1"]}],
+    "promotion": {"mode": "implementation"},
+    "questions": [{"id": "q1", "question": "a", "answer": "settled"}],
+    "created_at": "first",
+    "triage_repos": [{"project": "p", "repo": "r"}],
+}
+put = {}
+def fake_request(method, path, body=None):
+    if method == "GET":
+        return existing
+    put.update(body or {})
+    return {}
+bridge.mc_request = fake_request
+bridge.mc_log_activity = lambda *a, **k: None
+
+bridge.post_planning_questions("t1", [{"id": "q2", "question": "b"}])
+print(json.dumps({
+    "confirmed": put.get("confirmed"),
+    "resume_log": len(put.get("resume_log") or []),
+    "promotion": bool(put.get("promotion")),
+    "created_at": put.get("created_at"),
+    "repos": len(put.get("triage_repos") or []),
+    "ids": sorted(q["id"] for q in put.get("questions") or []),
+    "q1_answer": next((q.get("answer") for q in put["questions"] if q["id"] == "q1"), None),
+}))
+`;
+  const r = JSON.parse(execFileSync("python3", ["-c", program], {
+    encoding: "utf8", stdio: ["ignore", "pipe", "ignore"],
+  }));
+
+  assert.equal(r.confirmed, true, "a confirmed task does not un-confirm itself");
+  assert.equal(r.resume_log, 1, "the loop guard keeps its history");
+  assert.equal(r.promotion, true, "a promoted investigation stays promoted");
+  assert.equal(r.created_at, "first", "the original creation time is not reset");
+  assert.equal(r.repos, 1, "the repos already chosen are kept");
+  assert.deepEqual(r.ids, ["q1", "q2"]);
+  assert.equal(r.q1_answer, "settled");
+});
+
+test("a settled question stops costing a model call for its old thread", () => {
+  // Its thread ends on a human message forever, so it was re-answered every tick.
+  const qs = [
+    q({ id: "answered", answer: "yes", thread: [{ role: "you", text: "?" }] }),
+    q({ id: "deferred", deferred: true, thread: [{ role: "you", text: "?" }] }),
+    q({ id: "open", thread: [{ role: "you", text: "?" }] }),
+  ];
+  assert.deepEqual(call("awaiting_reply", [qs]).map((x) => x.id), ["open"]);
+});

@@ -135,9 +135,16 @@ def all_settled(questions: List[Dict]) -> bool:
 
 
 def awaiting_reply(questions: List[Dict]) -> List[Dict]:
-    """Questions whose thread ends on a message from the human — our turn to answer."""
+    """Questions whose thread ends on a message from the human — our turn to answer.
+
+    Settled and set-aside questions are excluded. Their threads still end on a human
+    message forever, so including them meant paying for a deep-model call on every
+    tick to answer a conversation nobody is waiting on.
+    """
     out = []
     for q in questions or []:
+        if is_answered(q) or q.get("deferred"):
+            continue
         thread = q.get("thread") or []
         if thread and thread[-1].get("role") == "you":
             out.append(q)
