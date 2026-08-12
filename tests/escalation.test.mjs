@@ -216,3 +216,60 @@ print(json.dumps(bridge._gate_check_enabled()))
   assert.equal(on, true);
   assert.equal(off, false);
 });
+
+// "Do not publish this work" had no expression: draft-vs-ready was the only PR
+// control, and every agent prompt ends by telling the agent to push and open a PR.
+// Relying on a broken push URL to stop that is luck, not a control.
+
+test("no-PR mode is recognised from environment, config, triage state, or description", () => {
+  const verdicts = python(`
+import json, os, bridge
+cases = {}
+cases["default"] = bridge._pr_is_disabled({"description": "normal ticket"})
+cases["description"] = bridge._pr_is_disabled({"description": "do the thing\\nPR: none\\n"})
+cases["no_pr_line"] = bridge._pr_is_disabled({"description": "No PR"})
+cases["triage_state"] = bridge._pr_is_disabled({"triage_state": json.dumps({"no_pr": True})})
+os.environ["MC_NO_PR"] = "1"
+cases["from_environment"] = bridge._pr_is_disabled({"description": "normal ticket"})
+del os.environ["MC_NO_PR"]
+print(json.dumps(cases))
+`, LADDER);
+  assert.equal(verdicts.default, false);
+  assert.equal(verdicts.description, true);
+  assert.equal(verdicts.no_pr_line, true);
+  assert.equal(verdicts.triage_state, true);
+  assert.equal(verdicts.from_environment, true);
+});
+
+test("a no-PR prompt forbids push and overrides the earlier PR instruction", () => {
+  const prompt = python(`
+import json, pathlib, tempfile, bridge
+bridge.SWARM_DIR = pathlib.Path(tempfile.mkdtemp())
+bridge.subprocess = type("S", (), {
+    "run": staticmethod(lambda *a, **k: type("R", (), {"returncode": 0, "stdout": "", "stderr": ""})()),
+    "TimeoutExpired": Exception, "DEVNULL": None,
+})
+bridge.detect_base_branch = lambda p: "origin/main"
+bridge.spawn_agent("t", "lbl", pathlib.Path("/tmp"), "BODY", no_pr=True)
+print(json.dumps((bridge.SWARM_DIR / "prompts" / "lbl.md").read_text()))
+`, LADDER);
+  assert.match(prompt, /Do not run `git push`/);
+  assert.match(prompt, /Do not run `gh pr create`/);
+  // The body may still carry a PR step; the footer has to win explicitly.
+  assert.match(prompt, /this section overrides it/);
+});
+
+test("normal mode still instructs a draft PR against the right base", () => {
+  const prompt = python(`
+import json, pathlib, tempfile, bridge
+bridge.SWARM_DIR = pathlib.Path(tempfile.mkdtemp())
+bridge.subprocess = type("S", (), {
+    "run": staticmethod(lambda *a, **k: type("R", (), {"returncode": 0, "stdout": "", "stderr": ""})()),
+    "TimeoutExpired": Exception, "DEVNULL": None,
+})
+bridge.spawn_agent("t", "lbl", pathlib.Path("/tmp"), "BODY", base_branch="origin/coda/new-ui", draft_pr=True)
+print(json.dumps((bridge.SWARM_DIR / "prompts" / "lbl.md").read_text()))
+`, LADDER);
+  assert.match(prompt, /gh pr create --draft --base coda\/new-ui/);
+  assert.doesNotMatch(prompt, /Do not run `git push`/);
+});

@@ -1259,12 +1259,15 @@ Read the output. If VERDICT is FAIL:
 4. Re-run pre-review.sh after fixes
 5. Maximum 3 review iterations. If still failing after 3, escalate to human (see below).
 
-### Step 7: PR + Report
+### Step 7: {"Finish + Report" if _pr_is_disabled(task) else "PR + Report"}
 Only when GSD verification passes AND review passes (or max iterations reached):
 1. Commit all changes with conventional commit messages
-2. Push your branch
+{'''2. Do NOT push, and do NOT open a pull request. This work stays local — leave it
+   committed on your branch in the worktree. Pushing or opening a PR publishes work
+   the owner has explicitly asked to keep unpublished.
+3. Report completion to Mission Control:''' if _pr_is_disabled(task) else f'''2. Push your branch
 3. Create a PR with `gh pr create` — title MUST start with `[{_task_ref(task)}]`
-4. Report completion to Mission Control:
+4. Report completion to Mission Control:'''}
    curl -X POST {MC_BASE_URL}/api/webhooks/agent-completion \\
      -H "Content-Type: application/json" \\
      -d '{{"task_id": "{task['id']}", "summary": "YOUR_SUMMARY_HERE"}}'
@@ -2181,6 +2184,31 @@ def _video_context(task_id: str, description: str) -> str:
     return ""
 
 
+def _pr_is_disabled(task: dict) -> bool:
+    """True when agents must not push or open a pull request for this task.
+
+    Draft-vs-ready was the only PR control, so "do not publish this work" could not be
+    expressed at all — every agent prompt ends by telling it to push and open a PR.
+    Relying on a broken push URL to stop that is luck, not a control.
+
+    Sources: MC_NO_PR=1 for a whole run, `no_pr` in the planner config, triage_state
+    `no_pr: true`, or a 'PR: none' / 'No PR' line in the description for one task.
+    """
+    if os.environ.get("MC_NO_PR", "") == "1":
+        return True
+    if bool(get_planner_config().get("no_pr", False)):
+        return True
+    try:
+        raw = task.get("triage_state")
+        state = json.loads(raw) if isinstance(raw, str) and raw.strip() else (raw if isinstance(raw, dict) else {})
+        if (state or {}).get("no_pr") is True:
+            return True
+    except Exception:
+        pass
+    import re as _re
+    return bool(_re.search(r"(?im)^\s*(pr\s*:\s*none|no\s+pr)\s*$", task.get("description", "") or ""))
+
+
 def _pr_is_draft(task: dict) -> bool:
     """Agent PRs default to DRAFT (a human marks them ready after review). Override to
     a ready PR via triage_state.pr_ready=true, or a 'PR: ready' line in the description."""
@@ -2230,7 +2258,7 @@ _SPAWN_EXIT_AT_CAPACITY = 3
 
 def spawn_agent(task_id: str, task_label: str, repo_path: Path, prompt_content: str,
                 agent_type: str = "claude", mc_task_id: str = "", base_branch: str = "",
-                task_title: str = "", draft_pr: bool = True):
+                task_title: str = "", draft_pr: bool = True, no_pr: bool = False):
     """Spawn an agent. Returns True, AT_CAPACITY (no free slot), or False (failed)."""
     # task_label becomes a git branch, worktree dir, tmux session, and prompt filename —
     # a "/" or space in it crashes the spawn (e.g. a prompt path with a phantom subdir).
@@ -2252,13 +2280,23 @@ def spawn_agent(task_id: str, task_label: str, repo_path: Path, prompt_content: 
     prompt_dir = SWARM_DIR / "prompts"
     prompt_dir.mkdir(parents=True, exist_ok=True)
     prompt_file = prompt_dir / f"{task_label}.md"
-    prompt_file.write_text(
-        prompt_content
-        + f"\n\n---\n## Branch & PR target\n"
-        f"Your work is based on `{pr_base}`. When you open the pull request, it MUST "
-        f"target that branch. {draft_note}"
-        f"\n```\ngh pr create {draft_flag}--base {pr_base} --title \"[...] ...\" --body \"...\"\n```\n"
-    )
+    if no_pr:
+        footer = (
+            f"\n\n---\n## Branch — do NOT publish\n"
+            f"Your work is based on `{pr_base}`. Commit to your branch and stop there.\n\n"
+            f"**Do not run `git push`. Do not run `gh pr create`.** This task is explicitly "
+            f"marked no-PR: the work stays local for review on this machine. Ignore any "
+            f"instruction elsewhere in this prompt that tells you to push or open a pull "
+            f"request — this section overrides it.\n"
+        )
+    else:
+        footer = (
+            f"\n\n---\n## Branch & PR target\n"
+            f"Your work is based on `{pr_base}`. When you open the pull request, it MUST "
+            f"target that branch. {draft_note}"
+            f"\n```\ngh pr create {draft_flag}--base {pr_base} --title \"[...] ...\" --body \"...\"\n```\n"
+        )
+    prompt_file.write_text(prompt_content + footer)
 
     env = os.environ.copy()
     env["MC_TASK_ID"] = mc_task_id or task_id
@@ -2676,7 +2714,8 @@ def _spawn_for_repos(task: dict, repos: List[dict]):
         task_label = f"{_task_ref(task)}-inv-{repo}"
 
         outcome = spawn_agent(task_id, task_label, repo_path, prompt, mc_task_id=task_id, task_title=title,
-                              base_branch=_resolve_base_branch(task, repo_path), draft_pr=_pr_is_draft(task))
+                              base_branch=_resolve_base_branch(task, repo_path), draft_pr=_pr_is_draft(task),
+                              no_pr=_pr_is_disabled(task))
         if outcome:
             mc_update_task(task_id, {"status": "in_progress"})
             mc_log_activity(task_id, "spawned", f"Investigation agent spawned for {project}/{repo}")
@@ -2699,7 +2738,8 @@ def _spawn_for_repos(task: dict, repos: List[dict]):
         task_label = f"{_task_ref(task)}-{repo}"
 
         outcome = spawn_agent(task_id, task_label, repo_path, prompt, mc_task_id=task_id, task_title=title,
-                              base_branch=_resolve_base_branch(task, repo_path), draft_pr=_pr_is_draft(task))
+                              base_branch=_resolve_base_branch(task, repo_path), draft_pr=_pr_is_draft(task),
+                              no_pr=_pr_is_disabled(task))
         if outcome:
             mc_update_task(task_id, {"status": "in_progress"})
             mc_log_activity(task_id, "spawned", f"Agent spawned for {project}/{repo}")
@@ -2738,7 +2778,7 @@ def _spawn_for_repos(task: dict, repos: List[dict]):
                                      sibling_contexts=sibling_contexts, knowledge=knowledge)
             task_label = f"{_task_ref(child)}-{repo}"
 
-            outcome = spawn_agent(child_id, task_label, repo_path, prompt, mc_task_id=child_id, task_title=title)
+            outcome = spawn_agent(child_id, task_label, repo_path, prompt, mc_task_id=child_id, task_title=title, no_pr=_pr_is_disabled(task))
             if outcome:
                 mc_update_task(child_id, {"status": "in_progress"})
                 mc_log_activity(child_id, "spawned", f"Agent spawned for {project}/{repo}")
@@ -2973,7 +3013,8 @@ def _dispatch_next_steps(task: dict, plan: dict, repos: List[dict]):
 
         outcome = spawn_agent(task_id, task_label, target_repo, prompt,
                               agent_type=agent_type, mc_task_id=task_id, task_title=title,
-                              base_branch=step_base_branch, draft_pr=_pr_is_draft(task))
+                              base_branch=step_base_branch, draft_pr=_pr_is_draft(task),
+                              no_pr=_pr_is_disabled(task))
         if outcome:
             mc_update_task(task_id, {"status": "in_progress"})
             mc_log_activity(
