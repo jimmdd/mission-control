@@ -120,3 +120,44 @@ print(json.dumps({"ok": ok, "why": why}))
   assert.equal(JSON.parse(out).ok, true);
   rmSync(dir, { recursive: true, force: true });
 });
+
+// /gsd-plan-phase cannot plan into a repo with no .planning/ — it stops and asks for
+// /gsd-new-project. MC only offered that for repos it judged greenfield, so an
+// established repo with no GSD project fell between the two cases. An agent holding a
+// complete mission description then built the thing rather than relaying the question,
+// which is exactly what happened twice on a real ticket.
+
+test("the plan sequence is decided by project state, not by guessing greenfield", () => {
+  const bare = mkdtempSync(join(tmpdir(), "mc-gsd-bare-"));
+  const ready = mkdtempSync(join(tmpdir(), "mc-gsd-ready-"));
+  mkdirSync(join(ready, ".planning"), { recursive: true });
+
+  const seq = cwd => JSON.parse(execFileSync("python3", ["-c", `
+import json, sys
+sys.path.insert(0, ${JSON.stringify(SWARM)})
+import gsd_backend as g
+print(json.dumps(g.plan_sequence(${JSON.stringify(cwd)})))
+`], { encoding: "utf8", stdio: ["ignore", "pipe", "ignore"] }));
+
+  assert.deepEqual(seq(bare), ["/gsd-new-project --auto", "/gsd-plan-phase --prd"],
+    "an uninitialised repo must be initialised before a phase can be planned into it");
+  assert.deepEqual(seq(ready), ["/gsd-plan-phase --prd"],
+    "an initialised repo must not be re-initialised");
+
+  rmSync(bare, { recursive: true, force: true });
+  rmSync(ready, { recursive: true, force: true });
+});
+
+test("the prompt states the precondition rather than assuming it", () => {
+  const text = execFileSync("python3", ["-c", `
+import sys
+sys.path.insert(0, ${JSON.stringify(SWARM)})
+import gsd_backend as g
+print(g.plan_step_text())
+`], { encoding: "utf8", stdio: ["ignore", "pipe", "ignore"] });
+
+  assert.match(text, /\.planning/, "the agent has to know what to check for");
+  assert.match(text, /gsd-new-project/, "and what to run when it is missing");
+  // The observed failure was skipping ahead to code when planning could not proceed.
+  assert.match(text, /must not\s+skip ahead to writing code/);
+});

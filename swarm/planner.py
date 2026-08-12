@@ -33,6 +33,7 @@ from gsd_backend import (
     execute_command as gsd_execute_command,
     gap_plan_command as gsd_gap_plan_command,
     plan_command as gsd_plan_command,
+    plan_step_text as gsd_plan_step_text,
     verify_command as gsd_verify_command,
 )
 
@@ -954,6 +955,7 @@ Use this context to understand what has already been done. Your branch includes 
     gsd_name = backend_label()
     gsd_plan = gsd_plan_command()
     gsd_new_project = gsd_plan_command(greenfield=True)
+    gsd_plan_step = gsd_plan_step_text()
     gsd_execute = gsd_execute_command()
     gsd_verify = gsd_verify_command()
     gsd_gap = gsd_gap_plan_command()
@@ -966,7 +968,7 @@ Use this context to understand what has already been done. Your branch includes 
 You MUST follow this exact workflow. Do NOT skip steps. Do NOT write code before planning.
 
 ### Step 1: Plan
-Run `{gsd_plan}` (or `{gsd_new_project}` for greenfield).
+{gsd_plan_step}
 This creates PLAN.md with task breakdown, must-haves, and verification criteria.
 Your GSD plan MUST target these acceptance criteria — they are your definition of done.
 
@@ -1001,7 +1003,7 @@ Do NOT create a PR until all checks pass.
 You MUST follow this exact workflow. Do NOT skip steps. Do NOT write code before planning.
 
 ### Step 1: Plan
-Run `{gsd_plan}` (or `{gsd_new_project}` for greenfield).
+{gsd_plan_step}
 This creates PLAN.md with task breakdown, must-haves, and verification criteria.
 Your GSD plan MUST target these acceptance criteria — they are your definition of done.
 

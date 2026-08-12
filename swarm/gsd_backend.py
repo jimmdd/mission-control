@@ -55,6 +55,51 @@ def plan_command(greenfield: bool = False) -> str:
     return "/gsd-plan-phase --prd"
 
 
+def project_initialised(cwd: str) -> bool:
+    """Does this repo already have a GSD project to plan a phase into?"""
+    return (Path(cwd) / planning_dir_name()).is_dir()
+
+
+def init_command() -> str:
+    """Create the GSD project a phase plan needs to land in.
+
+    `/gsd-plan-phase` cannot plan into a repo with no `.planning/` — it stops and asks
+    for `/gsd-new-project` first. Mission Control only offered that for repos it judged
+    greenfield, so an established repo with no GSD project fell between the two: the
+    plan step could not proceed, and an agent handed a complete mission description
+    simply built the thing instead of stopping to say so.
+    """
+    ensure_supported_backend()
+    return "/gsd-new-project --auto"
+
+
+def plan_step_text() -> str:
+    """The Plan step, written so the agent handles an uninitialised project itself.
+
+    The worktree does not exist when the prompt is built, so the sequence cannot be
+    decided ahead of time — but the agent can check one directory. Stating the
+    precondition is what was missing: `/gsd-plan-phase` stops and asks for
+    `/gsd-new-project` when there is no `.planning/`, and an agent holding a complete
+    mission description will build the thing instead of relaying that question.
+    """
+    ensure_supported_backend()
+    return (
+        f"First check whether this repo has a GSD project: `ls -d {planning_dir_name()} 2>/dev/null`.\n"
+        f"- If it is MISSING, run `{init_command()}` first. `{plan_command()}` cannot plan into a\n"
+        f"  repo with no {planning_dir_name()}/ — it will stop and ask for this, and you must not\n"
+        f"  skip ahead to writing code when that happens.\n"
+        f"- Then run `{plan_command()}`."
+    )
+
+
+def plan_sequence(cwd: str) -> list:
+    """Commands to get from this repo's current state to a phase plan."""
+    ensure_supported_backend()
+    if project_initialised(cwd):
+        return [plan_command()]
+    return [init_command(), plan_command()]
+
+
 def gap_plan_command() -> str:
     ensure_supported_backend()
     return "/gsd-plan-phase --gaps"

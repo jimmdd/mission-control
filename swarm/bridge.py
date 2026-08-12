@@ -45,6 +45,7 @@ from gsd_backend import (
     gap_plan_command as gsd_gap_plan_command,
     planning_dir_name as gsd_planning_dir_name,
     plan_command as gsd_plan_command,
+    plan_step_text as gsd_plan_step_text,
     verify_command as gsd_verify_command,
     workflow_ran as gsd_workflow_ran,
 )
@@ -1261,6 +1262,7 @@ def generate_prompt(task: dict, repo_context: str, project: str, repo: str,
     gsd_execute = gsd_execute_command()
     gsd_verify = gsd_verify_command()
     gsd_gap = gsd_gap_plan_command()
+    gsd_plan_step = gsd_plan_step_text()
 
     prompt += f"""
 ## Mandatory Workflow ({gsd_name} + Review Loop)
@@ -1269,7 +1271,7 @@ You MUST follow this exact workflow. Do NOT skip steps. Do NOT write code before
 The loop continues until both GSD verification AND code review pass.
 
 ### Step 1: Plan
-Run `{gsd_plan}` (or `{gsd_new_project}` for greenfield).
+{gsd_plan_step}
 This creates PLAN.md with task breakdown, must-haves, and verification criteria.
 The plan-checker agent runs automatically to validate your plan before execution.
 If plan-checker finds blockers, fix them before proceeding.
