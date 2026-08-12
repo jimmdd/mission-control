@@ -305,6 +305,6 @@ test("the canvas grows to fit its decisions instead of clipping them", () => {
   const tops = [...svg.matchAll(/<rect[^>]*y="(-?\d+)"/g)].map(m => Number(m[1]));
   assert.ok(Math.min(...tops) >= 0, "no node may start above the canvas");
 
-  // Nine locked decisions would dwarf a one-step plan, so the column is capped.
-  assert.match(svg, /\+4 more, listed above/);
+  // Every decision is drawn — a placeholder saying "+N more" explained nothing.
+  assert.equal((svg.match(/class="dec /g) || []).length, 9);
 });

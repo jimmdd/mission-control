@@ -112,6 +112,8 @@
   .tk-labels .n { font-size: 12px; color: var(--ink-3); }
   .tk-labels .done .n { color: var(--ink-2); }
   .tk-labels .now .n { color: var(--cyan); font-weight: 600; }
+  .tk-labels .t { font-family: var(--mono); font-size: 10px; color: var(--ink-3); opacity: .75; }
+  .tk-labels .now .t { color: var(--cyan); opacity: 1; }
 
   /* ─────────── cards ─────────── */
   .card { background: var(--card); border: 1px solid var(--line); border-radius: 14px; padding: 20px 22px; box-shadow: var(--shadow); margin-top: 20px; }
@@ -280,7 +282,37 @@ function parseTriage(task) {
 
 const pick = (re, s) => (re.exec(s || "") || [])[1] || "";
 
-function renderTicket(task, triage) {
+/** Activity types that mark a leg being reached, newest write wins. */
+const LEG_MARKERS = {
+  triage: [/triage/i, /clarification/i, /planning_questions/i],
+  plan:   [/plan_created/i, /execution plan/i],
+  build:  [/step_dispatched/i, /spawned/i],
+  review: [/review/i],
+  done:   [/completed successfully/i, /merged/i],
+};
+
+function legTimes(task, activities) {
+  const t = { intake: task.created_at };
+  for (const a of activities || []) {
+    const hay = `${a.activity_type || ""} ${a.message || ""}`;
+    for (const [leg, pats] of Object.entries(LEG_MARKERS)) {
+      if (!t[leg] && pats.some(p => p.test(hay))) t[leg] = a.created_at;
+    }
+  }
+  return t;
+}
+
+const shortTime = iso => {
+  if (!iso) return "";
+  const d = new Date(iso);
+  if (isNaN(d)) return "";
+  const today = new Date().toDateString() === d.toDateString();
+  return today
+    ? d.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })
+    : d.toLocaleDateString([], { month: "short", day: "numeric" });
+};
+
+function renderTicket(task, triage, activities) {
   const legIndex = Math.max(0, LEGS.findIndex(l => l.statuses.includes(task.status)));
   const finished = legIndex >= LEGS.length - 1;
   // Knob sits at the centre of the current leg's slice.
@@ -296,8 +328,13 @@ function renderTicket(task, triage) {
 
   const ticks = LEGS.map((_, i) => i === 0 ? "" :
     `<div class="tk-tick" style="left:${(i / LEGS.length) * 100}%"></div>`).join("");
-  const labels = LEGS.map((l, i) =>
-    `<span class="${i < legIndex ? "done" : i === legIndex ? "now" : ""}"><span class="n">${esc(l.label)}</span></span>`).join("");
+  const times = legTimes(task, activities);
+  const labels = LEGS.map((l, i) => {
+    const stamp = shortTime(times[l.label.toLowerCase()]);
+    return `<span class="${i < legIndex ? "done" : i === legIndex ? "now" : ""}">
+      <span class="n">${esc(l.label)}</span>
+      ${stamp ? `<span class="t">${esc(stamp)}</span>` : ""}</span>`;
+  }).join("");
 
   return `
     <div class="ticket">
@@ -331,9 +368,10 @@ function renderTicket(task, triage) {
 
 /* ─────────── the plan, as a map ─────────── */
 
-const BOX_W = 208, BOX_H = 74, GAP_Y = 20, GAP_X = 74, PAD = 14, DEC_H = 46;
-// Beyond this the decisions column dwarfs the work; the rest stay in the list above.
-const MAX_DEC = 5;
+const BOX_W = 208, BOX_H = 74, GAP_Y = 20, GAP_X = 74, PAD = 14;
+// Decisions are one line each: a locked decision needs to be identifiable, not read
+// in full — the collapsed list above has the wording.
+const DEC_H = 30, DEC_GAP = 8;
 
 function planMap(plan, progress, triage) {
   const stepById = Object.fromEntries(plan.steps.map(s => [s.step, s]));
@@ -349,14 +387,14 @@ function planMap(plan, progress, triage) {
   // Every column is laid out at (height + GAP_Y) per node, so the canvas must be
   // measured the same way — reserving less clipped the decisions column top and bottom
   // as soon as answered questions accumulated.
-  const decShown = Math.min(decisions.length, MAX_DEC);
   const tallest = Math.max(
-    decShown * (DEC_H + GAP_Y) + (decisions.length > MAX_DEC ? DEC_H + GAP_Y : 0),
+    decisions.length * (DEC_H + DEC_GAP),
     ...rounds.map(g => g.length * (BOX_H + GAP_Y)));
   const height = PAD * 2 + 26 + tallest;
   const width = PAD * 2 + cols.length * BOX_W + (cols.length - 1) * GAP_X;
 
-  const centre = (n, count, h) => PAD + 26 + (tallest - count * (h + GAP_Y)) / 2 + n * (h + GAP_Y);
+  const centre = (n, count, h, gap = GAP_Y) =>
+    PAD + 26 + (tallest - count * (h + gap)) / 2 + n * (h + gap);
   const pos = {};
   const parts = [];
   const hasDec = decisions.length > 0;
@@ -365,26 +403,18 @@ function planMap(plan, progress, triage) {
   if (hasDec) {
     const x = colX(0);
     parts.push(`<text class="clab" x="${x}" y="${PAD + 12}">DECISIONS</text>`);
-    decisions.slice(0, MAX_DEC).forEach((q, i) => {
-      const y = centre(i, decShown + (decisions.length > MAX_DEC ? 1 : 0), DEC_H);
+    decisions.forEach((q, i) => {
+      const y = centre(i, decisions.length, DEC_H, DEC_GAP);
       pos[`d${i}`] = { x, y, w: BOX_W, h: DEC_H };
       const set = !!q.answer;
       const label = set ? (q.answer || "") : q.question;
       parts.push(`
         <g class="dec ${set ? "set" : "open"}">
           <rect x="${x}" y="${y}" width="${BOX_W}" height="${DEC_H}" rx="9"/>
-          <text class="dt" x="${x + 12}" y="${y + 18}">D-${String(i + 1).padStart(2, "0")}</text>
-          <text class="ds" x="${x + 12}" y="${y + 34}">${esc(clip(label, 30))}</text>
+          <text class="dt" x="${x + 11}" y="${y + 19}">D-${String(i + 1).padStart(2, "0")}</text>
+          <text class="ds" x="${x + 44}" y="${y + 19}">${esc(clip(label, 22))}</text>
         </g>`);
     });
-    if (decisions.length > MAX_DEC) {
-      const y = centre(MAX_DEC, decShown + 1, DEC_H);
-      parts.push(`
-        <g class="dec set">
-          <rect x="${x}" y="${y}" width="${BOX_W}" height="${DEC_H}" rx="9"/>
-          <text class="ds" x="${x + 12}" y="${y + 28}">+${decisions.length - MAX_DEC} more, listed above</text>
-        </g>`);
-    }
   }
 
   // Rounds
@@ -423,14 +453,6 @@ function planMap(plan, progress, triage) {
             <text class="ctext" x="${x + 18}" y="${y + 61}">✓ ${esc(clip(check.split("&&")[0].trim(), 22))}</text>` : ""}
         </g>`);
     });
-    if (decisions.length > MAX_DEC) {
-      const y = centre(MAX_DEC, decShown + 1, DEC_H);
-      parts.push(`
-        <g class="dec set">
-          <rect x="${x}" y="${y}" width="${BOX_W}" height="${DEC_H}" rx="9"/>
-          <text class="ds" x="${x + 12}" y="${y + 28}">+${decisions.length - MAX_DEC} more, listed above</text>
-        </g>`);
-    }
   });
 
   // Edges: step → step from declared dependencies, decisions → the roots.
@@ -645,6 +667,8 @@ async function load() {
   try {
     const task = await getJson(`/api/tasks/${encodeURIComponent(taskId)}`);
     const planData = await getJson(`/api/tasks/${encodeURIComponent(taskId)}/plan`).catch(() => ({}));
+    // Activity history is what dates the tracker; never let it hide the ticket.
+    const activities = await getJson(`/api/tasks/${encodeURIComponent(taskId)}/activities`).catch(() => []);
     const triage = parseTriage(task);
     const qs = (triage?.questions || []);
     // Settled = nothing left to answer, or the work has already moved past asking.
@@ -654,7 +678,7 @@ async function load() {
     // A follow-up outranks everything: planning is stopped until it is answered, and
     // nothing should be built before the plan exists.
     const fu = followUps(qs);
-    root.innerHTML = renderTicket(task, triage)
+    root.innerHTML = renderTicket(task, triage, activities)
       + (fu.length ? renderFollowUps(fu) : "")
       + (settled
         // Once the decisions are made the plan is the thing; they collapse above it.
