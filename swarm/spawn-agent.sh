@@ -167,6 +167,24 @@ git branch -D "$BRANCH_NAME" 2>/dev/null || true
 git worktree prune 2>/dev/null || true
 git worktree add "$WORKTREE_PATH" -b "$BRANCH_NAME" "$WORKTREE_BASE_REF"
 
+# A worktree carries tracked files only, so local `.env` config does not come with
+# it and anything that compiles or boots the app fails on missing environment —
+# which reads as the agent's work being broken. Mirror it in from the source clone.
+# Resolve through the symlink at $MC_HOME/swarm to reach the helper in the repo.
+SCRIPT_SRC="${BASH_SOURCE[0]}"
+while [ -L "$SCRIPT_SRC" ]; do
+  LINK_TARGET="$(readlink "$SCRIPT_SRC")"
+  case "$LINK_TARGET" in
+    /*) SCRIPT_SRC="$LINK_TARGET" ;;
+    *)  SCRIPT_SRC="$(dirname "$SCRIPT_SRC")/$LINK_TARGET" ;;
+  esac
+done
+SCRIPT_DIR="$(cd "$(dirname "$SCRIPT_SRC")" && pwd)"
+if [ -f "$SCRIPT_DIR/worktree_env.py" ]; then
+  python3 "$SCRIPT_DIR/worktree_env.py" "$REPO_PATH" "$WORKTREE_PATH" \
+    || echo "  warning: env seeding failed (agent may hit missing environment)"
+fi
+
 # Inject MCP config for code-review-graph (if venv exists)
 cd "$WORKTREE_PATH"
 CRG_BIN="$MC_HOME/venv-3.12/bin/code-review-graph"

@@ -49,6 +49,7 @@ from gsd_backend import (
     verify_command as gsd_verify_command,
     workflow_ran as gsd_workflow_ran,
 )
+from worktree_env import describe, install_dependencies, looks_unprepared, seed_worktree_env
 
 MC_HOME = Path(os.environ.get("MC_HOME", str(Path.home() / ".mission-control")))
 MC_BASE_URL = os.environ.get("MISSION_CONTROL_URL", "http://localhost:18900")
@@ -3207,9 +3208,25 @@ def validate_plan_gates(task: dict, plan: dict, repos: List[dict]) -> List[dict]
         logging.warning(f"  Could not create gate-check worktree at {base}: {e}")
         return []
 
+    # A worktree holds tracked files only, so it starts with no `.env`. Without this
+    # the probe reports every build gate as unusable and blames the base commit.
+    env_report = seed_worktree_env(str(repo_path), str(probe))
+    if describe(env_report):
+        logging.info(f"  Gate-check worktree env: {describe(env_report)}")
+
     try:
+        installed = False
         for cmd, steps in commands.items():
             result = check_verify_command_baseline(cmd, str(probe))
+            # A gate that fails because the tree was never set up is not evidence
+            # about the base commit. Pay for one install, once, and ask again —
+            # agent worktrees get the same treatment at spawn.
+            if not result["runnable"] and not installed and looks_unprepared(result):
+                installed = True
+                tool = install_dependencies(str(probe))
+                if tool:
+                    logging.info(f"  Installed probe deps with {tool} — re-checking gate")
+                    result = check_verify_command_baseline(cmd, str(probe))
             if result["runnable"]:
                 logging.info(f"  Gate OK for steps {steps}")
             else:
