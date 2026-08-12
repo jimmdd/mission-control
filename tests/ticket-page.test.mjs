@@ -236,3 +236,32 @@ test("clicking a node yields full detail, since the node itself is truncated", (
   assert.match(svg, /class="nogsd-edge"/);
   assert.doesNotMatch(svg, /no GSD<\/text>/);
 });
+
+test("planner follow-ups lead the page and hide what is already answered", () => {
+  const html = readFileSync(new URL("../public/ticket.html", import.meta.url), "utf8");
+  const body = /<script>([\s\S]*)<\/script>/.exec(html)[1].split("// ---- BOOTSTRAP ----")[0];
+  const shim = `
+    const document = { querySelector: () => null, querySelectorAll: () => [], addEventListener: () => {} };
+    const location = { search: "" };
+    class URLSearchParams { get() { return "x"; } }
+  `;
+  const mod = new Function(`${shim}\n${body}\nreturn { followUps, renderFollowUps };`)();
+
+  const qs = [
+    { id: "t1", question: "Which app?", answer: "apps/new-ui", source: "triage" },
+    { id: "p1", question: "Self-host the font or use Adobe CDN?", source: "planner" },
+    { id: "p2", question: "Answered planner question", answer: "yes", source: "planner" },
+  ];
+  const open = mod.followUps(qs);
+  assert.equal(open.length, 1, "only unanswered planner questions are follow-ups");
+  assert.equal(open[0].id, "p1");
+
+  const out = mod.renderFollowUps(open);
+  assert.match(out, /Self-host the font/);
+  // Answered ones belong in the collapsed decisions list, not here.
+  assert.doesNotMatch(out, /Answered planner question/);
+  assert.doesNotMatch(out, /Which app\?/, "triage questions are not follow-ups");
+  // A follow-up means planning is stopped, and that has to be said, not implied.
+  assert.match(out, /plan cannot be written until these are settled/);
+  assert.match(out, /no code\s+should be written before the plan/);
+});

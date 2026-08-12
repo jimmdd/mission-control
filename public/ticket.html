@@ -227,6 +227,11 @@
   .dq { font-size: 13px; color: var(--ink-3); }
   .da { font-size: 13.5px; color: var(--ink); margin-top: 2px; }
 
+  /* Follow-ups are the one thing blocking progress, so they lead and they are loud. */
+  .card.fu { border-color: var(--amber-line); background: var(--amber-bg); }
+  .glab.hot { color: var(--amber); }
+  .fu-why { font-size: 13px; color: var(--ink-2); margin: 0 0 14px; max-width: 70ch; }
+  .card.fu .choice { background: var(--card); }
   .fitem { padding: 11px 0; border-bottom: 1px solid var(--line-soft); }
   .fitem:last-child { border-bottom: none; padding-bottom: 0; }
   .fitem:first-child { padding-top: 0; }
@@ -497,6 +502,33 @@ function renderFound(triage) {
   </div>`;
 }
 
+/** Questions raised by the planner, not by triage. Only the unanswered ones. */
+function followUps(qs) {
+  return qs.filter(q => !q.answer && (q.source === "planner" || q.round > 1));
+}
+
+function renderFollowUps(open) {
+  return `<div class="card fu">
+    <div class="glab hot">Follow-up questions — planning is waiting on these
+      <span class="gn">${open.length} open</span></div>
+    <p class="fu-why">The plan cannot be written until these are settled, and no code
+      should be written before the plan. Answering them resumes planning.</p>
+    ${open.map((q, i) => {
+      const head = `<div class="qhead"><span class="qnum">F${String(i + 1).padStart(2, "0")}</span>
+        <span class="qtext">${esc(q.question)}</span>
+        <span class="qfrom">${esc(q.category || "planner")}</span></div>`;
+      const choices = (q.options || []).map(o => `
+        <label class="choice"><input type="radio" name="q-${esc(q.id)}" value="${esc(o)}"><span>${esc(o)}</span></label>`).join("");
+      return `<div class="qbox">${head}<div class="choices">${choices}</div>
+        <textarea class="qadd" data-free="${esc(q.id)}" placeholder="Or answer in your own words."></textarea></div>`;
+    }).join("")}
+    <div class="footbar">
+      <button class="btn primary" id="submit" disabled>Submit answers</button>
+      <span class="why" id="hint">Answer all ${open.length} to resume planning.</span>
+    </div>
+  </div>`;
+}
+
 function renderSettled(qs) {
   return `<div class="qdone-wrap"><details class="settled">
     <summary><span class="sct">${qs.length} decisions locked</span>
@@ -538,7 +570,10 @@ function renderQuestions(triage) {
 function wireQuestions(triage) {
   const btn = $("#submit");
   if (!btn) return;
-  const open = (triage.questions || []).filter(q => !q.answer);
+  // Whatever is rendered unanswered is what the button gates on — follow-ups when
+  // planning is blocked, the original set otherwise.
+  const open = (triage.questions || []).filter(q =>
+    !q.answer && document.querySelector(`[data-free="${CSS.escape(q.id)}"]`));
   const answerFor = q => {
     const free = document.querySelector(`[data-free="${CSS.escape(q.id)}"]`);
     if (free && free.value.trim()) return free.value.trim();
@@ -594,13 +629,18 @@ async function load() {
     const settled = (qs.length > 0 && qs.every(q => q.answer))
       || ["assigned", "in_progress", "review", "in_review", "done", "completed", "merged"].includes(task.status);
 
-    root.innerHTML = renderTicket(task, triage) + (settled
-      // Once the decisions are made the plan is the thing; they collapse above it.
-      ? renderSettled(qs) + renderPlan(planData.plan, planData.progress, triage)
-      : `<div class="cols">${renderFound(triage)}${renderQuestions(triage)}</div>`
-        + renderPlan(planData.plan, planData.progress, triage));
+    // A follow-up outranks everything: planning is stopped until it is answered, and
+    // nothing should be built before the plan exists.
+    const fu = followUps(qs);
+    root.innerHTML = renderTicket(task, triage)
+      + (fu.length ? renderFollowUps(fu) : "")
+      + (settled
+        // Once the decisions are made the plan is the thing; they collapse above it.
+        ? renderSettled(qs.filter(q => q.answer)) + renderPlan(planData.plan, planData.progress, triage)
+        : `<div class="cols">${renderFound(triage)}${renderQuestions(triage)}</div>`
+          + renderPlan(planData.plan, planData.progress, triage));
 
-    if (triage && !settled) wireQuestions(triage);
+    if (triage && (fu.length || !settled)) wireQuestions(triage);
     wireGraph(planData.plan, planData.progress);
   } catch (e) {
     root.innerHTML = `<div class="err">Couldn't load this ticket: ${esc(e.message || e)}</div>`;
