@@ -261,6 +261,18 @@ The key idea is:
 }
 ```
 
+When a step fails its own `verify_command`, the retry runs on a stronger runtime
+rather than the same one. `planner.escalation_ladder` maps a starting profile to the
+profiles to climb through (`{"claude": ["claude", "codex"]}`); attempt N takes rung N,
+clamped to the last. Empty means the runtime never changes. A runtime that refuses on
+quota is not charged a retry — it moves to the next rung and tries again, since it never
+attempted the work.
+
+Every attempt appends a row to `$MC_HOME/bridge/metrics/step-attempts.jsonl`: outcome,
+attempt number, which runtime ran it, whether it was escalated, and the task's observable
+shape. First-try pass rate and escalation rate come from that file — see
+`docs/phase-0-measurement.md`.
+
 `maxAgents` limits one profile. `maxConcurrent` limits every profile at once — each
 agent is a worktree plus a CLI process, so the real limit is machine memory, and
 falling back to a second profile does not create more of it. `0` turns it off; a

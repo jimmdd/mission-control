@@ -64,12 +64,38 @@
     "max_step_retries": 2,
     "max_concurrent_agents": 0,
     "step_categories": {
-      "deep": { "agent": "claude", "description": "Complex implementation" },
-      "quick": { "agent": "pi", "description": "Simple, scoped change" },
-      "test": { "agent": "codex", "description": "Writing or fixing tests" },
-      "research": { "agent": "ollama-local", "description": "Investigation, no code changes" },
-      "review": { "agent": "codex", "description": "Code review or validation" }
-    }
+      "deep": {
+        "agent": "claude",
+        "description": "Complex implementation"
+      },
+      "quick": {
+        "agent": "pi",
+        "description": "Simple, scoped change"
+      },
+      "test": {
+        "agent": "codex",
+        "description": "Writing or fixing tests"
+      },
+      "research": {
+        "agent": "ollama-local",
+        "description": "Investigation, no code changes"
+      },
+      "review": {
+        "agent": "codex",
+        "description": "Code review or validation"
+      }
+    },
+    "escalation_ladder": {
+      "claude": [
+        "claude",
+        "codex"
+      ],
+      "codex": [
+        "codex",
+        "claude"
+      ]
+    },
+    "escalation_ladder_default": []
   },
   "defaultProject": "your-project",
   "ciAutoFix": {
@@ -81,7 +107,10 @@
     "reviewOnPush": true,
     "org": "YourOrg",
     "botUser": "your-bot-user",
-    "repos": ["repo-1", "repo-2"]
+    "repos": [
+      "repo-1",
+      "repo-2"
+    ]
   },
   "linear": {
     "enabled": true,

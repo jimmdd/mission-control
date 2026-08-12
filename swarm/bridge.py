@@ -2905,7 +2905,18 @@ def _dispatch_next_steps(task: dict, plan: dict, repos: List[dict]):
         )
 
         step_categories = get_planner_config()["step_categories"]
-        agent_type = step_categories.get(category, {}).get("agent", "claude")
+        base_profile = step_categories.get(category, {}).get("agent", "claude")
+
+        # Each retry climbs the ladder. A step that already failed its own check on
+        # one runtime has no reason to pass on a second identical attempt.
+        step_state = (load_progress(task_id) or {}).get("steps", {}).get(str(step_num), {})
+        attempt = int(step_state.get("retry_count", 0) or 0)
+        agent_type = _profile_for_attempt(base_profile, attempt)
+        if agent_type != base_profile:
+            logging.info(f"  Step {step_num} attempt {attempt + 1} — escalated {base_profile} → {agent_type}")
+            mc_log_activity(task_id, "step_escalated",
+                            f"Step {step_num} retrying on {agent_type} (was {base_profile}) — attempt {attempt + 1}")
+
         task_label = f"{_task_ref(task)}-s{step_num}-{target_repo_name}"
 
         # Determine base branch: if this step depends on a prior step in the same repo,
@@ -2929,6 +2940,10 @@ def _dispatch_next_steps(task: dict, plan: dict, repos: List[dict]):
             "started_at": datetime.now(timezone.utc).isoformat(),
             "category": category,
             "agent_id": task_label,
+            # Which runtime ran this attempt, so verification can attribute the
+            # result to it rather than to whatever the category maps to now.
+            "agent_profile": agent_type,
+            "base_profile": base_profile,
         })
 
         outcome = spawn_agent(task_id, task_label, target_repo, prompt,
@@ -2964,6 +2979,76 @@ def _dispatch_next_steps(task: dict, plan: dict, repos: List[dict]):
 def _step_verification_criteria(step: dict) -> list:
     criteria = step.get("acceptance_criteria", step.get("done_when", []))
     return criteria if isinstance(criteria, list) else []
+
+
+# Signals that a runtime refused the work for quota reasons rather than failing at
+# it. Retrying the same pool just burns the retry budget; the answer is a different
+# pool, which is the same mechanism escalation uses.
+_RATE_LIMIT_MARKERS = (
+    "rate limit", "rate_limit", "rate-limited", "429",
+    "quota exceeded", "usage limit", "too many requests",
+    "overloaded_error", "insufficient_quota",
+)
+
+
+def _looks_rate_limited(text: str) -> bool:
+    low = (text or "").lower()
+    return any(m in low for m in _RATE_LIMIT_MARKERS)
+
+
+def _escalation_ladder(base_profile: str) -> List[str]:
+    """Runtimes to try for a step, in order. First entry is the starting profile."""
+    cfg = get_planner_config()
+    ladders = cfg.get("escalation_ladder") or {}
+    ladder = ladders.get(base_profile) or cfg.get("escalation_ladder_default") or []
+    ladder = [p for p in ladder if isinstance(p, str) and p]
+    if not ladder:
+        return [base_profile]
+    # The ladder describes where to go, so the starting profile leads it either way.
+    return ladder if ladder[0] == base_profile else [base_profile] + ladder
+
+
+def _profile_for_attempt(base_profile: str, attempt: int) -> str:
+    """Profile for attempt N (0 = first try), clamped to the top of the ladder."""
+    ladder = _escalation_ladder(base_profile)
+    return ladder[min(max(attempt, 0), len(ladder) - 1)]
+
+
+def _step_shape(step: dict) -> dict:
+    """Observable properties of a task, for correlating outcome against difficulty.
+
+    Shape only — file count, category, whether a check exists. Never a model's
+    opinion of how hard the task is: GSD forbids the planner from judging difficulty
+    for the same reason, and self-rated confidence is a weak predictor.
+    """
+    files = step.get("files") or step.get("files_modified") or []
+    return {
+        "category": step.get("category", ""),
+        "file_count": len(files) if isinstance(files, list) else 0,
+        "criteria_count": len(_step_verification_criteria(step)),
+        "has_verify_command": bool((step.get("verify_command") or "").strip()),
+        "depends_on_count": len(step.get("depends_on") or []),
+    }
+
+
+def record_step_attempt(task_id: str, step_num: int, record: dict):
+    """Append one attempt to the metrics log.
+
+    Routing can only be tuned against measured history, and the escalation rate is
+    the metric that says whether plans are good — so every attempt is recorded,
+    passes included, not just the failures.
+
+    Best effort: metrics must never break a run.
+    """
+    try:
+        metrics_dir = MC_HOME / "bridge" / "metrics"
+        metrics_dir.mkdir(parents=True, exist_ok=True)
+        row = {"task_id": task_id, "step": step_num,
+               "at": datetime.now(timezone.utc).isoformat(), **record}
+        with (metrics_dir / "step-attempts.jsonl").open("a") as fh:
+            fh.write(json.dumps(row) + "\n")
+    except Exception as e:
+        logging.debug(f"  metrics write failed for {task_id[:8]} step {step_num}: {e}")
 
 
 def _max_step_retries() -> int:
@@ -3044,6 +3129,17 @@ def process_in_progress_plans():
                         })
                         mc_log_activity(task_id, "step_verified",
                                         f"Step {step_key} verified ✓: {step_data.get('title', '')}")
+                        record_step_attempt(task_id, int(step_key), {
+                            "outcome": "passed",
+                            # 0 retries means it passed first try — the number the
+                            # thesis actually turns on.
+                            "attempt": step_data.get("retry_count", 0) + 1,
+                            "profile": step_data.get("agent_profile", ""),
+                            "base_profile": step_data.get("base_profile", ""),
+                            "verified_by": verification.get("verified_by", ""),
+                            "escalated": step_data.get("agent_profile") != step_data.get("base_profile"),
+                            "shape": _step_shape(step_def or {}),
+                        })
                         newly_completed = True
                         logging.info(f"  Step {step_key} verified ✓ for {task_id[:8]}")
                     else:
@@ -3053,7 +3149,31 @@ def process_in_progress_plans():
                             r["criterion"] for r in verification.get("results", [])
                             if not r.get("met")
                         ]
-                        if retry_count < max_step_retries:
+                        # A runtime that refused on quota never attempted the work.
+                        # Charging it a retry would spend the budget on the pool
+                        # being full rather than on the task being hard.
+                        rate_limited = _looks_rate_limited(agent_output)
+                        if rate_limited and retry_count < max_step_retries:
+                            logging.info(f"  Step {step_key} hit a quota limit — switching pool without spending a retry")
+                            mc_log_activity(task_id, "step_retry",
+                                            f"Step {step_key} was rate-limited — moving to the next runtime")
+                            update_step_progress(task_id, int(step_key), {
+                                "status": "pending",
+                                # retry_count still advances the LADDER (a different
+                                # pool) but the outcome is recorded as not-attempted.
+                                "retry_count": retry_count + 1,
+                                "outcome": "Rate limited — retrying on a different runtime",
+                                "agent_id": None,
+                            })
+                            record_step_attempt(task_id, int(step_key), {
+                                "outcome": "rate_limited",
+                                "attempt": retry_count + 1,
+                                "profile": step_data.get("agent_profile", ""),
+                                "base_profile": step_data.get("base_profile", ""),
+                                "shape": _step_shape(step_def or {}),
+                            })
+                            newly_completed = True
+                        elif retry_count < max_step_retries:
                             update_step_progress(task_id, int(step_key), {
                                 "status": "pending",
                                 "retry_count": retry_count + 1,
@@ -3063,6 +3183,16 @@ def process_in_progress_plans():
                             mc_log_activity(task_id, "step_retry",
                                             f"Step {step_key} failed verification — retrying ({retry_count + 1}/{max_step_retries}): {'; '.join(failed_criteria[:2])}")
                             logging.info(f"  Step {step_key} failed verification for {task_id[:8]} — retry {retry_count + 1}")
+                            record_step_attempt(task_id, int(step_key), {
+                                "outcome": "failed_verification",
+                                "attempt": retry_count + 1,
+                                "profile": step_data.get("agent_profile", ""),
+                                "base_profile": step_data.get("base_profile", ""),
+                                "verified_by": verification.get("verified_by", ""),
+                                "exit_code": verification.get("exit_code"),
+                                "failed_criteria": failed_criteria[:5],
+                                "shape": _step_shape(step_def or {}),
+                            })
                             newly_completed = True  # triggers re-dispatch below
                         else:
                             update_step_progress(task_id, int(step_key), {
@@ -3073,6 +3203,16 @@ def process_in_progress_plans():
                             mc_log_activity(task_id, "step_failed",
                                             f"Step {step_key} failed after {max_step_retries} retries: {'; '.join(failed_criteria[:2])}")
                             logging.warning(f"  Step {step_key} exhausted retries for {task_id[:8]}")
+                            record_step_attempt(task_id, int(step_key), {
+                                "outcome": "exhausted",
+                                "attempt": retry_count + 1,
+                                "profile": step_data.get("agent_profile", ""),
+                                "base_profile": step_data.get("base_profile", ""),
+                                "verified_by": verification.get("verified_by", ""),
+                                "ladder": _escalation_ladder(step_data.get("base_profile", "") or "claude"),
+                                "failed_criteria": failed_criteria[:5],
+                                "shape": _step_shape(step_def or {}),
+                            })
                             newly_completed = True
                 else:
                     # No acceptance criteria on the step — nothing to check

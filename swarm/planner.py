@@ -61,6 +61,13 @@ _DEFAULTS = {
     "gapcheck_provider": "gemini",
     "ollama_url": "http://localhost:11434",
     "max_step_retries": 2,
+    # A step that fails its own verify_command retries on a stronger runtime rather
+    # than the same one. GSD sizes tasks so a competent model can pass them, so a
+    # second failure is evidence about this task, not about the plan. Ladders are
+    # agent-profile names from swarm-config "agents.profiles"; attempt N takes
+    # ladder[N], clamped to the last entry. Empty means never change runtime.
+    "escalation_ladder": {},
+    "escalation_ladder_default": [],
     # Ceiling on agent sessions running at once across every profile. Each one is a
     # worktree plus a CLI process, so the limit is machine memory, not quota — on a
     # 24 GB box 2 is the working number. 0 means no global ceiling (per-profile
