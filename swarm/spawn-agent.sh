@@ -185,6 +185,20 @@ if [ -f "$SCRIPT_DIR/worktree_env.py" ]; then
     || echo "  warning: env seeding failed (agent may hit missing environment)"
 fi
 
+# Carry in the plan that was already written for this task. Planning ran as its own
+# stage before any agent was spawned; without copying its output here the agent
+# starts from a bare worktree and plans the same phase again — paying twice, and
+# building against a spec nobody approved. Copied rather than shared: the agent
+# commits its own progress against the plan, and must not write into the worktree a
+# retry will re-plan from.
+if [ -n "${MC_PLANNING_DIR:-}" ] && [ -d "${MC_PLANNING_DIR}/.planning" ]; then
+  if cp -R "${MC_PLANNING_DIR}/.planning" "$WORKTREE_PATH/.planning" 2>/dev/null; then
+    echo "  Carried in the plan from ${MC_PLANNING_DIR}"
+  else
+    echo "  warning: could not carry in .planning (agent will plan for itself)"
+  fi
+fi
+
 # Inject MCP config for code-review-graph (if venv exists)
 cd "$WORKTREE_PATH"
 CRG_BIN="$MC_HOME/venv-3.12/bin/code-review-graph"

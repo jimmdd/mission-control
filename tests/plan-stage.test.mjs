@@ -9,7 +9,7 @@
 
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
-import { mkdtempSync, mkdirSync, writeFileSync, rmSync } from "node:fs";
+import { mkdtempSync, mkdirSync, writeFileSync, rmSync, readFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -341,8 +341,8 @@ bridge.record_step_attempt = lambda tid, n, rec: calls["metrics"].append(rec["ou
 bridge.route_plan_stage_outcome = lambda task, v: calls.__setitem__("routed", v["outcome"]) or False
 bridge._build_triage_context = lambda tid: ""
 ${program}
-proceed = bridge.stage_planning({"id": "task-1"}, [{"project": "p", "repo": "r"}])
-print(json.dumps({"proceed": proceed, **calls}))
+proceed, carry = bridge.stage_planning({"id": "task-1"}, [{"project": "p", "repo": "r"}])
+print(json.dumps({"proceed": proceed, "carry": carry, **calls}))
 `);
 
 test("planning that cannot be set up fails open, and says so in the metrics", () => {
@@ -353,6 +353,7 @@ bridge._stage_planning_enabled = lambda: True
 bridge.find_repo_path = lambda project, repo: None
 `);
   assert.equal(r.proceed, true);
+  assert.equal(r.carry, "", "nothing to carry, so the agent plans for itself");
   assert.deepEqual(r.metrics, ["plan_stage_skipped"]);
   assert.equal(r.routed, null, "nothing was routed — no verdict was reached");
 });
@@ -367,6 +368,7 @@ import plan_stage
 plan_stage.plan_in_worktree = lambda *a, **k: {"outcome": "questions_raised", "stages": []}
 `);
   assert.equal(r.proceed, false);
+  assert.equal(r.carry, "", "a question means there is no plan to hand on");
   assert.equal(r.routed, "questions_raised");
 });
 
@@ -378,6 +380,7 @@ def explode(*a, **k):
 bridge.find_repo_path = explode
 `);
   assert.equal(r.proceed, true);
+  assert.equal(r.carry, "");
   assert.deepEqual(r.metrics, []);
 });
 
@@ -426,4 +429,69 @@ print(json.dumps({"first": first[0]["id"], "second": second[0]["id"], "same": sa
   assert.notEqual(r.first, r.second);
   // The same question re-asked is the same question, and still collapses onto its answer.
   assert.equal(r.first, r.same);
+});
+
+// ─────────── the plan has to reach the builder ───────────
+// Otherwise the stage is a duplicate cost, not a precondition: the plan sat in
+// worktrees/planning-<id> while the agent got a fresh worktree and a prompt telling
+// it to run /gsd-plan-phase itself — paying twice, and building against a spec no
+// human ever saw.
+
+test("a carried plan forbids re-planning instead of asking for one", () => {
+  const r = python(`
+import json, bridge
+task = {"title": "MET-635", "description": "d", "id": "t1"}
+print(json.dumps({
+    "ready": bridge.generate_prompt(task, "", "p", "r", plan_ready=True),
+    "fresh": bridge.generate_prompt(task, "", "p", "r", plan_ready=False),
+}))
+`);
+  assert.match(r.ready, /already exists/);
+  assert.match(r.ready, /do NOT write a new plan/i);
+  assert.match(r.ready, /STOP and say so rather than\s+replacing it/);
+  // Without a plan it must still be told to make one — including the precondition
+  // that /gsd-plan-phase cannot plan into a repo with no .planning/.
+  assert.match(r.fresh, /gsd-new-project/);
+  assert.doesNotMatch(r.fresh, /already exists/);
+});
+
+test("only a real plan is carried forward", () => {
+  const r = python(`
+import json, pathlib, bridge, plan_stage
+bridge._stage_planning_enabled = lambda: True
+bridge.find_repo_path = lambda project, repo: pathlib.Path("/tmp")
+bridge._planning_worktree = lambda task, repo_path: pathlib.Path("/tmp/planning-x")
+bridge._build_triage_context = lambda tid: ""
+bridge.record_step_attempt = lambda *a, **k: None
+bridge.route_plan_stage_outcome = lambda task, v: v["outcome"] == "plan_written"
+
+out = {}
+for outcome in ("plan_written", "questions_raised", "error"):
+    plan_stage.plan_in_worktree = lambda *a, **k: {"outcome": outcome, "stages": []}
+    out[outcome] = bridge.stage_planning({"id": "t1"}, [{"project": "p", "repo": "r"}])
+print(json.dumps(out))
+`);
+  assert.deepEqual(r.plan_written, [true, "/tmp/planning-x"]);
+  // A run that raised a question or failed has no plan to hand on — carrying the
+  // worktree anyway would tell the agent to follow a plan that is not there.
+  assert.deepEqual(r.questions_raised, [false, ""]);
+  assert.deepEqual(r.error, [false, ""]);
+});
+
+test("staging turned off carries nothing and still proceeds", () => {
+  const r = python(`
+import json, bridge
+bridge._stage_planning_enabled = lambda: False
+print(json.dumps(bridge.stage_planning({"id": "t1"}, [{"project": "p", "repo": "r"}])))
+`);
+  assert.deepEqual(r, [true, ""]);
+});
+
+test("the spawn script copies the plan in, and only when there is one", () => {
+  const sh = readFileSync(new URL("../swarm/spawn-agent.sh", import.meta.url), "utf8");
+  assert.match(sh, /MC_PLANNING_DIR/);
+  // Guarded on the directory actually existing, and never fatal: a spawn that
+  // cannot copy should still run, planning for itself.
+  assert.match(sh, /\[ -d "\$\{MC_PLANNING_DIR\}\/\.planning" \]/);
+  assert.match(sh, /agent will plan for itself/);
 });

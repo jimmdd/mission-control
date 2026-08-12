@@ -50,4 +50,22 @@ jq -r --argjson now "$NOW_MS" --argjson ttl "$TTL_MS" '
   echo "  ✓ Cleaned: $TASK_ID"
 done
 
+# Planning worktrees. Staged planning leaves one per implementation task, held on
+# purpose so a retry re-plans instead of re-initialising the whole GSD project —
+# but a task that is done will not retry, and one per task accumulates forever.
+# Matched by the same 8-char task prefix the bridge names them with.
+jq -r '
+  .[]
+  | select(.status == "merged" or .status == "done" or .status == "killed")
+  | "\(.id)\t\(.repo)"
+' "$REGISTRY" 2>/dev/null | while IFS=$'\t' read -r TASK_ID REPO; do
+  [ -n "$REPO" ] || continue
+  PLANNING="$(dirname "$REPO")/worktrees/planning-${TASK_ID:0:8}"
+  [ -d "$PLANNING" ] || continue
+  cd "$REPO" 2>/dev/null || continue
+  git worktree remove "$PLANNING" --force 2>/dev/null || true
+  rm -rf "$PLANNING" 2>/dev/null || true
+  echo "  ✓ Released planning worktree: planning-${TASK_ID:0:8}"
+done
+
 echo "[$TIMESTAMP] Cleanup complete."

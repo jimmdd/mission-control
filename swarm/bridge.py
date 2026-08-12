@@ -1224,7 +1224,8 @@ def _task_ref(task: dict) -> str:
 
 def generate_prompt(task: dict, repo_context: str, project: str, repo: str,
                     sibling_contexts: Optional[Dict[str, str]] = None,
-                    knowledge: Optional[dict] = None) -> str:
+                    knowledge: Optional[dict] = None,
+                    plan_ready: bool = False) -> str:
     title = task["title"]
     description = task.get("description", "")
     linear_url = task.get("external_url") or task.get("linear_issue_url", "")
@@ -1274,7 +1275,27 @@ def generate_prompt(task: dict, repo_context: str, project: str, repo: str,
     gsd_execute = gsd_execute_command()
     gsd_verify = gsd_verify_command()
     gsd_gap = gsd_gap_plan_command()
-    gsd_plan_step = gsd_plan_step_text()
+    # A plan written by the staged run and carried into this worktree is the spec
+    # this agent builds against. Telling it to plan anyway would pay for planning
+    # twice and, worse, let it build against a spec no human ever saw.
+    if plan_ready:
+        gsd_plan_step = (
+            f"A plan for this task already exists in `{gsd_planning_dir_name()}/`. "
+            f"Read it and follow it.\n"
+            f"Do NOT run `{gsd_plan_command()}` and do NOT write a new plan. Planning "
+            f"ran as its own stage before you were started, and its output was checked; "
+            f"re-planning would discard that and cost it twice.\n"
+            f"If the plan is wrong or cannot be followed, STOP and say so rather than "
+            f"replacing it."
+        )
+    else:
+        gsd_plan_step = (
+            gsd_plan_step_text()
+            + "\nThis creates PLAN.md with task breakdown, must-haves, and verification"
+              " criteria.\nThe plan-checker agent runs automatically to validate your plan"
+              " before execution.\nIf plan-checker finds blockers, fix them before"
+              " proceeding."
+        )
 
     prompt += f"""
 ## Mandatory Workflow ({gsd_name} + Review Loop)
@@ -1284,9 +1305,6 @@ The loop continues until both GSD verification AND code review pass.
 
 ### Step 1: Plan
 {gsd_plan_step}
-This creates PLAN.md with task breakdown, must-haves, and verification criteria.
-The plan-checker agent runs automatically to validate your plan before execution.
-If plan-checker finds blockers, fix them before proceeding.
 
 ### Step 2: Execute
 Run `{gsd_execute}` to implement with atomic commits.
@@ -2325,7 +2343,8 @@ _SPAWN_EXIT_AT_CAPACITY = 3
 
 def spawn_agent(task_id: str, task_label: str, repo_path: Path, prompt_content: str,
                 agent_type: str = "claude", mc_task_id: str = "", base_branch: str = "",
-                task_title: str = "", draft_pr: bool = True, no_pr: bool = False):
+                task_title: str = "", draft_pr: bool = True, no_pr: bool = False,
+                planning_dir: str = ""):
     """Spawn an agent. Returns True, AT_CAPACITY (no free slot), or False (failed)."""
     # task_label becomes a git branch, worktree dir, tmux session, and prompt filename —
     # a "/" or space in it crashes the spawn (e.g. a prompt path with a phantom subdir).
@@ -2369,6 +2388,12 @@ def spawn_agent(task_id: str, task_label: str, repo_path: Path, prompt_content: 
     env["MC_TASK_ID"] = mc_task_id or task_id
     env["BASE_BRANCH"] = base_branch
     env["PR_BASE_BRANCH"] = pr_base
+    # The plan the staged run already wrote. Without it the agent gets a bare
+    # worktree and plans the same phase over again — the stage would be a duplicate
+    # cost rather than a precondition, and the spec the agent builds against would
+    # not be the one a human approved.
+    if planning_dir:
+        env["MC_PLANNING_DIR"] = planning_dir
 
     try:
         result = subprocess.run(
@@ -2786,8 +2811,11 @@ def _spawn_for_repos(task: dict, repos: List[dict]):
     # The spec is a precondition: plan before spending an agent. A planner's question
     # raised here stops the task while it is still cheap, instead of dying inside a
     # two-hundred-turn session that has already started writing code.
-    if task_type == "implementation" and not stage_planning(task, repos):
-        return
+    planning_dir = ""
+    if task_type == "implementation":
+        proceed, planning_dir = stage_planning(task, repos)
+        if not proceed:
+            return
 
     mc_update_task(task_id, {"status": "assigned"})
     mc_log_activity(task_id, "status_changed",
@@ -2817,7 +2845,7 @@ def _spawn_for_repos(task: dict, repos: List[dict]):
 
         outcome = spawn_agent(task_id, task_label, repo_path, prompt, mc_task_id=task_id, task_title=title,
                               base_branch=_resolve_base_branch(task, repo_path), draft_pr=_pr_is_draft(task),
-                              no_pr=_pr_is_disabled(task))
+                              no_pr=_pr_is_disabled(task), planning_dir=planning_dir)
         if outcome:
             mc_update_task(task_id, {"status": "in_progress"})
             mc_log_activity(task_id, "spawned", f"Investigation agent spawned for {project}/{repo}")
@@ -2836,12 +2864,13 @@ def _spawn_for_repos(task: dict, repos: List[dict]):
 
         repo_context = repo_indexes.get(f"{project}/{repo}", "")
         knowledge = recall_knowledge([r], knowledge_query)
-        prompt = generate_prompt(task, repo_context, project, repo, knowledge=knowledge)
+        prompt = generate_prompt(task, repo_context, project, repo, knowledge=knowledge,
+                                 plan_ready=bool(planning_dir))
         task_label = f"{_task_ref(task)}-{repo}"
 
         outcome = spawn_agent(task_id, task_label, repo_path, prompt, mc_task_id=task_id, task_title=title,
                               base_branch=_resolve_base_branch(task, repo_path), draft_pr=_pr_is_draft(task),
-                              no_pr=_pr_is_disabled(task))
+                              no_pr=_pr_is_disabled(task), planning_dir=planning_dir)
         if outcome:
             mc_update_task(task_id, {"status": "in_progress"})
             mc_log_activity(task_id, "spawned", f"Agent spawned for {project}/{repo}")
@@ -2877,10 +2906,11 @@ def _spawn_for_repos(task: dict, repos: List[dict]):
             repo_context = repo_indexes.get(repo_label, "")
             knowledge = recall_knowledge([r], knowledge_query)
             prompt = generate_prompt(task, repo_context, project, repo,
-                                     sibling_contexts=sibling_contexts, knowledge=knowledge)
+                                     sibling_contexts=sibling_contexts, knowledge=knowledge,
+                                     plan_ready=bool(planning_dir))
             task_label = f"{_task_ref(child)}-{repo}"
 
-            outcome = spawn_agent(child_id, task_label, repo_path, prompt, mc_task_id=child_id, task_title=title, no_pr=_pr_is_disabled(task))
+            outcome = spawn_agent(child_id, task_label, repo_path, prompt, mc_task_id=child_id, task_title=title, no_pr=_pr_is_disabled(task), planning_dir=planning_dir)
             if outcome:
                 mc_update_task(child_id, {"status": "in_progress"})
                 mc_log_activity(child_id, "spawned", f"Agent spawned for {project}/{repo}")
@@ -2980,6 +3010,45 @@ def _stage_planning_enabled() -> bool:
     return bool(raw) and os.environ.get("MC_SKIP_PLAN_STAGE", "") != "1"
 
 
+def _worktree_is_current(repo_path: Path, path: Path, base: str) -> bool:
+    """Is this still a registered worktree, and still at the tip of `base`?
+
+    A plan written against a commit the base branch has since moved past is a plan
+    for code that no longer exists, and reusing the directory would hide that.
+    """
+    try:
+        listing = subprocess.run(["git", "worktree", "list", "--porcelain"],
+                                 cwd=str(repo_path), capture_output=True, text=True,
+                                 timeout=60)
+        if f"worktree {path}" not in (listing.stdout or ""):
+            return False
+        head = subprocess.run(["git", "rev-parse", "HEAD"], cwd=str(path),
+                              capture_output=True, text=True, timeout=60)
+        tip = subprocess.run(["git", "rev-parse", base], cwd=str(repo_path),
+                             capture_output=True, text=True, timeout=60)
+        if head.returncode or tip.returncode:
+            return False
+        return head.stdout.strip() == tip.stdout.strip()
+    except (subprocess.TimeoutExpired, OSError):
+        return False
+
+
+def release_planning_worktree(task_id: str, repo_path: Path):
+    """Drop a task's planning worktree once its plan has been handed on.
+
+    One per implementation task accumulates otherwise. Called after the plan has
+    been copied into the agent's worktree, never before — the copy is what makes it
+    safe to delete.
+    """
+    path = Path(str(repo_path).rstrip("/")).parent / "worktrees" / f"planning-{task_id[:8]}"
+    if not path.exists():
+        return
+    subprocess.run(["git", "worktree", "remove", "--force", str(path)],
+                   cwd=str(repo_path), capture_output=True, text=True, timeout=300)
+    shutil.rmtree(path, ignore_errors=True)
+    logging.info(f"  Released planning worktree for {task_id[:8]}")
+
+
 def _planning_worktree(task: dict, repo_path: Path) -> Optional[Path]:
     """A worktree at the base branch to plan in, with the environment a build needs.
 
@@ -2989,7 +3058,15 @@ def _planning_worktree(task: dict, repo_path: Path) -> Optional[Path]:
     base = _resolve_base_branch(task, repo_path)
     path = Path(str(repo_path).rstrip("/")).parent / "worktrees" / f"planning-{task['id'][:8]}"
     if path.is_dir():
-        return path
+        # A directory is not proof of a usable worktree: it survives a `git worktree
+        # remove` that half-failed, and it goes stale as the base branch moves. Keep
+        # it only while git still owns it and it is not behind the base.
+        if _worktree_is_current(repo_path, path, base):
+            return path
+        logging.info(f"  Planning worktree at {path} is stale — rebuilding it")
+        subprocess.run(["git", "worktree", "remove", "--force", str(path)],
+                       cwd=str(repo_path), capture_output=True, text=True, timeout=300)
+        shutil.rmtree(path, ignore_errors=True)
     try:
         subprocess.run(["git", "worktree", "add", "-q", "--detach", str(path), base],
                        cwd=str(repo_path), capture_output=True, text=True,
@@ -3003,8 +3080,13 @@ def _planning_worktree(task: dict, repo_path: Path) -> Optional[Path]:
     return path
 
 
-def stage_planning(task: dict, repos: List[dict]) -> bool:
-    """Plan before dispatching anyone. True if the work may proceed.
+def stage_planning(task: dict, repos: List[dict]) -> Tuple[bool, str]:
+    """Plan before dispatching anyone. Returns (may proceed, planning worktree).
+
+    The second value is what stops the stage being a duplicate cost: the agent's
+    worktree gets this plan copied in, and its prompt is told to follow it rather
+    than write its own. An empty string means there is no plan to carry, and the
+    agent plans for itself exactly as it did before.
 
     Fails open on infrastructure — a missing repo path or a worktree that will not
     create is not a verdict about the plan, and wedging the whole queue on one is
@@ -3013,7 +3095,7 @@ def stage_planning(task: dict, repos: List[dict]) -> bool:
     visible in the metrics rather than looking like a plan that passed.
     """
     if not _stage_planning_enabled():
-        return True
+        return True, ""
 
     from plan_stage import plan_in_worktree
 
@@ -3024,19 +3106,22 @@ def stage_planning(task: dict, repos: List[dict]) -> bool:
         logging.warning(f"  Skipping staged planning for {task_id[:8]} — no repo path")
         record_step_attempt(task_id, 0, {"outcome": "plan_stage_skipped", "attempt": 0,
                                          "reason": "no repo path"})
-        return True
+        return True, ""
 
     worktree = _planning_worktree(task, repo_path)
     if not worktree:
         record_step_attempt(task_id, 0, {"outcome": "plan_stage_skipped", "attempt": 0,
                                          "reason": "no planning worktree"})
-        return True
+        return True, ""
 
     verdict = plan_in_worktree(str(worktree), task, context=_build_triage_context(task_id))
     for stage in verdict.get("stages", []):
         logging.info(f"  plan stage [{stage['stage']}] {stage['outcome']} "
                      f"in {stage['duration_s']}s — {stage['reason'][:120]}")
-    return route_plan_stage_outcome(task, verdict)
+    proceed = route_plan_stage_outcome(task, verdict)
+    # Only hand the worktree on when there is actually a plan in it.
+    carry = str(worktree) if verdict.get("outcome") == "plan_written" else ""
+    return proceed, carry
 
 
 def route_plan_stage_outcome(task: dict, verdict: dict) -> bool:
@@ -3554,6 +3639,73 @@ def _max_step_retries() -> int:
         return int(get_planner_config().get("max_step_retries", 2))
     except Exception:
         return 2
+
+
+def process_blocked_gates():
+    """Un-block steps whose gate has since been repaired.
+
+    `get_next_steps` treats a blocked step as settled, deliberately — dispatching it
+    would spend an agent proving nothing. But that also meant a step never came back
+    once blocked, so the gate cache's failure TTL could never be exercised and the
+    promise that a repaired gate recovers on its own was not true: a human who fixed
+    the command still had to re-trigger the task by hand.
+
+    This re-probes those gates on the daemon's own schedule and hands the step back
+    when one starts passing. It costs nothing while the gate stays broken — the
+    cached failure answers until it expires.
+    """
+    PROGRESS_DIR = MC_HOME / "bridge" / "progress"
+    if not PROGRESS_DIR.exists() or not _gate_check_enabled():
+        return
+
+    for progress_file in PROGRESS_DIR.glob("*.json"):
+        try:
+            progress = json.loads(progress_file.read_text())
+        except Exception:
+            continue
+        task_id = progress.get("task_id")
+        if not task_id:
+            continue
+
+        # Only steps blocked by their gate. A step blocked for any other reason is
+        # somebody else's business.
+        blocked = [int(k) for k, v in (progress.get("steps") or {}).items()
+                   if v.get("status") == "blocked"
+                   and "verify_command unusable" in (v.get("outcome") or "")]
+        if not blocked:
+            continue
+
+        try:
+            plan = json.loads(Path(progress["plan_file"]).read_text())
+            task = mc_request("GET", f"/api/tasks/{task_id}")
+        except Exception:
+            continue
+        if not task:
+            continue
+
+        try:
+            state = mc_request("GET", f"/api/tasks/{task_id}/triage-state")
+        except Exception:
+            continue
+        repos = _normalize_repos((state or {}).get("triage_repos") or [])
+        if not repos:
+            continue
+
+        still_broken = set()
+        for finding in validate_plan_gates(task, plan, repos, only_steps=blocked):
+            still_broken.update(finding["steps"])
+
+        for step_num in blocked:
+            if step_num in still_broken:
+                continue
+            update_step_progress(task_id, step_num, {
+                "status": "pending",
+                "outcome": "Gate passes on unmodified code again — back in the queue",
+            })
+            mc_log_activity(task_id, "updated",
+                            f"Step {step_num} is unblocked: its verify_command now passes "
+                            f"on unmodified code.")
+            logging.info(f"  Unblocked step {step_num} for {task_id[:8]} — gate repaired")
 
 
 def process_in_progress_plans():
@@ -5329,6 +5481,7 @@ def run_once():
 
     process_open_questions()
     process_answered_followups()
+    process_blocked_gates()
     process_planning_tasks()
     process_in_progress_plans()
     process_review_tasks()

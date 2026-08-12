@@ -146,10 +146,13 @@ def find_plan(worktree: str, since: Optional[float] = None) -> Optional[Path]:
     root = Path(worktree) / gsd_backend.planning_dir_name()
     if not root.is_dir():
         return None
+    # `*PLAN.md`, not `PLAN.md`. GSD names a phase's plans `01-01-PLAN.md`, one per
+    # wave — the exact-name glob found nothing on a run that had just written two
+    # perfectly good plans, and reported the success as "no plan and no question".
     # Newest first: a repo with several planned phases should report the plan this
-    # run produced, not whichever phase sorts first by name.
+    # run produced, not whichever sorts first by name.
     candidates = []
-    for path in root.rglob("PLAN.md"):
+    for path in root.rglob("*PLAN.md"):
         try:
             mtime = path.stat().st_mtime
         except OSError:
