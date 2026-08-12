@@ -158,7 +158,7 @@
   svg.plan-map .done rect.sbox { fill: var(--green-bg); stroke: var(--green); }
   svg.plan-map .blocked rect.sbox { stroke: var(--red); }
   svg.plan-map .blocked .snum { fill: var(--red); }
-  .sd { background: var(--sunk); border: 1px solid var(--line); border-radius: 12px; padding: 16px 18px; margin-bottom: 14px; }
+  .sd { background: var(--sunk); border: 1px solid var(--line); border-radius: 12px; padding: 16px 18px; margin-top: 14px; }
   .sd-head { display: flex; gap: 10px; align-items: baseline; flex-wrap: wrap; margin-bottom: 4px; }
   .sd-num { font-family: var(--mono); font-size: 11px; font-weight: 700; color: var(--ink-3); }
   .sd-title { font-size: 15px; font-weight: 600; letter-spacing: -.014em; }
@@ -431,12 +431,12 @@ function planMap(plan, progress, triage) {
       ${open.length ? `<span><i class="d"></i> decision open — work is provisional</span>` : ""}
       ${anyNoGsd ? `<span><i class="d"></i> no GSD — step ran without task decomposition</span>` : ""}
     </div>
-    <div id="stepdetail"></div>
     <div class="diagram-wrap">
       <svg class="plan-map" viewBox="0 0 ${width} ${height}" style="min-width:${width}px">
         ${edges.join("")}${parts.join("")}
       </svg>
-    </div>`;
+    </div>
+    <div id="stepdetail"></div>`;
 }
 
 /** Full detail for one step — the node itself is all truncation. */
