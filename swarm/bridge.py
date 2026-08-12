@@ -862,6 +862,50 @@ def _tree_from_paths(paths: List[str], depth: int = 3) -> List[str]:
     return lines
 
 
+def _target_app_paths(description: str) -> List[str]:
+    """Sub-paths a task names as its target, from a 'Target app: `apps/new-ui`' line.
+
+    In a monorepo the interesting code sits several levels below the root, past the
+    depth the general listing reaches. Without this the planner cannot tell whether
+    the thing it is planning already exists.
+    """
+    import re
+    out = []
+    for m in re.finditer(r"(?im)^\s*target (?:app|package|dir(?:ectory)?)\s*:\s*`?([^`\s,]+)", description or ""):
+        p = m.group(1).strip().strip("/")
+        if p and ".." not in p:
+            out.append(p)
+    return out[:3]
+
+
+def _target_app_tree(repo_path: Path, ref: str, prefixes: List[str], limit: int = 160) -> str:
+    """A deeper file listing for the task's target app, so the planner can see what
+    already exists there rather than planning it from scratch."""
+    if not prefixes:
+        return ""
+    paths = _git_paths_at_ref(repo_path, ref)
+    if not paths:
+        return ""
+    sections = []
+    for prefix in prefixes:
+        under = [p for p in paths if p.startswith(prefix + "/")
+                 and not any(part in _TREE_SKIP_DIRS for part in p.split("/"))]
+        if not under:
+            continue
+        # Directories first, and all of them: they carry the structure that answers
+        # "does this already exist?". A flat cap over sorted files truncates
+        # alphabetically, which in a SvelteKit app hides src/routes behind src/lib.
+        dirs = sorted({p.rsplit("/", 1)[0] for p in under if "/" in p})
+        files = sorted(under)[:limit]
+        body = "\n".join(dirs)
+        if len(files) < len(under):
+            body += f"\n\n{len(under)} files total; first {len(files)}:\n" + "\n".join(files)
+        else:
+            body += "\n\n" + "\n".join(files)
+        sections.append(f"### Target app: {prefix} (at {ref})\n```\n{body}\n```")
+    return "\n\n".join(sections)
+
+
 def read_key_source_files_at_ref(repo_path: Path, ref: str) -> str:
     """Same shape as read_key_source_files, read out of a git ref.
 
@@ -2344,14 +2388,17 @@ def fetch_task_activities(task_id: str) -> List[dict]:
         return []
 
 
-def _build_codebase_context(repos: List[dict], base_branch: str = "") -> str:
+def _build_codebase_context(repos: List[dict], base_branch: str = "",
+                            description: str = "") -> str:
     """Source context for triage and planning.
 
     Read from `base_branch` when the task pins one, since that is the tree agents
     will actually branch from. Falls back to the checkout when no base is pinned or
-    the ref cannot be read.
+    the ref cannot be read. When the task names a target app, that subtree is listed
+    in full — a monorepo's real code sits below the general listing's depth.
     """
     sections = []
+    targets = _target_app_paths(description)
     for r in repos:
         project, repo = r["project"], r["repo"]
         repo_path = find_repo_path(project, repo)
@@ -2362,6 +2409,10 @@ def _build_codebase_context(repos: List[dict], base_branch: str = "") -> str:
             code_ctx = read_key_source_files_at_ref(repo_path, base_branch)
             if not code_ctx:
                 logging.warning(f"  Could not read {base_branch} — using the checkout instead")
+            else:
+                tree = _target_app_tree(repo_path, base_branch, targets)
+                if tree:
+                    code_ctx += "\n\n" + tree
         if not code_ctx:
             code_ctx = read_key_source_files(repo_path)
         if code_ctx:
@@ -2724,7 +2775,7 @@ def _plan_and_dispatch(task: dict, repos: List[dict]):
         if idx:
             repo_indexes[f"{r['project']}/{r['repo']}"] = idx
 
-    codebase_context = _build_codebase_context(repos, _base_branch_override(task)) if repos else ""
+    codebase_context = _build_codebase_context(repos, _base_branch_override(task), description) if repos else ""
     # The plan should be written against what the ticket actually supplies. Without
     # this the planner invents a structure the handoff already specifies, and only
     # the builder ever sees the real thing.
@@ -3281,7 +3332,7 @@ def _run_triage(title: str, description: str, manifest: str, model: Optional[str
 
     codebase_context = ""
     if repos:
-        codebase_context = _build_codebase_context(repos, base_branch)
+        codebase_context = _build_codebase_context(repos, base_branch, description)
         if codebase_context:
             logging.info(f"  Pass 2 — loaded {len(codebase_context)} chars of codebase context")
 
@@ -3429,7 +3480,7 @@ def process_task(task: dict):
 
         questions = triage.get("questions", [])
         if questions:
-            codebase_ctx = _build_codebase_context(repos, base_pin) if repos else ""
+            codebase_ctx = _build_codebase_context(repos, base_pin, description) if repos else ""
             knowledge = recall_knowledge(repos, f"{title}\n{description[:500]}") if repos else {}
             auto_answered = _self_answer_questions(questions, title, description, codebase_ctx, knowledge)
             unanswered = [q for q in questions if not q.get("answer")]
