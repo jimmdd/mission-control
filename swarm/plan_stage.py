@@ -54,8 +54,13 @@ TASK_BLOCK = re.compile(r"<task\b", re.I)
 # Separate budgets, because the two stages cost very differently. Setting up an
 # established repo is a one-off that reads the codebase and writes a roadmap; the
 # 1800s the two shared went entirely to setup and planning never started.
+#
+# Both numbers are measured, not guessed. Setting up MET-635's repo took most of
+# 1800s. Planning its first phase wrote its first plan at 19 minutes and two more by
+# 27, and was still inside GSD's own plan-checker when 1800s killed it — so the cap
+# was cutting off work that was still producing plans, not runaway.
 INIT_TIMEOUT = int(os.environ.get("MC_GSD_INIT_TIMEOUT", "2700"))
-PLAN_TIMEOUT = int(os.environ.get("MC_GSD_PLAN_TIMEOUT", "1800"))
+PLAN_TIMEOUT = int(os.environ.get("MC_GSD_PLAN_TIMEOUT", "3600"))
 DEFAULT_TIMEOUT = PLAN_TIMEOUT
 
 
