@@ -198,3 +198,12 @@ print(json.dumps({"capacity": capacity, "broken": calls}))
   const broken = result.broken.filter(([kind]) => kind === "log").map(([, m]) => m);
   assert.match(broken.join("\n"), /Agent spawn failed/);
 });
+
+test("a step blocked by an unusable gate is not offered for dispatch", () => {
+  // Blocked means a human has to fix the gate; re-offering it would spend agents
+  // proving what the base commit already proves. It still settles its group so the
+  // rest of the plan keeps moving.
+  assert.deepEqual(nextSteps(GROUPED, { 1: "blocked" }), [2, 3]);
+  assert.deepEqual(nextSteps(GROUPED, { 1: "completed", 2: "blocked" }), [3]);
+  assert.deepEqual(nextSteps(GROUPED, { 1: "completed", 2: "blocked", 3: "blocked" }), [4]);
+});

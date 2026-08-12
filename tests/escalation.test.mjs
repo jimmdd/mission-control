@@ -157,3 +157,62 @@ print(json.dumps(bridge._step_shape({
   // difficulty, and self-rated confidence is a weak predictor of outcome.
   assert.ok(!("difficulty" in shape) && !("confidence" in shape));
 });
+
+// A gate is only meaningful if it can pass. A verify_command that fails on unmodified
+// code fails every attempt too — so the step burns its retry budget, escalates to the
+// scarcest model, still fails, and the metrics read "the model could not do it".
+// Observed for real: a plan's build command failed identically on the base commit and
+// on the agent's work, because the app needed build-time env the worktree lacked.
+
+test("a gate that passes on unmodified code is usable", () => {
+  const r = python(`
+import json, planner, tempfile
+print(json.dumps(planner.check_verify_command_baseline("true", tempfile.gettempdir())))
+`, LADDER);
+  assert.equal(r.runnable, true);
+  assert.equal(r.exit_code, 0);
+});
+
+test("a gate that fails on unmodified code is reported unusable, with its output", () => {
+  const r = python(`
+import json, planner, tempfile
+print(json.dumps(planner.check_verify_command_baseline(
+    "echo 'PUBLIC_API_URL is not exported' >&2; exit 1", tempfile.gettempdir())))
+`, LADDER);
+  assert.equal(r.runnable, false);
+  assert.equal(r.exit_code, 1);
+  // The reason has to carry the real error, or a human cannot fix the gate.
+  assert.match(r.reason, /PUBLIC_API_URL is not exported/);
+  assert.match(r.reason, /cannot distinguish good work from bad/);
+});
+
+test("a gate that cannot be run at all is unusable rather than passing", () => {
+  const r = python(`
+import json, planner
+print(json.dumps(planner.check_verify_command_baseline("true", "/no/such/dir")))
+`, LADDER);
+  assert.equal(r.runnable, false);
+  assert.equal(r.exit_code, null);
+});
+
+test("a hanging gate is unusable rather than blocking forever", () => {
+  const r = python(`
+import json, planner, tempfile
+print(json.dumps(planner.check_verify_command_baseline("sleep 30", tempfile.gettempdir(), timeout=1)))
+`, LADDER);
+  assert.equal(r.runnable, false);
+  assert.match(r.reason, /timed out/);
+});
+
+test("gate checking can be turned off for a repo that cannot build locally", () => {
+  const on = python(`
+import json, bridge
+print(json.dumps(bridge._gate_check_enabled()))
+`, { validate_gates: true });
+  const off = python(`
+import json, bridge
+print(json.dumps(bridge._gate_check_enabled()))
+`, { validate_gates: false });
+  assert.equal(on, true);
+  assert.equal(off, false);
+});

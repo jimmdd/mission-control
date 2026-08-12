@@ -877,17 +877,22 @@ def get_next_steps(task_id: str, plan: dict) -> List[dict]:
         if step_progress["status"] == "failed":
             failed.add(int(step_key))
 
-    skipped = set()
+    # "blocked" is a human's problem, not a retry's: the step's own gate cannot pass,
+    # so dispatching it would spend an agent proving nothing. It settles its group so
+    # the rest of the plan still moves.
+    settled_other = set()
     for step_key, step_progress in progress["steps"].items():
-        if step_progress["status"] == "skipped":
-            skipped.add(int(step_key))
+        if step_progress["status"] in ("skipped", "blocked"):
+            settled_other.add(int(step_key))
 
-    group = _active_group(plan, completed | failed | skipped)
+    group = _active_group(plan, completed | failed | settled_other)
 
     runnable = []
     for step in plan.get("steps", []):
         step_num = step["step"]
         if step_num in completed or step_num in in_progress or step_num in failed:
+            continue
+        if step_num in settled_other:
             continue
         if group is not None and step_num not in group:
             continue
@@ -1118,6 +1123,46 @@ def _verify_by_command(command: str, cwd: str, criteria: List[str]) -> Optional[
         "exit_code": proc.returncode,
         "output_tail": tail[-2000:],
         "results": [{"criterion": c, "met": passed, "reason": reason} for c in criteria],
+    }
+
+
+def check_verify_command_baseline(command: str, cwd: str, timeout: Optional[int] = None) -> dict:
+    """Run a step's verify_command against UNMODIFIED code.
+
+    A gate is only meaningful if it can pass. A command that fails on untouched code
+    fails every attempt too — so the step burns its whole retry budget, escalates up
+    the ladder to the scarcest model, still fails, and the metrics read "the model
+    could not do it". Maximum quota for zero signal, and a wrong conclusion.
+
+    Observed for real: a plan's `bun run build` failed identically on the base commit
+    and on the agent's work, because the app needs build-time environment the worktree
+    did not have.
+
+    Returns {"runnable": bool, "exit_code": int|None, "reason": str}.
+    """
+    workdir = Path(cwd)
+    if not workdir.is_dir():
+        return {"runnable": False, "exit_code": None, "reason": f"no such directory: {cwd}"}
+
+    timeout = timeout or _verify_timeout()
+    try:
+        proc = subprocess.run(command, shell=True, cwd=str(workdir),
+                              capture_output=True, text=True, timeout=timeout)
+    except subprocess.TimeoutExpired:
+        return {"runnable": False, "exit_code": None,
+                "reason": f"timed out after {timeout}s on unmodified code"}
+    except OSError as e:
+        return {"runnable": False, "exit_code": None, "reason": f"could not run: {e}"}
+
+    if proc.returncode == 0:
+        return {"runnable": True, "exit_code": 0, "reason": "passes on unmodified code"}
+
+    tail = ((proc.stdout or "")[-800:] + (proc.stderr or "")[-800:]).strip()
+    return {
+        "runnable": False,
+        "exit_code": proc.returncode,
+        "reason": (f"fails on unmodified code (exit {proc.returncode}) — the command cannot "
+                   f"distinguish good work from bad:\n{tail[-600:]}"),
     }
 
 

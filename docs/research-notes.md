@@ -31,6 +31,10 @@ re-litigate it in three months.
 | 15 | Notes-as-shared-context — a durable surface every agent reads | AgentGrid | **P4** | queued |
 | 16 | Ship the dumb-correct backend as the oracle; keep the fast one behind proof | pdb-env | *discipline* | adopt now |
 | 17 | Deployment layers pattern — org config in `deploy/layers/`, core byte-identical upstream | qm | *later* | if MC is ever used by others |
+| 18 | Boundary-level secret injection — sandbox holds a proxy token, real credential swapped at egress | iron-proxy | **P5** | queued |
+| 19 | Default-deny egress allowlist per scope, with upstream IP deny lists (SSRF / DNS rebinding) | iron-proxy | **P5** | queued |
+| 20 | Per-request egress audit — which rules matched, which secrets swapped | iron-proxy | **P5** | queued |
+| 21 | MCP tool-call policy enforced at the network boundary, not by a CLI flag | iron-proxy | **P5** | queued |
 
 ---
 
@@ -291,6 +295,65 @@ Command Code) and local inference (Ollama). Needs Node 22.19+ and Python 3.10+.
 
 ---
 
+---
+
+## iron-proxy — Paradigm
+
+`https://github.com/paradigmxyz/iron-proxy`
+
+### What it is
+
+A default-deny egress firewall for untrusted workloads, framed exactly at our problem:
+*"CI jobs, AI coding agents, and sandboxed containers can make arbitrary outbound
+requests."* A single binary and one YAML file. It targets Claude Code, Cursor and Codex
+by name.
+
+The mechanism is a MITM proxy with an embedded DNS server. Containers point their
+resolver at it, every hostname resolves to the proxy's own address, and traffic is
+steered through it without the workload being configured — no per-agent setup to forget.
+HTTP CONNECT, SOCKS5 and kernel TPROXY exist for stronger enforcement.
+
+### Worth stealing
+
+**Boundary-level secret injection.** The sandbox holds `proxy-token-123`; the proxy swaps
+it for the real credential at egress, sourced from env, a file, AWS Secrets Manager, SSM
+or 1Password. The agent never possesses a usable key.
+
+This is the answer to a failure we hit for real today. A Linear API key was pasted into
+chat to unblock the run and is now permanently in a transcript; separately I passed on a
+false "rotate your Codex token" warning because a hook flagged output I had not actually
+read. Both stop mattering if agents never hold real credentials. It generalises
+codex-router's idea (#4 above) from one provider to every outbound call, and it is the
+only mechanism here that makes "the agent leaked a key" structurally impossible rather
+than merely discouraged.
+
+**Default-deny allowlist per scope.** Matching domains and CIDRs pass, everything else
+gets a 403. A scope already owns a container in P5; the allowlist is the natural
+companion — this repo's package registry and API, nothing else. Upstream IP deny lists
+close SSRF and DNS-rebinding, which matters because agents fetch URLs out of tickets, and
+ticket text is attacker-influenceable by anyone who can edit the ticket.
+
+**Per-request audit.** Structured JSON showing which rules matched and which secrets were
+swapped. That is our `events` table with real content, and it answers "what did this
+agent actually reach?" — which today we cannot answer at all.
+
+**MCP tool-call policy, default-deny.** We already restrict the design summarizer to a
+read-only tool allowlist, but it is enforced by a CLI flag we pass and the model runs
+behind. Enforcing at the network boundary means a prompt injection inside a Paper file
+cannot widen its own tool surface. Given that summarizer reads untrusted design content,
+this is the right layer for it.
+
+### Skip
+
+**The LLM `judge` transform.** Same reasoning that cut the judge from our plan: highest
+cost, least certain payoff. Deterministic allowlists are the point — putting a model back
+in the enforcement path reintroduces exactly what we removed from verification today.
+
+### Cost
+
+A second always-on process on a 24 GB box, plus MITM certificate distribution into every
+container. Worth it only once scopes have containers (P5); pointless before.
+
 ## Deliberately not taking
 
 Recorded so we don't re-open these without new information.
@@ -304,3 +367,4 @@ Recorded so we don't re-open these without new information.
 | **Rebuilding qm** | Explicit non-goal. Our scopes are repos and objectives, not employees. Take the sandbox and posture ideas, not the multiplayer workspace. | — |
 | **Workers / Durable Objects substrate** | Only meaningful if Mission Control goes cloud. Container + worktree is the local equivalent. | If MC is ever hosted |
 | **Panel + red team + judge as an early phase** | Two weeks for the least certain payoff, and it was the part that made the UI confusing in mock review. | After P0–P4 are proven and plan quality is the measured bottleneck |
+| **iron-proxy's LLM `judge` transform`** | A model back in the enforcement path is what we just removed from verification. Deterministic allowlists are the point. | If allowlists prove too coarse in practice |
