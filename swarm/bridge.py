@@ -46,6 +46,7 @@ from gsd_backend import (
     planning_dir_name as gsd_planning_dir_name,
     plan_command as gsd_plan_command,
     verify_command as gsd_verify_command,
+    workflow_ran as gsd_workflow_ran,
 )
 
 MC_HOME = Path(os.environ.get("MC_HOME", str(Path.home() / ".mission-control")))
@@ -3132,6 +3133,16 @@ def _profile_for_attempt(base_profile: str, attempt: int) -> str:
     return ladder[min(max(attempt, 0), len(ladder) - 1)]
 
 
+def _require_gsd() -> bool:
+    """Whether to check that the GSD workflow actually ran after each step.
+
+    On by default: the whole point of the spec-driven approach is that tasks get
+    decomposed and each carries its own check, and a run without that is a different
+    experiment. Set require_gsd false for repos deliberately run without GSD.
+    """
+    return bool(get_planner_config().get("require_gsd", True))
+
+
 def _gate_check_enabled() -> bool:
     """Gate validation costs one worktree and one command run per plan. On by default —
     the failure it prevents is silent and expensive — but a repo whose build genuinely
@@ -3314,6 +3325,25 @@ def process_in_progress_plans():
                 # there is no runnable command.
                 if step_def and criteria:
                     worktree = _agent_worktree(step_data.get("agent_id", ""), registry)
+                    # A prompt asking for the GSD workflow is a request, not a
+                    # guarantee — and one naming a command that does not resolve is
+                    # ignored in silence. Record whether it actually ran, so a session
+                    # that skipped decomposition is visible instead of just looking fine.
+                    if worktree and _require_gsd():
+                        ran, why = gsd_workflow_ran(worktree)
+                        if not ran:
+                            logging.warning(f"  Step {step_key}: GSD workflow did not run — {why}")
+                            mc_log_activity(task_id, "updated",
+                                            f"Step {step_key} produced no GSD artifacts: {why}. "
+                                            f"The work was done without task decomposition or "
+                                            f"per-task automated checks.")
+                            record_step_attempt(task_id, int(step_key), {
+                                "outcome": "gsd_skipped",
+                                "attempt": step_data.get("retry_count", 0) + 1,
+                                "profile": step_data.get("agent_profile", ""),
+                                "reason": why,
+                                "shape": _step_shape(step_def),
+                            })
                     verification = verify_step_completion(step_def, agent_output, cwd=worktree)
                     if verification.get("passed"):
                         update_step_progress(task_id, int(step_key), {
