@@ -25,8 +25,8 @@ GSD produce a plan. That rerun has not happened.
 - Ticket MET-635 = task `34581c3d-9abc-4993-9974-05fe066146b1`, status `in_progress`,
   step 1 `blocked`, 9/9 questions answered. The font-licence follow-up was answered
   **Adobe Fonts — switch to a Web Project (use.typekit.net) and remove the committed
-  binaries**, which is the decision the font work needs. Nothing acted on that answer;
-  see next-step 5.
+  binaries**, which is the decision the font work needs. Nothing acted on that answer at the
+  time; `process_answered_followups` is what now would, but the daemon is off.
 - `~/GitProjects/metadao/backend-phase0` — clone with **push URL `DISABLED://phase0-no-push`**.
   Verified: `git push` fails. Delete it when done (ask first).
 - `no_pr: true` in local `swarm-config.json`, so agents are told not to push or open PRs.
