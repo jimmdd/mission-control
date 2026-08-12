@@ -175,6 +175,38 @@ def _transcript_path(task_id: str) -> Path:
     return MC_HOME / "bridge" / "plan-stage" / f"{task_id}.log"
 
 
+def text_from_stream(raw: str) -> str:
+    """Assistant text out of a `--output-format stream-json` transcript.
+
+    Falls back to returning the input unchanged, so a plain-text transcript — or a
+    stream that died mid-line — still classifies rather than reading as empty.
+    """
+    if not raw:
+        return ""
+    parts, saw_json = [], False
+    for line in raw.splitlines():
+        line = line.strip()
+        if not line.startswith("{"):
+            continue
+        try:
+            event = json.loads(line)
+        except ValueError:
+            # A half-written final line is normal when the process was killed.
+            continue
+        saw_json = True
+        message = event.get("message") if isinstance(event.get("message"), dict) else event
+        content = message.get("content")
+        if isinstance(content, str):
+            parts.append(content)
+        elif isinstance(content, list):
+            for block in content:
+                if isinstance(block, dict) and block.get("type") == "text":
+                    parts.append(block.get("text", ""))
+        if isinstance(event.get("result"), str):
+            parts.append(event["result"])
+    return "\n".join(p for p in parts if p) if saw_json else raw
+
+
 def run_plan_stage(worktree: str, task: Dict, context: str = "",
                    timeout: int = DEFAULT_TIMEOUT, model: str = "") -> Dict:
     """Plan in `worktree` as a separate process. Returns the verdict plus what it cost.
@@ -185,45 +217,49 @@ def run_plan_stage(worktree: str, task: Dict, context: str = "",
     replaces.
     """
     prompt = build_prompt(task, context)
+    # stream-json, written straight to disk as it arrives. Buffered text output is
+    # worthless here: the first real run was killed at its timeout having flushed
+    # nothing, so the transcript came out empty at exactly the moment it was needed —
+    # and a question the planner had already emitted would have gone with it.
     cmd = ["claude", "-p", prompt, "--dangerously-skip-permissions",
-           "--output-format", "text"]
+           "--output-format", "stream-json", "--verbose"]
     if model:
         cmd += ["--model", model]
 
-    def _text(stream) -> str:
-        if not stream:
-            return ""
-        return stream.decode(errors="replace") if isinstance(stream, bytes) else stream
-
+    path = _transcript_path(task["id"])
     started = time.time()
-    output, returncode, verdict = "", None, None
+    returncode, timed_out = None, False
     try:
-        proc = subprocess.run(cmd, cwd=worktree, capture_output=True, text=True, timeout=timeout)
-        output = _text(proc.stdout) + _text(proc.stderr)
-        returncode = proc.returncode
-    except subprocess.TimeoutExpired as e:
-        # Classify anyway. A planner that emitted its question and then hung has
-        # still asked it, and a plan already on disk is still a plan — throwing both
-        # away because the process overran would repeat the failure this replaces.
-        output = _text(e.stdout) + _text(e.stderr)
-        verdict = classify(worktree, output, None)
-        if verdict["outcome"] == "error":
-            verdict["reason"] = f"planning timed out after {timeout}s"
+        path.parent.mkdir(parents=True, exist_ok=True)
+        with path.open("w") as sink:
+            proc = subprocess.Popen(cmd, cwd=worktree, stdout=sink,
+                                    stderr=subprocess.STDOUT, text=True)
+            try:
+                returncode = proc.wait(timeout=timeout)
+            except subprocess.TimeoutExpired:
+                timed_out = True
+                proc.kill()
+                proc.wait()
     except FileNotFoundError:
         return {"outcome": "error", "plan_path": None, "questions": [],
                 "reason": "claude CLI not found on PATH", "duration_s": 0,
                 "transcript_path": "", "gsd_ran": False}
-
-    if verdict is None:
-        verdict = classify(worktree, output, returncode)
-
-    path = _transcript_path(task["id"])
-    try:
-        path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text(output)
     except OSError as e:
-        logging.warning(f"  could not keep the plan-stage transcript: {e}")
-        path = Path("")
+        return {"outcome": "error", "plan_path": None, "questions": [],
+                "reason": f"could not run planning: {e}", "duration_s": 0,
+                "transcript_path": str(path), "gsd_ran": False}
+
+    try:
+        output = text_from_stream(path.read_text(errors="replace"))
+    except OSError:
+        output = ""
+
+    # Classify even after a timeout. A planner that emitted its question and then
+    # hung has still asked it, and a plan already on disk is still a plan — throwing
+    # either away because the process overran would repeat the failure this replaces.
+    verdict = classify(worktree, output, None if timed_out else returncode)
+    if timed_out and verdict["outcome"] == "error":
+        verdict["reason"] = f"planning timed out after {timeout}s"
 
     ran, _ = gsd_backend.workflow_ran(worktree)
     verdict.update({

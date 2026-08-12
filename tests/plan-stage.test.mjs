@@ -34,9 +34,11 @@ function worktree({ planning = false, planText = null } = {}) {
   return dir;
 }
 
+// rc is spelled for Python: a timed-out run has no exit code, and JS null is not a
+// Python literal.
 const classify = (dir, output, rc) => python(`
 import json, plan_stage
-print(json.dumps(plan_stage.classify(${JSON.stringify(dir)}, ${JSON.stringify(output)}, ${rc})))
+print(json.dumps(plan_stage.classify(${JSON.stringify(dir)}, ${JSON.stringify(output)}, ${rc === null || rc === undefined ? "None" : rc})))
 `);
 
 test("a plan on disk with tasks in it is the verdict, whatever the agent said", () => {
@@ -189,4 +191,54 @@ test("a failed run escalates with somewhere to look", () => {
   // unreadable — the transcript path and whether GSD ran are the whole point.
   assert.match(message, /\/tmp\/t1\.log/);
   assert.match(message, /GSD actually ran: False/);
+});
+
+// The first real run was killed at its 30-minute timeout and left a zero-byte
+// transcript: `--output-format text` buffers until the end, so nothing had been
+// flushed. That is the failure mode staging exists to prevent — the verdict said
+// "timed out" and there was nowhere to look, and a question the planner had already
+// emitted would have gone with it. Output is now streamed to disk as it arrives.
+
+const fromStream = (raw) => python(`
+import json, plan_stage
+print(json.dumps(plan_stage.text_from_stream(json.loads(${JSON.stringify(JSON.stringify(raw))}))))
+`);
+
+test("assistant text is recovered from a stream-json transcript", () => {
+  const raw = [
+    JSON.stringify({ type: "system", subtype: "init" }),
+    JSON.stringify({ type: "assistant", message: { content: [{ type: "text", text: "Checking .planning" }] } }),
+    JSON.stringify({ type: "assistant", message: { content: [{ type: "text", text: "<mc-questions>[{\"question\":\"Which licence?\"}]</mc-questions>" }] } }),
+  ].join("\n");
+  const text = fromStream(raw);
+  assert.match(text, /Checking \.planning/);
+  assert.match(text, /mc-questions/);
+});
+
+test("a transcript cut mid-line still yields everything written before it", () => {
+  // Exactly what a killed process leaves behind.
+  const raw = [
+    JSON.stringify({ type: "assistant", message: { content: [{ type: "text", text: "<mc-questions>[{\"question\":\"Which licence?\",\"why\":\"changes the work\"}]</mc-questions>" }] } }),
+    '{"type":"assistant","message":{"content":[{"type":"te',
+  ].join("\n");
+
+  const text = fromStream(raw);
+  // The half-written line is dropped; the question that arrived before it is not.
+  assert.match(text, /Which licence\?/);
+
+  const dir = worktree({ planning: true });
+  try {
+    const v = classify(dir, text, null);
+    assert.equal(v.outcome, "questions_raised", "a killed run's question still counts");
+  } finally { rmSync(dir, { recursive: true, force: true }); }
+});
+
+test("a plain-text transcript still classifies rather than reading as empty", () => {
+  // Belt and braces: if the format ever changes back, this must not silently
+  // turn every run into "no question, no plan".
+  assert.match(fromStream("<mc-questions>[{\"question\":\"x\"}]</mc-questions>"), /mc-questions/);
+});
+
+test("an empty transcript is empty, not an exception", () => {
+  assert.equal(fromStream(""), "");
 });
