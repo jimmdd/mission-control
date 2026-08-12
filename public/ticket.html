@@ -376,7 +376,7 @@ function planMap(plan, progress, triage) {
       const noGsd = st.gsd_ran === false;
       parts.push(`
         <g class="stepg ${state} ${ghost}" tabindex="0">
-          <title>${esc(s.title)}${check ? `\n\n✓ ${esc(check)}` : ""}</title>
+          <title>${esc(s.title)}${check ? `\n\n✓ ${esc(check)}` : ""}${noGsd ? `\n\n⚠ ${esc(st.gsd_reason || "no GSD artifacts — the work was not spec-driven")}` : ""}</title>
           <rect class="sbox" x="${x}" y="${y}" width="${BOX_W}" height="${BOX_H}" rx="10"/>
           <text class="snum" x="${x + 12}" y="${y + 18}">STEP ${esc(String(s.step))}</text>
           ${model ? `<text class="srepo" x="${x + BOX_W - 12}" y="${y + 18}" text-anchor="end">${esc(clip(model, 14))}</text>` : ""}
