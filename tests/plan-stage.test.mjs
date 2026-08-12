@@ -1,0 +1,192 @@
+// Planning used to be the first few turns of the session that then wrote the code,
+// which made its failure unreportable: two runs went 67 and 46 tool calls with zero
+// Skill invocations and the logs looked healthy. Worse, when the planner did the
+// right thing and asked a precise question, the question went to a terminal and died.
+//
+// Planning now runs as its own process with a verdict. These cover how that verdict
+// is reached — from the filesystem wherever the filesystem can answer — and where
+// each one lands.
+
+import assert from "node:assert/strict";
+import { execFileSync } from "node:child_process";
+import { mkdtempSync, mkdirSync, writeFileSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { fileURLToPath } from "node:url";
+import { test } from "node:test";
+
+const SWARM = fileURLToPath(new URL("../swarm", import.meta.url));
+
+function python(program) {
+  const stdout = execFileSync("python3", ["-c",
+    `import sys; sys.path.insert(0, ${JSON.stringify(SWARM)})\n${program}`], {
+    encoding: "utf8",
+    stdio: ["ignore", "pipe", "ignore"],
+  });
+  return JSON.parse(stdout);
+}
+
+/** A worktree with an optional GSD project and PLAN.md. */
+function worktree({ planning = false, planText = null } = {}) {
+  const dir = mkdtempSync(join(tmpdir(), "mc-planstage-"));
+  if (planning) mkdirSync(join(dir, ".planning", "phase-1"), { recursive: true });
+  if (planText !== null) writeFileSync(join(dir, ".planning", "phase-1", "PLAN.md"), planText);
+  return dir;
+}
+
+const classify = (dir, output, rc) => python(`
+import json, plan_stage
+print(json.dumps(plan_stage.classify(${JSON.stringify(dir)}, ${JSON.stringify(output)}, ${rc})))
+`);
+
+test("a plan on disk with tasks in it is the verdict, whatever the agent said", () => {
+  const dir = worktree({ planning: true, planText: "# Plan\n<task id='1'>do the thing</task>\n" });
+  try {
+    // The transcript claims failure; the filesystem says otherwise and wins.
+    const v = classify(dir, "I was unable to complete planning.", 1);
+    assert.equal(v.outcome, "plan_written");
+    assert.match(v.plan_path, /PLAN\.md$/);
+  } finally { rmSync(dir, { recursive: true, force: true }); }
+});
+
+test("a PLAN.md with no tasks is a document about planning, not a plan", () => {
+  const dir = worktree({ planning: true, planText: "# Plan\n\nI will think about this later.\n" });
+  try {
+    const v = classify(dir, "done!", 0);
+    assert.notEqual(v.outcome, "plan_written");
+  } finally { rmSync(dir, { recursive: true, force: true }); }
+});
+
+test("a question in the agreed form is picked up and marked as the planner's", () => {
+  const dir = worktree({ planning: true });
+  try {
+    const v = classify(dir, `Thinking...
+<mc-questions>
+[{"question": "Which font licence did we buy?", "why": "self-hosting is not permitted under all of them", "options": ["Web Project", "Desktop"]}]
+</mc-questions>`, 0);
+
+    assert.equal(v.outcome, "questions_raised");
+    assert.equal(v.questions.length, 1);
+    assert.equal(v.questions[0].why, "self-hosting is not permitted under all of them");
+    assert.equal(v.questions[0].question_type, "multiple_choice");
+    // This is the field the ticket page leads with, and the one nothing used to write.
+    assert.equal(v.questions[0].source, "planner");
+  } finally { rmSync(dir, { recursive: true, force: true }); }
+});
+
+test("a question asked in prose is not a question", () => {
+  const dir = worktree({ planning: true });
+  try {
+    // Indistinguishable from thinking aloud, which is how the last one was lost.
+    const v = classify(dir, "I wonder which font licence they bought? Should I ask?", 0);
+    assert.notEqual(v.outcome, "questions_raised");
+  } finally { rmSync(dir, { recursive: true, force: true }); }
+});
+
+test("a malformed question block is ignored rather than half-read", () => {
+  const dir = worktree({ planning: true });
+  try {
+    const v = classify(dir, "<mc-questions>{not json</mc-questions>", 0);
+    assert.notEqual(v.outcome, "questions_raised");
+    assert.equal(v.questions.length, 0);
+  } finally { rmSync(dir, { recursive: true, force: true }); }
+});
+
+test("a plan outranks a question — the planner asked, then answered itself", () => {
+  const dir = worktree({ planning: true, planText: "<task>ship it</task>" });
+  try {
+    const v = classify(dir, "<mc-questions>[{\"question\": \"which one?\"}]</mc-questions>", 0);
+    assert.equal(v.outcome, "plan_written");
+  } finally { rmSync(dir, { recursive: true, force: true }); }
+});
+
+test("no GSD project is a prerequisite, never a question", () => {
+  const dir = worktree({ planning: false });
+  try {
+    const v = classify(dir, "I could not find a .planning directory.", 0);
+    // Asking a human to approve creating a directory trains them to click through,
+    // which is how a real question stops being read.
+    assert.equal(v.outcome, "prerequisite_missing");
+    assert.match(v.reason, /never created|no \.planning/);
+  } finally { rmSync(dir, { recursive: true, force: true }); }
+});
+
+test("a project but no plan and no question is an error, not a silent pass", () => {
+  const dir = worktree({ planning: true });
+  try {
+    const v = classify(dir, "All done.", 0);
+    assert.equal(v.outcome, "error");
+    assert.match(v.reason, /no plan and no question/);
+  } finally { rmSync(dir, { recursive: true, force: true }); }
+});
+
+test("the planning prompt tells the agent how to stop, and not to write code", () => {
+  const r = python(`
+import json, plan_stage
+p = plan_stage.build_prompt({"title": "MET-635", "description": "brand page"}, "## Decisions\\nD-01 settled")
+print(json.dumps({"prompt": p}))
+`);
+  const p = r.prompt;
+  assert.match(p, /do not write any application code/i);
+  assert.match(p, /<mc-questions>/);
+  assert.match(p, /Only ask what a human alone can answer/);
+  // A prerequisite is reported, not asked about.
+  assert.match(p, /do not ask about\s+missing setup/i);
+  // The decisions already made have to reach the planner, or it re-asks them.
+  assert.match(p, /D-01 settled/);
+  // The GSD precondition: /gsd-plan-phase cannot plan into a repo with no .planning/.
+  assert.match(p, /gsd-new-project/);
+});
+
+// ─────────── where each verdict lands ───────────
+
+const route = (verdict) => python(`
+import json, bridge
+calls = {"questions": None, "status": None, "activities": [], "progress": None, "metric": None}
+bridge.post_planning_questions = lambda tid, qs, **k: calls.__setitem__("questions", qs)
+bridge.mc_update_task = lambda tid, up: calls.__setitem__("status", up.get("status"))
+bridge.mc_log_activity = lambda tid, t, m, **k: calls["activities"].append((t, m))
+bridge.mc_set_progress = lambda tid, **k: calls.__setitem__("progress", k.get("blocked_reason"))
+bridge.record_step_attempt = lambda tid, n, rec: calls.__setitem__("metric", rec["outcome"])
+# Parsed, not inlined: JSON true/false/null are not Python literals.
+verdict = json.loads(${JSON.stringify(JSON.stringify(verdict))})
+proceed = bridge.route_plan_stage_outcome({"id": "t1"}, verdict)
+print(json.dumps({"proceed": proceed, **calls}))
+`);
+
+test("a written plan lets the work proceed", () => {
+  const r = route({ outcome: "plan_written", plan_path: "/x/PLAN.md", duration_s: 12, gsd_ran: true });
+  assert.equal(r.proceed, true);
+  assert.equal(r.metric, "plan_plan_written");
+});
+
+test("a raised question reaches the ticket and stops the work", () => {
+  const r = route({
+    outcome: "questions_raised",
+    questions: [{ id: "plan_q1", question: "Which licence?", source: "planner" }],
+    duration_s: 8,
+  });
+  assert.equal(r.proceed, false, "no code before the plan");
+  assert.equal(r.questions.length, 1, "posted as a follow-up, not just logged");
+  assert.equal(r.status, "planning");
+  // A dedicated type so the server raises a notification for it.
+  assert.ok(r.activities.some(([t]) => t === "new_triage_question"));
+});
+
+test("a missing prerequisite escalates without being dressed up as a question", () => {
+  const r = route({ outcome: "prerequisite_missing", reason: "no .planning/ in the worktree", transcript_path: "/t.log" });
+  assert.equal(r.proceed, false);
+  assert.equal(r.questions, null, "nobody is asked to approve creating a directory");
+  assert.ok(r.activities.some(([t]) => t === "needs_human"));
+  assert.match(r.progress, /no \.planning/);
+});
+
+test("a failed run escalates with somewhere to look", () => {
+  const r = route({ outcome: "error", reason: "planning timed out after 1800s", transcript_path: "/tmp/t1.log", gsd_ran: false });
+  assert.equal(r.proceed, false);
+  const [, message] = r.activities.find(([t]) => t === "needs_human");
+  // "The planner failed" with nowhere to look is what made the last two runs
+  // unreadable — the transcript path and whether GSD ran are the whole point.
+  assert.match(message, /\/tmp\/t1\.log/);
+  assert.match(message, /GSD actually ran: False/);
+});

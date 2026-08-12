@@ -2957,6 +2957,67 @@ def _plan_and_dispatch(task: dict, repos: List[dict]):
     _dispatch_next_steps(task, plan, repos)
 
 
+def route_plan_stage_outcome(task: dict, verdict: dict) -> bool:
+    """Act on a staged planning run. True if the work may proceed.
+
+    The point of staging planning is that its failure is reportable, so each outcome
+    has to land somewhere a person or the system can act on — a verdict that only
+    appears in a log is the situation this replaces.
+
+    - `questions_raised` posts them as planner follow-ups, which is what puts them on
+      the ticket and what `process_answered_followups` later resumes from.
+    - `prerequisite_missing` is the system's problem, never a question. It escalates
+      as a prerequisite so nobody is asked to approve a directory being created.
+    - `error` escalates with the transcript path, because "the planner failed" without
+      somewhere to look is the thing that made the last two runs unreadable.
+    """
+    task_id = task["id"]
+    outcome = verdict.get("outcome")
+    record_step_attempt(task_id, 0, {
+        "outcome": f"plan_{outcome}",
+        "attempt": 0,
+        "runtime_s": verdict.get("duration_s"),
+        "gsd_ran": verdict.get("gsd_ran"),
+    })
+
+    if outcome == "plan_written":
+        mc_log_activity(task_id, "plan_created",
+                        f"Planning wrote {verdict.get('plan_path')} "
+                        f"in {verdict.get('duration_s')}s.")
+        return True
+
+    if outcome == "questions_raised":
+        questions = verdict.get("questions") or []
+        post_planning_questions(task_id, questions)
+        mc_update_task(task_id, {"status": "planning"})
+        mc_log_activity(
+            task_id, "new_triage_question",
+            f"Planning stopped to ask {len(questions)} question(s) only you can answer. "
+            f"Answering resumes it.")
+        logging.info(f"  Plan stage raised {len(questions)} question(s) for {task_id[:8]}")
+        return False
+
+    if outcome == "prerequisite_missing":
+        # A missing GSD project is something the system creates, not something to ask
+        # about. It reaches a human only because the attempt to create it did not work.
+        mc_log_activity(
+            task_id, "needs_human",
+            f"Planning could not start and it is not a question: {verdict.get('reason')}\n\n"
+            f"Transcript: {verdict.get('transcript_path')}")
+        mc_set_progress(task_id, state="blocked", phase="planning",
+                        blocked_reason=str(verdict.get("reason"))[:500])
+        return False
+
+    mc_log_activity(
+        task_id, "needs_human",
+        f"Planning failed: {verdict.get('reason')}\n\n"
+        f"Transcript: {verdict.get('transcript_path')}\n"
+        f"GSD actually ran: {verdict.get('gsd_ran')}")
+    mc_set_progress(task_id, state="blocked", phase="planning",
+                    blocked_reason=str(verdict.get("reason"))[:500])
+    return False
+
+
 def _enforce_gates(task: dict, plan: dict, repos: List[dict], steps: List[dict]) -> List[dict]:
     """Block the steps whose verify_command cannot pass. Returns the ones still runnable.
 
