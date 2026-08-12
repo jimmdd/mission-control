@@ -1203,6 +1203,81 @@ async function handleApiRequest(
               }
             }
 
+            // Everything a person can do to a single question without answering it.
+            // "Answer or the ticket stalls" is a false choice: the exits below are
+            // what stop one unanswerable question holding up the other eight.
+            //   POST /api/tasks/:id/questions/:qid/ask       {text}  — ask back
+            //        .../delegate — let the agent choose and say why
+            //        .../defer    — not needed yet; stops blocking
+            //        .../reopen   — take back an answer, keeping its reasoning
+            if (segments.length === 5 && segments[2] === "questions" && method === "POST") {
+              const questionId = decodeURIComponent(segments[3]);
+              const action = segments[4];
+              if (!["ask", "delegate", "defer", "reopen"].includes(action)) {
+                sendJson(res, 400, { error: `Unknown question action: ${action}` });
+                return;
+              }
+
+              const state = db.getTriageState(taskId);
+              const questions = isRecord(state) && Array.isArray(state.questions) ? state.questions : null;
+              if (!questions) {
+                sendJson(res, 404, { error: "No questions on this task" });
+                return;
+              }
+              const question = questions.find(
+                (q) => isRecord(q) && q.id === questionId,
+              ) as Record<string, unknown> | undefined;
+              if (!question) {
+                sendJson(res, 404, { error: `No question ${questionId}` });
+                return;
+              }
+
+              const now = new Date().toISOString();
+              let activityType = "updated";
+              let activityMessage = "";
+
+              if (action === "ask") {
+                const body = await parseBody(req);
+                const text = isRecord(body) && typeof body.text === "string" ? body.text.trim() : "";
+                if (!text) {
+                  sendJson(res, 400, { error: "Ask requires a non-empty text" });
+                  return;
+                }
+                const thread = Array.isArray(question.thread) ? question.thread : [];
+                question.thread = [...thread, { role: "you", text, at: now }];
+                // A dedicated type so the bridge can see there is a reply owed —
+                // the whole point is that the asker gets an answer, not a form.
+                activityType = "question_asked";
+                activityMessage = `Question "${String(question.question ?? questionId).slice(0, 120)}" — asked back: ${text}`;
+              } else if (action === "delegate") {
+                question.delegate_requested = true;
+                question.deferred = false;
+                activityType = "question_delegated";
+                activityMessage = `Question "${String(question.question ?? questionId).slice(0, 120)}" handed to the agent to decide.`;
+              } else if (action === "defer") {
+                question.deferred = true;
+                question.delegate_requested = false;
+                activityMessage = `Question "${String(question.question ?? questionId).slice(0, 120)}" deferred — it no longer blocks.`;
+              } else {
+                // reopen: the answer goes, the reasoning stays. Someone overriding an
+                // agent's pick should be able to read why it picked that while deciding.
+                question.answer = null;
+                question.answered_at = null;
+                question.answered_by = null;
+                question.delegate_requested = false;
+                activityMessage = `Answer to "${String(question.question ?? questionId).slice(0, 120)}" taken back.`;
+              }
+
+              const next = db.replaceTriageState(taskId, { ...state, questions, updated_at: now });
+              db.createActivity({
+                task_id: taskId,
+                activity_type: activityType,
+                message: activityMessage,
+              });
+              sendJson(res, 200, { success: true, triage_state: next });
+              return;
+            }
+
             if (segments.length === 3 && segments[2] === "reset-triage" && method === "POST") {
               const task = db.resetTriage(taskId);
               if (!task) {

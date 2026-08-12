@@ -50,6 +50,16 @@ from gsd_backend import (
     workflow_ran as gsd_workflow_ran,
 )
 from worktree_env import describe, install_dependencies, looks_unprepared, seed_worktree_env
+from questions import (
+    add_message as question_add_message,
+    all_settled as questions_all_settled,
+    awaiting_decision,
+    awaiting_reply,
+    blocking as blocking_questions,
+    merge as merge_questions,
+    record_answer as question_record_answer,
+    summarise as summarise_questions,
+)
 
 MC_HOME = Path(os.environ.get("MC_HOME", str(Path.home() / ".mission-control")))
 MC_BASE_URL = os.environ.get("MISSION_CONTROL_URL", "http://localhost:18900")
@@ -1157,29 +1167,24 @@ def post_planning_questions(task_id: str, questions: List[dict], triage_result: 
     now = datetime.now(timezone.utc).isoformat()
 
     existing_repos = []
+    existing_questions: List[dict] = []
     try:
         existing_state = mc_request("GET", f"/api/tasks/{task_id}/triage-state")
         if existing_state and existing_state.get("triage_repos"):
             existing_repos = existing_state["triage_repos"]
+        if existing_state and existing_state.get("questions"):
+            existing_questions = existing_state["questions"]
     except Exception:
         pass
 
     new_repos = triage_result.get("repos", []) if triage_result else []
 
     triage_state = {
-        "questions": [
-            {
-                "id": q.get("id", f"q{i}"),
-                "question": q.get("question", q.get("q", "")),
-                "category": q.get("category", "scope"),
-                "question_type": q.get("question_type", "text"),
-                "options": q.get("options"),
-                "answer": q.get("answer"),
-                "answered_at": q.get("answered_at"),
-                "answered_by": q.get("answered_by"),
-            }
-            for i, q in enumerate(questions, 1)
-        ],
+        # Merge rather than rebuild. Listing the fields by hand dropped everything
+        # this function did not know about — an agent's reasoning, a deferral, the
+        # conversation that was the reason a question was still open — so a second
+        # round quietly erased the first.
+        "questions": merge_questions(existing_questions, questions),
         "triage_reasoning": triage_result.get("reasoning", "") if triage_result else "",
         "triage_repos": existing_repos if existing_repos else new_repos,
         "created_at": now,
@@ -2530,11 +2535,40 @@ def _build_triage_context(task_id: str) -> str:
 
     questions = ts.get("questions", []) if ts else []
     answered = [q for q in questions if q.get("answer")]
-    if answered:
+
+    # A follow-up answered after planning stopped is a decision, not a triage answer.
+    # It is the reason planning restarts, and it binds a decision id the plan must
+    # cite — folding it in with the opening Q&A buries exactly the thing that changed.
+    decisions = [q for q in answered if q.get("source") == "planner"]
+    triage_qa = [q for q in answered if q.get("source") != "planner"]
+
+    if triage_qa:
         lines = []
-        for q in answered:
+        for q in triage_qa:
             lines.append(f"**Q:** {q.get('question', q.get('q', ''))}\n**A:** {q.get('answer', '')}")
         sections.append("## Triage Q&A\n" + "\n\n".join(lines))
+
+    if decisions:
+        lines = []
+        for q in decisions:
+            tag = q.get("becomes") or "decision"
+            by = "you" if q.get("answered_by") != "agent" else "the agent, on your delegation"
+            entry = (f"**{tag}** — {q.get('question', '')}\n"
+                     f"**Decided:** {q.get('answer', '')} (by {by})")
+            if q.get("reason"):
+                entry += f"\n**Why:** {q['reason']}"
+            lines.append(entry)
+        sections.append(
+            "## Decisions (binding — the plan must reflect these)\n" + "\n\n".join(lines))
+
+    # Deferrals are load-bearing too: a question consciously postponed must not be
+    # re-asked, and the plan should avoid depending on its answer.
+    deferred = [q for q in questions if q.get("deferred") and not q.get("answer")]
+    if deferred:
+        lines = [f"- {q.get('question', '')}" for q in deferred]
+        sections.append(
+            "## Deferred — do not re-ask, and do not build anything that needs these\n"
+            + "\n".join(lines))
 
     return "\n\n".join(sections)
 
@@ -4045,6 +4079,269 @@ def check_for_answers(task_id: str) -> Optional[str]:
     return "\n\n".join(answers) if answers else None
 
 
+# A question outlives the status it was asked in. A follow-up raised while a step is
+# blocked lives on an `in_progress` task, which is why watching only `planning` meant
+# the font-licence answer was stored and then nothing happened.
+QUESTION_STATUSES = ("planning", "assigned", "in_progress")
+
+
+def _question_context(task: dict) -> str:
+    """What the answering agent needs: the ticket, and everything already settled."""
+    parts = [f"TICKET: {task.get('title', '')}"]
+    if task.get("description"):
+        parts.append(f"DESCRIPTION:\n{task['description'][:2000]}")
+    settled = _build_triage_context(task["id"])
+    if settled:
+        parts.append(settled)
+    return "\n\n".join(parts)
+
+
+def _answer_thread(task: dict, question: dict, context: str) -> Optional[str]:
+    """Reply to something the human asked back about a question.
+
+    Answering honestly includes saying "I do not know from here" — a confident guess
+    about which font licence was bought is worse than silence, because it will be
+    believed and it binds a decision.
+    """
+    thread = "\n".join(
+        f"{'YOU' if m.get('role') == 'you' else 'RESEARCH'}: {m.get('text', '')}"
+        for m in question.get("thread", [])
+    )
+    options = question.get("options") or []
+    prompt = f"""You are helping someone answer a question that is currently blocking work.
+They have asked you something about it. Answer that — do not re-ask the original question.
+
+{context}
+
+THE QUESTION THEY ARE BEING ASKED: {question.get('question', '')}
+WHY IT IS BEING ASKED: {question.get('why', '(not recorded)')}
+OPTIONS OFFERED: {', '.join(options) if options else '(free text)'}
+
+CONVERSATION SO FAR:
+{thread}
+
+Rules:
+- Answer the last message. Be specific and short — a few sentences.
+- If you have a recommendation, give it and say what it costs.
+- If the answer depends on something only they know (a purchase, a contract, an
+  internal preference), say so plainly instead of guessing.
+- If it depends on something in the code that you have not been shown, say what you
+  would need to look at. Do not invent what the code does.
+
+Respond with ONLY valid JSON: {{"reply": "your answer"}}"""
+    result = _parse_gemini_json(call_gemini(prompt, max_tokens=900, model=_triage_model_deep()))
+    reply = (result or {}).get("reply", "").strip()
+    return reply or None
+
+
+def _decide_delegated(task: dict, question: dict, context: str) -> Optional[Tuple[str, str]]:
+    """Make a call the human handed over. Returns (choice, reason).
+
+    The reason is not decoration. A delegated pick shows up as "chosen by the agent"
+    with its reasoning next to it, and can be taken back — so it has to be legible
+    enough to disagree with.
+    """
+    options = question.get("options") or []
+    prompt = f"""Someone has asked you to make this decision for them, because they have no
+strong preference. Make it, and explain the choice well enough that they could disagree.
+
+{context}
+
+QUESTION: {question.get('question', '')}
+WHY IT MATTERS: {question.get('why', '(not recorded)')}
+OPTIONS: {', '.join(options) if options else '(free text — answer in your own words)'}
+
+Rules:
+- Pick the option that is easiest to reverse if it turns out wrong.
+- {"Choose exactly one of the options offered." if options else "Give a short, concrete answer."}
+- The reason must say what the choice buys and what it gives up. One or two sentences.
+
+Respond with ONLY valid JSON: {{"choice": "...", "reason": "..."}}"""
+    result = _parse_gemini_json(call_gemini(prompt, max_tokens=700, model=_triage_model_deep()))
+    if not result:
+        return None
+    choice = str(result.get("choice", "")).strip()
+    reason = str(result.get("reason", "")).strip()
+    if not choice:
+        return None
+    # A model that answers off-menu has not made the choice that was delegated.
+    if options and choice not in options:
+        match = next((o for o in options if o.lower() == choice.lower()), None)
+        if match:
+            choice = match
+        else:
+            logging.warning(f"  Delegated pick {choice!r} is not one of the options — leaving open")
+            return None
+    return choice, reason
+
+
+def _service_task_questions(task: dict) -> bool:
+    """Answer replies owed and decisions delegated on one task. True if anything changed."""
+    task_id = task["id"]
+    try:
+        state = mc_request("GET", f"/api/tasks/{task_id}/triage-state")
+    except Exception:
+        return False
+    questions = (state or {}).get("questions") or []
+    replies = awaiting_reply(questions)
+    delegated = awaiting_decision(questions)
+    if not replies and not delegated:
+        return False
+
+    context = _question_context(task)
+    changed = False
+
+    for q in replies:
+        reply = _answer_thread(task, q, context)
+        if reply:
+            question_add_message(q, "research", reply)
+            changed = True
+            logging.info(f"  Replied in the thread on {q.get('id')} for {task_id[:8]}")
+        else:
+            logging.warning(f"  No reply produced for question {q.get('id')} on {task_id[:8]}")
+
+    for q in delegated:
+        decision = _decide_delegated(task, q, context)
+        if decision:
+            choice, reason = decision
+            question_record_answer(q, choice, by="agent", reason=reason)
+            changed = True
+            mc_log_activity(
+                task_id, "updated",
+                f"Decided on your behalf: **{q.get('question', '')}** → {choice}\n\n{reason}\n\n"
+                f"Marked as the agent's call — change it on the ticket if you disagree.")
+            logging.info(f"  Decided delegated question {q.get('id')} for {task_id[:8]}")
+
+    if not changed:
+        return False
+
+    try:
+        mc_request("PUT", f"/api/tasks/{task_id}/triage-state", {**state, "questions": questions})
+    except Exception as e:
+        logging.warning(f"  Could not save question updates for {task_id[:8]}: {e}")
+        return False
+    return True
+
+
+def process_open_questions():
+    """Answer what was asked back, and decide what was handed over.
+
+    Runs across every status a question can be open in, not just `planning` — the
+    ones that matter most are raised after planning has already started.
+    """
+    for status in QUESTION_STATUSES:
+        for task in fetch_tasks_by_status(status) or []:
+            try:
+                _service_task_questions(task)
+            except Exception as e:
+                logging.warning(f"Question servicing failed for {task['id'][:8]}: {e}")
+
+
+# How many times the same question may be answered and re-raised before we stop
+# re-dispatching and ask a human to look. A planner that raises a follow-up, gets an
+# answer, and raises it again has not understood the answer; running that loop again
+# spends quota to arrive back here.
+MAX_RESUME_ROUNDS = 2
+
+
+def _resume_planning_for(task: dict, state: dict, questions: List[dict]) -> bool:
+    """Put a task held on follow-ups back to work. True if it was resumed."""
+    task_id = task["id"]
+    answered_ids = sorted(q["id"] for q in questions
+                          if q.get("source") == "planner" and q.get("answer"))
+    resume_log = state.get("resume_log") or []
+
+    # Already resumed for exactly this set — nothing new has been answered since.
+    if resume_log and resume_log[-1].get("question_ids") == answered_ids:
+        return False
+
+    seen_counts = {}
+    for entry in resume_log:
+        for qid in entry.get("question_ids", []):
+            seen_counts[qid] = seen_counts.get(qid, 0) + 1
+    looping = [qid for qid in answered_ids if seen_counts.get(qid, 0) >= MAX_RESUME_ROUNDS]
+    if looping:
+        logging.warning(f"  {task_id[:8]} has re-raised {looping} after answering — not resuming again")
+        mc_log_activity(
+            task_id, "needs_human",
+            f"Planning has now asked about {', '.join(looping)} {MAX_RESUME_ROUNDS + 1} times, "
+            f"after each answer. Re-running it would land here again — someone should read "
+            f"the thread and decide whether the question is answerable as asked.")
+        try:
+            mc_request("POST", f"/api/tasks/{task_id}/checkpoints", {
+                "kind": "approval",
+                "prompt": (f"The planner keeps re-asking {', '.join(looping)} after it has been "
+                           f"answered. Check the ticket's thread before re-triggering."),
+                "pause": False,
+            })
+        except Exception:
+            pass
+        return False
+
+    # Hand the work back. A blocked step is re-run rather than resumed mid-flight:
+    # the answer changes the spec, not what has already been built, and the prompt
+    # builder folds the decision in through _build_triage_context.
+    reopened = 0
+    progress = load_progress(task_id)
+    if progress:
+        for step_key, step_data in (progress.get("steps") or {}).items():
+            if step_data.get("status") == "blocked":
+                update_step_progress(task_id, int(step_key), {
+                    "status": "pending",
+                    "outcome": "Follow-up answered — re-planning this step against the decision",
+                    "agent_id": None,
+                })
+                reopened += 1
+
+    counts = summarise_questions(questions)
+    mc_log_activity(
+        task_id, "updated",
+        f"Follow-up answered — planning resumes. "
+        f"{counts['answered']}/{counts['total']} settled"
+        + (f", {counts['deferred']} deferred" if counts["deferred"] else "")
+        + (f". Re-planning {reopened} blocked step(s)." if reopened else "."))
+    mc_set_progress(task_id, state="", phase="planning", blocked_reason="")
+
+    state["resume_log"] = resume_log + [{
+        "at": datetime.now(timezone.utc).isoformat(),
+        "question_ids": answered_ids,
+    }]
+    try:
+        mc_request("PUT", f"/api/tasks/{task_id}/triage-state", state)
+    except Exception as e:
+        logging.warning(f"  Could not record resume for {task_id[:8]}: {e}")
+        return False
+
+    logging.info(f"  Resumed planning for {task_id[:8]} ({len(answered_ids)} follow-up(s) answered)")
+    return True
+
+
+def process_answered_followups():
+    """Answering a follow-up must restart the thing that stopped for it.
+
+    Without this the whole feature is decorative: the question renders, the answer is
+    stored, and the ticket sits until a human notices and re-dispatches by hand. That
+    was verified live — the font-licence follow-up was answered and MET-635 did not move.
+    """
+    for status in QUESTION_STATUSES:
+        for task in fetch_tasks_by_status(status) or []:
+            try:
+                state = mc_request("GET", f"/api/tasks/{task['id']}/triage-state")
+            except Exception:
+                continue
+            questions = (state or {}).get("questions") or []
+            # Only follow-ups gate this. Opening triage questions are handled by the
+            # planning path that already waits on them.
+            if not any(q.get("source") == "planner" and q.get("answer") for q in questions):
+                continue
+            if not questions_all_settled(questions):
+                continue
+            try:
+                _resume_planning_for(task, state, questions)
+            except Exception as e:
+                logging.warning(f"Resume failed for {task['id'][:8]}: {e}")
+
+
 def process_planning_tasks():
     planning_tasks = fetch_tasks_by_status("planning")
     if not planning_tasks:
@@ -4137,6 +4434,9 @@ def process_planning_tasks():
                 "question": "Which repo(s) should this task target? I couldn't determine this from the task and the answers so far.",
                 "question_type": "multiple_choice" if options else "text",
                 "options": (options + ["Other (please specify)"]) if options else None,
+                "source": "planner",
+                "why": ("Triage read the ticket and the answers so far and still could not tell "
+                        "which repo this lands in. Planning cannot start without it."),
             }
             post_planning_questions(task_id, existing_qs + [repo_question],
                                     triage_result={"repos": [], "reasoning": "repo-selection follow-up"})
@@ -4723,11 +5023,15 @@ def process_human_escalations():
         mc_set_progress(task_id, state="blocked", phase="escalation",
                         blocked_reason=escalation_msg[:500])
 
+        # Raised after planning, by an agent that stopped — so it leads the ticket
+        # rather than sitting among the opening triage questions.
         questions = [{
             "id": "agent_escalation",
             "question": escalation_msg,
             "category": "technical",
             "question_type": "text",
+            "source": "planner",
+            "why": "An agent stopped here rather than guess. Work is halted until this is settled.",
         }]
         post_planning_questions(task_id, questions)
         logging.info(f"  Recorded escalation in Mission Control for {task_id[:8]}")
@@ -4750,6 +5054,8 @@ def run_once():
     else:
         logging.info("No inbox tasks to process")
 
+    process_open_questions()
+    process_answered_followups()
     process_planning_tasks()
     process_in_progress_plans()
     process_review_tasks()
