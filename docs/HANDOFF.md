@@ -1,6 +1,6 @@
 # Handoff — Mission Control v2, spec-driven execution
 
-Session of 2026-08-11/12. Branch `feat/deterministic-verification`, **32 commits, 125 tests
+Sessions of 2026-08-11/12. Branch `feat/deterministic-verification`, **37 commits, 164 tests
 green, `tsc` clean, nothing pushed anywhere.**
 
 Read `~/.claude/plans/kind-mixing-pixel.md` for the original plan. This document covers what
@@ -14,8 +14,9 @@ The thesis is that GSD decomposes work into tasks small enough that a cheaper mo
 them correctly, so the strongest model goes on planning and execution parallelises across
 pools. Phase 0 exists to test that. **It has still never been tested**, because two things had
 to be true first and neither was: verification had to be trustworthy, and GSD had to actually
-run. Both are now fixed or diagnosed. The remaining blocker is a build that fails on
-unmodified code, which is in the target repo, not here.
+run. The gate blocker is now fixed at the root — it was a worktree with no environment, not a
+broken base commit — so the one remaining unknown is whether the `/gsd-new-project` fix makes
+GSD produce a plan. That rerun has not happened.
 
 ## State right now
 
@@ -94,51 +95,84 @@ has no `.claude` settings or `CLAUDE.md` rule suppressing them.
 the bridge records `gsd_ran` on the step plus a `gsd_skipped` metrics row. The graph marks such
 steps with an amber left edge.
 
-### 2. The gate cannot pass
+### 2. The gate cannot pass — **fixed, and the diagnosis was wrong**
 
-`bun run --cwd apps/new-ui build` fails on the **unmodified base commit** —
-`MISSING_EXPORT "PUBLIC_API_URL"` from `$env/static/public`. Confirmed with a control worktree.
-So no Phase 0 number is possible until either the build works in a fresh worktree (your repo's
-problem, not MC's) or the sweep targets a ticket whose build already runs locally.
+The earlier reading was that `bun run --cwd apps/new-ui build` fails on the unmodified base
+commit, and that this was the target repo's problem. Both halves were wrong. The branch was
+never the issue either: the worktree is descended from `coda/new-ui` and `apps/new-ui` exists
+on it.
 
-`validate_plan_gates` catches this before dispatch — on MET-635's plan it blocks steps 1–3 and
-correctly passes step 4. **Known gap: it runs only in `_plan_and_dispatch`, not on the retry
-path.** A step re-dispatched directly escalated `claude → codex` straight into the broken gate.
-Fix that before further runs.
+The cause was that **a git worktree carries tracked files only**. With no `.env`, SvelteKit's
+`$env/static/public` exports none of the `PUBLIC_*` names the source imports, so the build dies
+on `MISSING_EXPORT "PUBLIC_API_URL"`; bare of `node_modules` it dies earlier, on exit 127.
+Supply both and the same commit builds in 4.17s. Verified end to end — `check_verify_command_baseline`
+now returns `runnable: True` on the untouched base ref.
+
+`swarm/worktree_env.py` seeds both, for agent worktrees (via `spawn-agent.sh`) and the gate-check
+probe. Real local config is copied when present, `.env.example` seeds placeholders otherwise, and
+the two are reported separately so a pass stays attributable. A destination git would track is
+skipped rather than written. Deps install only when a gate fails in a way that says the tree was
+never set up.
+
+The retry-path gap is closed too: the check moved from `_plan_and_dispatch` to `_dispatch_next_steps`,
+the funnel both first dispatch and retries go through, with a per-command cache (passes kept,
+failures re-probed after 15 minutes so a repaired gate recovers on its own).
 
 ## Next, in order
 
 1. **Re-run step 1** to verify the `/gsd-new-project` fix produces `.planning/` with a
    `PLAN.md` containing `<task>` blocks. Dispatch into `backend-phase0`; watch for `.planning/`.
-2. **Gate precheck on the retry path**, so a broken gate costs one attempt rather than the
-   whole ladder.
-3. **Stage the plan step** — its own `claude -p` process with captured stdout, then classify:
-   plan written / questions raised / prerequisite missing / error. This is the big one and it
-   is what everything else waits on. Rationale: a stage buried in a 200-turn session cannot
-   report why it failed; tonight the planner produced a precise, actionable question and it
-   went to a terminal and died.
-4. **Route planner questions to the UI** with `source: "planner"`. The section already exists
-   and is tested; nothing writes that field yet.
-5. **Close the loop: answering a follow-up must resume planning.** This is missing entirely and
-   is the half that makes the feature real. Today the section renders, the answer is stored in
-   `triage_state`, and then nothing happens — no code watches for a follow-up becoming answered,
-   so planning stays stopped until a human notices and re-dispatches by hand. Verified live: the
-   font-licence follow-up was answered and the ticket did not move.
+   This is now the only thing between here and Phase 0.
+2. **Stage the plan step** — its own `claude -p` process with captured stdout, then classify:
+   plan written / questions raised / prerequisite missing / error. Rationale: a stage buried in
+   a 200-turn session cannot report why it failed; the planner produced a precise, actionable
+   question and it went to a terminal and died. The question layer below now gives that question
+   somewhere to land, but nothing yet captures it.
+3. Then Phase 0 proper, per `docs/phase-0-measurement.md`.
 
-   What it needs:
-   - A watcher on the planning path (`process_planning_tasks` is the natural home) that fires
-     when a step is held on follow-ups and all of them now have answers.
-   - Re-dispatch of the *plan stage only*, not the whole step — the answer changes the spec, not
-     the work already done.
-   - The answers must reach the planner's prompt. `_build_triage_context` already folds answered
-     questions in, so this mostly works; confirm follow-ups are included and labelled as
-     decisions rather than triage answers.
-   - A guard against loops: a planner that raises a follow-up, gets an answer, and raises the
-     same one again should escalate rather than cycle.
+The daemon is off in the current state, so nothing polls at all — turn it on before expecting
+any of the loops below to fire.
 
-   Note the daemon is off in the current state, so nothing polls at all — turn it on before
-   expecting any of this to trigger.
-6. Then Phase 0 proper, per `docs/phase-0-measurement.md`.
+## Done since (session of 2026-08-12)
+
+**Worktree environment** — see blocker 2 above. `swarm/worktree_env.py`, wired into
+`spawn-agent.sh` and the gate probe.
+
+**Gate check on every dispatch**, not just the first, with a per-command cache.
+
+**The question layer.** A question was a prompt and some options: enough to collect an answer,
+not enough to get a good one. It now carries `why` it is being asked, the `becomes` decision id
+its answer locks, its `thread`, and its `source` (`triage` before there is a plan, `planner`
+because the plan stopped — the second leads the ticket).
+
+Three exits sit beside every question, because "answer or the ticket stalls" is a false choice:
+
+- **Ask about this** — opens a thread; `process_open_questions` replies, and is told to say
+  plainly when the answer is one only you hold rather than guess.
+- **Decide for me** — the agent picks and records why, marked `answered_by: "agent"` so it reads
+  as delegated rather than decided, with "Change it" to take it back.
+- **Decide later** — stops the question blocking, so one unanswerable question does not hold up
+  the other eight. Deferred questions are excluded from the open count and passed to the planner
+  under "do not re-ask, and do not build anything that needs these".
+
+**Answering resumes the work** (`process_answered_followups`). This was the missing half.
+It watches `planning`, `assigned` **and** `in_progress` — the follow-ups that matter are raised
+after planning has started, which is why watching only `planning` meant MET-635 never moved.
+Blocked steps are re-run rather than resumed mid-flight: the answer changes the spec, not what
+was already built. It stops re-dispatching once the same question has come back twice
+(`MAX_RESUME_ROUNDS`) and raises a checkpoint instead of cycling.
+
+`_build_triage_context` now separates decisions from triage answers, so a follow-up answer
+reaches the planner labelled as binding rather than buried in the opening Q&A.
+
+**Rounds merge instead of rebuilding.** `post_planning_questions` listed the fields by hand, so
+anything it did not know about — an agent's reasoning, a deferral, the conversation that was the
+reason a question was still open — was erased on the next round.
+
+Still missing from the original design (`claude.ai/code/artifact/c072dee6`): the `.qspike`
+read-only investigation an agent can run mid-thread ("checking the migrations, ~40s"), the
+`.talk` free-form box on the findings card, the `.crew` stage→model strip, and the editable
+`.targets` block. The question thread is the part that was load-bearing; those are not.
 
 Design rules settled this session, worth not relitigating:
 
@@ -160,13 +194,9 @@ envelope + async approvals).
 
 ## Loose ends the user owns
 
-- **Rotate the Linear key** pasted into the transcript (`lin_api_…`). It is a test key per the
-  user, but it is in a transcript. *(An earlier warning about a Codex token was mine and wrong
-  — retracted; nothing read it.)*
-- **`apps/new-ui` ships 4 Aktiv Grotesk `.woff2` files self-hosted.** Adobe Fonts terms do not
-  permit self-hosting; web use must come from `use.typekit.net`. Which licence you hold changes
-  the implementation. This is the one open follow-up on the ticket.
-- Branch unpushed, no PR.
+- The Linear key and the font-licence decision were both handled by the user as of
+  2026-08-12; neither blocks anything now.
+- Branch unpushed, no PR — and the user has asked explicitly that it stay that way for now.
 - This laptop now has `~/.mission-control`, a global GSD install
   (`~/.claude/settings.json.pre-gsd.bak` reverts it), an `rm -rf` confirmation hook at
   `~/.claude/hooks/confirm-recursive-delete.sh` (active from a new session), and the
@@ -176,6 +206,10 @@ envelope + async approvals).
 
 | | |
 |---|---|
+| Question shape, exits, merging | `swarm/questions.py` |
+| Worktree env + dep seeding | `swarm/worktree_env.py` |
+| Question threads, delegation, resume | `swarm/bridge.py` → `process_open_questions`, `process_answered_followups` |
+| Question actions API | `src/routes.ts` → `/api/tasks/:id/questions/:qid/{ask,delegate,defer,reopen}` |
 | Command spellings, GSD probes | `swarm/gsd_backend.py` |
 | Dispatch, escalation, metrics, gate check | `swarm/bridge.py` |
 | Verification, plan generation, config | `swarm/planner.py` |
