@@ -435,7 +435,10 @@ function planMap(plan, progress, triage) {
       // Provisional while decisions are still open — the plan may yet change.
       const ghost = open.length > 0 && !state ? "ghost" : "";
       const sel = String(selectedStep) === String(n) ? "sel" : "";
-      const model = st.agent_profile || st.category || s.category || "";
+      // The runtime that ran it. Deliberately NOT the step category ("deep",
+      // "quick", "review"): that is a routing hint for picking a profile, not
+      // something a reader acts on, and it read as a label about the work itself.
+      const model = st.agent_profile || "";
       const check = (s.verify_command || "").trim();
       // A step that produced no GSD artifacts was not spec-driven, whatever else it
       // achieved — the plan carrying the context is the whole premise.
@@ -505,6 +508,7 @@ function stepDetail(plan, progress, num) {
       <div class="sd-meta">
         ${esc(st.status || "pending")}
         ${st.agent_profile ? ` · ran on ${esc(st.agent_profile)}` : ""}
+        ${!st.agent_profile && (st.category || s.category) ? ` · routed as ${esc(st.category || s.category)}` : ""}
         ${st.retry_count ? ` · attempt ${st.retry_count + 1}` : ""}
         ${deps.length ? ` · needs step ${deps.join(", ")}` : " · no dependencies"}
         ${s.repo ? ` · ${esc(s.repo)}` : ""}
