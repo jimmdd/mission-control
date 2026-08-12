@@ -242,3 +242,141 @@ test("a plain-text transcript still classifies rather than reading as empty", ()
 test("an empty transcript is empty, not an exception", () => {
   assert.equal(fromStream(""), "");
 });
+
+// ─────────── two stages, two budgets ───────────
+// The first real run gave init and planning one shared 1800s. Setting up an
+// established repo consumed all of it — a six-phase roadmap, a design contract, 61KB
+// of research — and planning never started. They are separate stages now, and init
+// is skipped entirely once .planning/ exists, so a retry costs only the plan.
+
+test("init is skipped when the project already exists, at no cost", () => {
+  const dir = worktree({ planning: true });
+  try {
+    const v = python(`
+import json, plan_stage
+def explode(*a, **k):
+    raise AssertionError("no process should run when .planning/ already exists")
+plan_stage._run_claude = explode
+print(json.dumps(plan_stage.run_init_stage(${JSON.stringify(dir)}, {"id": "t1"})))
+`);
+    assert.equal(v.outcome, "initialised");
+    assert.equal(v.duration_s, 0);
+  } finally { rmSync(dir, { recursive: true, force: true }); }
+});
+
+test("init that does not create the project is a prerequisite, not an error", () => {
+  const dir = worktree({ planning: false });
+  try {
+    const v = python(`
+import json, plan_stage
+plan_stage._run_claude = lambda *a, **k: {"output": "all done!", "returncode": 0,
+                                          "timed_out": False, "duration_s": 4.2, "failed": None}
+print(json.dumps(plan_stage.run_init_stage(${JSON.stringify(dir)}, {"id": "t1"})))
+`);
+    // The agent claimed success; the directory says otherwise and the directory wins.
+    assert.equal(v.outcome, "prerequisite_missing");
+    assert.match(v.reason, /without creating/);
+  } finally { rmSync(dir, { recursive: true, force: true }); }
+});
+
+test("a failed init stops before planning is paid for", () => {
+  const dir = worktree({ planning: false });
+  try {
+    const r = python(`
+import json, plan_stage
+ran = []
+plan_stage._run_claude = lambda *a, **k: (ran.append("init"),
+    {"output": "", "returncode": 1, "timed_out": False, "duration_s": 1, "failed": None})[1]
+plan_stage.run_plan_stage = lambda *a, **k: (_ for _ in ()).throw(
+    AssertionError("planning must not run after a failed init"))
+v = plan_stage.plan_in_worktree(${JSON.stringify(dir)}, {"id": "t1"})
+print(json.dumps({"outcome": v["outcome"], "stages": [s["stage"] for s in v["stages"]]}))
+`);
+    assert.equal(r.outcome, "prerequisite_missing");
+    assert.deepEqual(r.stages, ["init"], "only init ran");
+  } finally { rmSync(dir, { recursive: true, force: true }); }
+});
+
+test("both stages are reported, so a post-mortem sees where the time went", () => {
+  const dir = worktree({ planning: true, planText: "<task>do it</task>" });
+  try {
+    const r = python(`
+import json, plan_stage
+plan_stage._run_claude = lambda *a, **k: {"output": "", "returncode": 0,
+                                          "timed_out": False, "duration_s": 90.0, "failed": None}
+v = plan_stage.plan_in_worktree(${JSON.stringify(dir)}, {"id": "t1"})
+print(json.dumps({"outcome": v["outcome"], "stages": [[s["stage"], s["outcome"]] for s in v["stages"]]}))
+`);
+    assert.equal(r.outcome, "plan_written");
+    assert.deepEqual(r.stages, [["init", "initialised"], ["plan", "plan_written"]]);
+  } finally { rmSync(dir, { recursive: true, force: true }); }
+});
+
+test("init and plan keep separate transcripts", () => {
+  const r = python(`
+import json, plan_stage
+print(json.dumps([str(plan_stage._transcript_path("t1", "init")),
+                  str(plan_stage._transcript_path("t1", "plan"))]))
+`);
+  // Overwriting each other would lose the only account of whichever ran first.
+  assert.notEqual(r[0], r[1]);
+});
+
+test("the init prompt does not invite questions — setup is not a decision", () => {
+  const r = python(`
+import json, plan_stage
+print(json.dumps({"p": plan_stage.build_init_prompt({"title": "MET-635"})}))
+`);
+  assert.doesNotMatch(r.p, /<mc-questions>/);
+  assert.match(r.p, /gsd-new-project/);
+  assert.match(r.p, /do not write any application code/i);
+});
+
+// ─────────── the call site ───────────
+
+const stage = (program) => python(`
+import json, bridge
+calls = {"metrics": [], "routed": None, "planned": False}
+bridge.record_step_attempt = lambda tid, n, rec: calls["metrics"].append(rec["outcome"])
+bridge.route_plan_stage_outcome = lambda task, v: calls.__setitem__("routed", v["outcome"]) or False
+bridge._build_triage_context = lambda tid: ""
+${program}
+proceed = bridge.stage_planning({"id": "task-1"}, [{"project": "p", "repo": "r"}])
+print(json.dumps({"proceed": proceed, **calls}))
+`);
+
+test("planning that cannot be set up fails open, and says so in the metrics", () => {
+  // A missing repo path is not a verdict about the plan. Wedging the queue on one
+  // is worse than proceeding — but it must not look like a plan that passed.
+  const r = stage(`
+bridge._stage_planning_enabled = lambda: True
+bridge.find_repo_path = lambda project, repo: None
+`);
+  assert.equal(r.proceed, true);
+  assert.deepEqual(r.metrics, ["plan_stage_skipped"]);
+  assert.equal(r.routed, null, "nothing was routed — no verdict was reached");
+});
+
+test("a real verdict fails closed", () => {
+  const r = stage(`
+import pathlib
+bridge._stage_planning_enabled = lambda: True
+bridge.find_repo_path = lambda project, repo: pathlib.Path("/tmp")
+bridge._planning_worktree = lambda task, repo_path: pathlib.Path("/tmp")
+import plan_stage
+plan_stage.plan_in_worktree = lambda *a, **k: {"outcome": "questions_raised", "stages": []}
+`);
+  assert.equal(r.proceed, false);
+  assert.equal(r.routed, "questions_raised");
+});
+
+test("staged planning can be turned off without touching the dispatch path", () => {
+  const r = stage(`
+bridge._stage_planning_enabled = lambda: False
+def explode(*a, **k):
+    raise AssertionError("nothing should run when staging is off")
+bridge.find_repo_path = explode
+`);
+  assert.equal(r.proceed, true);
+  assert.deepEqual(r.metrics, []);
+});

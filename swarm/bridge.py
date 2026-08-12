@@ -2777,6 +2777,12 @@ def _spawn_for_repos(task: dict, repos: List[dict]):
         description = description + "\n\n---\n\n" + triage_ctx
         task = {**task, "description": description}
 
+    # The spec is a precondition: plan before spending an agent. A planner's question
+    # raised here stops the task while it is still cheap, instead of dying inside a
+    # two-hundred-turn session that has already started writing code.
+    if task_type == "implementation" and not stage_planning(task, repos):
+        return
+
     mc_update_task(task_id, {"status": "assigned"})
     mc_log_activity(task_id, "status_changed",
                     f"Task triaged as ready ({task_type}) — assigning to agents")
@@ -2955,6 +2961,76 @@ def _plan_and_dispatch(task: dict, repos: List[dict]):
     # Dispatch first runnable steps. The gate check rides on dispatch, not on
     # planning — see _enforce_gates.
     _dispatch_next_steps(task, plan, repos)
+
+
+def _stage_planning_enabled() -> bool:
+    """Planning as its own run costs one `claude -p` per task, before any agent.
+
+    On by default: the spec is a precondition, and the failure it prevents — an agent
+    building without a plan, or a planner's question dying in a transcript — is both
+    silent and expensive.
+    """
+    raw = get_planner_config().get("stage_planning", True)
+    return bool(raw) and os.environ.get("MC_SKIP_PLAN_STAGE", "") != "1"
+
+
+def _planning_worktree(task: dict, repo_path: Path) -> Optional[Path]:
+    """A worktree at the base branch to plan in, with the environment a build needs.
+
+    Reused across attempts: `.planning/` written by a previous run is what lets the
+    init stage be skipped, so a retry costs only the plan.
+    """
+    base = _resolve_base_branch(task, repo_path)
+    path = Path(str(repo_path).rstrip("/")).parent / "worktrees" / f"planning-{task['id'][:8]}"
+    if path.is_dir():
+        return path
+    try:
+        subprocess.run(["git", "worktree", "add", "-q", "--detach", str(path), base],
+                       cwd=str(repo_path), capture_output=True, text=True,
+                       timeout=600, check=True)
+    except (subprocess.CalledProcessError, subprocess.TimeoutExpired, OSError) as e:
+        logging.warning(f"  Could not create planning worktree at {base}: {e}")
+        return None
+    report = seed_worktree_env(str(repo_path), str(path))
+    if describe(report):
+        logging.info(f"  Planning worktree env: {describe(report)}")
+    return path
+
+
+def stage_planning(task: dict, repos: List[dict]) -> bool:
+    """Plan before dispatching anyone. True if the work may proceed.
+
+    Fails open on infrastructure — a missing repo path or a worktree that will not
+    create is not a verdict about the plan, and wedging the whole queue on one is
+    worse than proceeding. It fails closed on every actual verdict: a raised question
+    or a failed planner stops the task. Both paths are recorded, so a fail-open is
+    visible in the metrics rather than looking like a plan that passed.
+    """
+    if not _stage_planning_enabled():
+        return True
+
+    from plan_stage import plan_in_worktree
+
+    task_id = task["id"]
+    repo = repos[0] if repos else None
+    repo_path = find_repo_path(repo["project"], repo["repo"]) if repo else None
+    if not repo_path:
+        logging.warning(f"  Skipping staged planning for {task_id[:8]} — no repo path")
+        record_step_attempt(task_id, 0, {"outcome": "plan_stage_skipped", "attempt": 0,
+                                         "reason": "no repo path"})
+        return True
+
+    worktree = _planning_worktree(task, repo_path)
+    if not worktree:
+        record_step_attempt(task_id, 0, {"outcome": "plan_stage_skipped", "attempt": 0,
+                                         "reason": "no planning worktree"})
+        return True
+
+    verdict = plan_in_worktree(str(worktree), task, context=_build_triage_context(task_id))
+    for stage in verdict.get("stages", []):
+        logging.info(f"  plan stage [{stage['stage']}] {stage['outcome']} "
+                     f"in {stage['duration_s']}s — {stage['reason'][:120]}")
+    return route_plan_stage_outcome(task, verdict)
 
 
 def route_plan_stage_outcome(task: dict, verdict: dict) -> bool:
