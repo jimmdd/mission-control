@@ -800,6 +800,112 @@ def _find_key_source_files(src_dir: Path) -> List[Path]:
     return found
 
 
+_TREE_SKIP_DIRS = {".git", "node_modules", "__pycache__", ".next", "dist", "build",
+                   ".turbo", "coverage", "vendor"}
+
+
+def _git_paths_at_ref(repo_path: Path, ref: str) -> List[str]:
+    """Every tracked path at `ref`. Empty if the ref is unknown."""
+    try:
+        out = subprocess.run(["git", "ls-tree", "-r", "--name-only", ref],
+                             cwd=str(repo_path), capture_output=True, text=True, timeout=60)
+    except OSError:
+        return []
+    if out.returncode != 0:
+        logging.warning(f"  Cannot read {ref} in {repo_path.name}: {out.stderr.strip()[:120]}")
+        return []
+    return [p for p in out.stdout.splitlines() if p]
+
+
+def _git_show(repo_path: Path, ref: str, rel: str, max_chars: int) -> str:
+    try:
+        out = subprocess.run(["git", "show", f"{ref}:{rel}"],
+                             cwd=str(repo_path), capture_output=True, text=True, timeout=30)
+    except OSError:
+        return ""
+    if out.returncode != 0:
+        return ""
+    content = out.stdout
+    if len(content) > max_chars:
+        return content[:max_chars] + f"\n... (truncated, {len(content)} total chars)"
+    return content
+
+
+def _tree_from_paths(paths: List[str], depth: int = 3) -> List[str]:
+    """A directory listing built from git paths rather than the filesystem, so it
+    describes the branch the work will target instead of whatever is checked out."""
+    seen: set = set()
+    for p in paths:
+        parts = p.split("/")
+        if any(part in _TREE_SKIP_DIRS or part.startswith(".") for part in parts[:-1]):
+            continue
+        for i in range(min(len(parts), depth)):
+            is_dir = i < len(parts) - 1
+            seen.add(("/".join(parts[: i + 1]), is_dir))
+
+    # Fill by depth, not alphabetically. A flat cap over sorted paths spends its whole
+    # budget inside the first top-level directory — in a monorepo that hides most of
+    # the apps, which is exactly what the reader needs to see.
+    kept: List[tuple] = []
+    for level in range(depth):
+        at_level = sorted(e for e in seen if e[0].count("/") == level)
+        if len(kept) + len(at_level) > 150:
+            kept += at_level[: max(0, 150 - len(kept))]
+            break
+        kept += at_level
+
+    lines = []
+    for path, is_dir in sorted(kept):
+        indent = "    " * path.count("/")
+        name = path.rsplit("/", 1)[-1]
+        lines.append(f"{indent}{name}/" if is_dir else f"{indent}{name}")
+    return lines
+
+
+def read_key_source_files_at_ref(repo_path: Path, ref: str) -> str:
+    """Same shape as read_key_source_files, read out of a git ref.
+
+    Triage and planning describe the branch the work will be based on. Reading the
+    checkout instead means a monorepo app that only exists on a feature branch is
+    invisible — the planner then writes tasks against a codebase the agent will
+    never see.
+    """
+    paths = _git_paths_at_ref(repo_path, ref)
+    if not paths:
+        return ""
+
+    sections = [f"### Directory Structure (at {ref})\n```\n" +
+                "\n".join(_tree_from_paths(paths)) + "\n```"]
+    total_chars = sum(len(s) for s in sections)
+
+    by_name = {p.rsplit("/", 1)[-1]: p for p in reversed(paths)}  # prefer shallowest
+    for name in KEY_FILE_NAMES:
+        if total_chars >= MAX_CONTEXT_CHARS:
+            break
+        rel = name if name in paths else by_name.get(name, "")
+        if not rel:
+            continue
+        content = _git_show(repo_path, ref, rel, MAX_FILE_CHARS)
+        if content:
+            sections.append(f"### {rel}\n```\n{content}\n```")
+            total_chars += len(content)
+
+    key_sources = [
+        p for p in paths
+        if not any(part in _TREE_SKIP_DIRS for part in p.split("/"))
+        and any(pat in Path(p).stem.lower() for pat in KEY_SOURCE_PATTERNS)
+    ][:15]
+    for rel in key_sources:
+        if total_chars >= MAX_CONTEXT_CHARS:
+            break
+        content = _git_show(repo_path, ref, rel, 1500)
+        if content:
+            sections.append(f"### {rel}\n```\n{content}\n```")
+            total_chars += len(content)
+
+    return "\n\n".join(sections)
+
+
 def read_key_source_files(repo_path: Path) -> str:
     sections = []
     total_chars = 0
@@ -1283,12 +1389,16 @@ def detect_base_branch(repo_path: Path) -> str:
     return "origin/main"
 
 
-def _resolve_base_branch(task: dict, repo_path: Path) -> str:
-    """Base branch for the worktree + PR target. Honors an explicit per-task
-    override so feature-branch work branches off and merges back into the right
-    branch; else the repo default. Override sources, in order:
+def _base_branch_override(task: dict) -> str:
+    """The task's explicitly pinned base branch, or "" if it has none.
+
+    Separate from _resolve_base_branch because triage needs the override WITHOUT
+    the repo-default fallback: with no pin, reading the checkout is the honest
+    default; with a pin, the checkout is the wrong tree to describe.
+
+    Sources, in order:
       1) triage_state.base_branch
-      2) a 'Base branch: <name>' line in the task description (durable across triage)
+      2) a 'Base branch: <name>' line in the description (durable across triage)
     """
     def _norm(bb: str) -> str:
         bb = bb.strip().rstrip("/")
@@ -1308,7 +1418,12 @@ def _resolve_base_branch(task: dict, repo_path: Path) -> str:
             return _norm(m.group(1))
     except Exception:
         pass
-    return detect_base_branch(repo_path)
+    return ""
+
+
+def _resolve_base_branch(task: dict, repo_path: Path) -> str:
+    """Base branch for the worktree + PR target: the task's pin, else the repo default."""
+    return _base_branch_override(task) or detect_base_branch(repo_path)
 
 
 # Trusted host(s) for ticket-attachment downloads. A ticket description is
@@ -2120,14 +2235,26 @@ def fetch_task_activities(task_id: str) -> List[dict]:
         return []
 
 
-def _build_codebase_context(repos: List[dict]) -> str:
+def _build_codebase_context(repos: List[dict], base_branch: str = "") -> str:
+    """Source context for triage and planning.
+
+    Read from `base_branch` when the task pins one, since that is the tree agents
+    will actually branch from. Falls back to the checkout when no base is pinned or
+    the ref cannot be read.
+    """
     sections = []
     for r in repos:
         project, repo = r["project"], r["repo"]
         repo_path = find_repo_path(project, repo)
         if not repo_path:
             continue
-        code_ctx = read_key_source_files(repo_path)
+        code_ctx = ""
+        if base_branch:
+            code_ctx = read_key_source_files_at_ref(repo_path, base_branch)
+            if not code_ctx:
+                logging.warning(f"  Could not read {base_branch} — using the checkout instead")
+        if not code_ctx:
+            code_ctx = read_key_source_files(repo_path)
         if code_ctx:
             sections.append(f"## {project}/{repo}\n\n{code_ctx}")
     return "\n\n---\n\n".join(sections)
@@ -2488,7 +2615,7 @@ def _plan_and_dispatch(task: dict, repos: List[dict]):
         if idx:
             repo_indexes[f"{r['project']}/{r['repo']}"] = idx
 
-    codebase_context = _build_codebase_context(repos) if repos else ""
+    codebase_context = _build_codebase_context(repos, _base_branch_override(task)) if repos else ""
     knowledge_query = f"{title}\n{description[:500]}"
     knowledge = recall_knowledge(repos, knowledge_query) if repos else {}
     triage_ctx = _build_triage_context(task_id)
@@ -3033,7 +3160,7 @@ def _extract_repos_from_plan(plan: dict) -> List[dict]:
 
 
 def _run_triage(title: str, description: str, manifest: str, model: Optional[str] = None,
-                task_id: str = "") -> Tuple[dict, List[dict]]:
+                task_id: str = "", base_branch: str = "") -> Tuple[dict, List[dict]]:
     """Run the 2-pass triage: identify repos (Flash), then enrich with codebase context."""
     repos = identify_repos(title, description, manifest)
     repo_labels = [r["project"] + "/" + r["repo"] for r in repos]
@@ -3041,7 +3168,7 @@ def _run_triage(title: str, description: str, manifest: str, model: Optional[str
 
     codebase_context = ""
     if repos:
-        codebase_context = _build_codebase_context(repos)
+        codebase_context = _build_codebase_context(repos, base_branch)
         if codebase_context:
             logging.info(f"  Pass 2 — loaded {len(codebase_context)} chars of codebase context")
 
@@ -3160,13 +3287,14 @@ def process_task(task: dict):
     description = resolve_notion_urls(description)
 
     manifest = read_manifest()
-    triage, repos = _run_triage(title, description, manifest, task_id=task_id)
+    base_pin = _base_branch_override(task)
+    triage, repos = _run_triage(title, description, manifest, task_id=task_id, base_branch=base_pin)
 
     task_type = task.get("task_type", "implementation")
     if task_type == "investigation" and triage["ready"] and not triage.get("questions"):
         logging.info(f"  Investigation task — re-running triage to force question generation")
         description_with_hint = description + "\n\n[IMPORTANT: This is an investigation/triage task. You MUST generate questions to scope the investigation. Set ready=false and generate 4-8 questions.]"
-        triage2, repos2 = _run_triage(title, description_with_hint, manifest, task_id=task_id)
+        triage2, repos2 = _run_triage(title, description_with_hint, manifest, task_id=task_id, base_branch=base_pin)
         if triage2.get("questions"):
             triage = triage2
             if repos2:
@@ -3180,7 +3308,7 @@ def process_task(task: dict):
 
         questions = triage.get("questions", [])
         if questions:
-            codebase_ctx = _build_codebase_context(repos) if repos else ""
+            codebase_ctx = _build_codebase_context(repos, base_pin) if repos else ""
             knowledge = recall_knowledge(repos, f"{title}\n{description[:500]}") if repos else {}
             auto_answered = _self_answer_questions(questions, title, description, codebase_ctx, knowledge)
             unanswered = [q for q in questions if not q.get("answer")]
