@@ -63,7 +63,7 @@ per role via `{role}_provider`. OpenRouter fallback explicitly disabled — it c
 | `verify_command` never checked for satisfiability | Silent quota sink: full retry budget + top of ladder, zero signal |
 | Verification could run in a sibling worktree | False green from the gate the whole thesis rests on |
 | Six local clones of one upstream | Repo selection non-deterministic on identical input |
-| **`/gsd:plan-phase` colon form** | **GSD had never run through MC on this install** |
+| **the `gsd:` colon command form** | **GSD had never run through MC on this install** |
 
 ## The two live blockers
 
@@ -71,7 +71,7 @@ per role via `{role}_provider`. OpenRouter fallback explicitly disabled — it c
 
 Chain of causes, each verified rather than assumed:
 
-1. MC emitted `/gsd:plan-phase`. GSD 1.10.0 installs skills named `gsd-plan-phase` (hyphen);
+1. MC emitted the colon form, `gsd:plan-phase`. GSD 1.10.0 installs skills named `gsd-plan-phase` (hyphen);
    no `~/.claude/commands` exists. A prompt naming a command that does not resolve **fails
    silently** — the agent drops that section and works from the surrounding prose. Two full
    runs: 67 and 46 tool calls, **zero Skill invocations**, one mention of "gsd" in each
