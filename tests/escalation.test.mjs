@@ -273,3 +273,111 @@ print(json.dumps((bridge.SWARM_DIR / "prompts" / "lbl.md").read_text()))
   assert.match(prompt, /gh pr create --draft --base coda\/new-ui/);
   assert.doesNotMatch(prompt, /Do not run `git push`/);
 });
+
+// The gate check used to run once, inside _plan_and_dispatch. That covered a step's
+// first outing and nothing after it: a step re-dispatched on retry went straight back
+// into a broken gate and escalated claude → codex against a command that could never
+// pass. It now rides on the dispatch path, so every dispatch is checked — which only
+// works if the probe is cached, or covering retries would cost more than it saves.
+
+test("a failing gate is remembered, so the retry path costs one probe not many", () => {
+  const r = python(`
+import json, bridge
+task_id = "cache-1"
+cmd = "bun run build"
+# First verdict: unusable. Written the way a real probe writes it.
+cache = {cmd: {"runnable": False, "exit_code": 1, "reason": "MISSING_EXPORT",
+               "checked_at": bridge.datetime.now(bridge.timezone.utc).isoformat()}}
+bridge._save_gate_cache(task_id, cache)
+
+reloaded = bridge._load_gate_cache(task_id)
+hit = bridge._cached_gate(reloaded, cmd)
+print(json.dumps({
+    "survives_reload": hit is not None,
+    "still_failing": hit["runnable"] is False,
+    "unknown_command_probes": bridge._cached_gate(reloaded, "pytest") is None,
+}))
+`);
+  assert.equal(r.survives_reload, true);
+  assert.equal(r.still_failing, true);
+  // A command nobody has probed must not inherit another command's verdict.
+  assert.equal(r.unknown_command_probes, true);
+});
+
+test("a gate someone has since fixed stops being held against them", () => {
+  const r = python(`
+import json, bridge
+from datetime import timedelta
+now = bridge.datetime.now(bridge.timezone.utc)
+stale = (now - timedelta(seconds=bridge.GATE_FAILURE_TTL_SECONDS + 60)).isoformat()
+fresh = now.isoformat()
+
+failed_long_ago = {"cmd": {"runnable": False, "checked_at": stale}}
+failed_just_now = {"cmd": {"runnable": False, "checked_at": fresh}}
+passed_long_ago = {"cmd": {"runnable": True, "checked_at": stale}}
+
+print(json.dumps({
+    "stale_failure_reprobes": bridge._cached_gate(failed_long_ago, "cmd") is None,
+    "fresh_failure_holds": bridge._cached_gate(failed_just_now, "cmd") is not None,
+    "pass_never_expires": bridge._cached_gate(passed_long_ago, "cmd") is not None,
+    "corrupt_entry_reprobes": bridge._cached_gate({"cmd": "nonsense"}, "cmd") is None,
+}))
+`);
+  // The checkpoint asks a human to fix the command or its environment; when they do,
+  // the plan should pick itself back up without anyone re-triggering it.
+  assert.equal(r.stale_failure_reprobes, true);
+  assert.equal(r.fresh_failure_holds, true);
+  // The base commit does not change under a plan, so a pass stays a pass.
+  assert.equal(r.pass_never_expires, true);
+  assert.equal(r.corrupt_entry_reprobes, true);
+});
+
+test("blocked steps are held back from dispatch, the rest still go", () => {
+  const r = python(`
+import json, bridge
+
+# Two steps share a broken gate, one has a gate that passes.
+plan = {"steps": [
+    {"step": 1, "verify_command": "broken"},
+    {"step": 2, "verify_command": "broken"},
+    {"step": 3, "verify_command": "fine"},
+]}
+findings = [{"steps": [1, 2], "command": "broken", "exit_code": 1, "reason": "fails on base"}]
+
+calls = {"blocked": [], "attempts": [], "activity": 0, "checkpoint": 0}
+bridge.validate_plan_gates = lambda task, plan, repos, only_steps=None: findings
+bridge.update_step_progress = lambda tid, n, patch: calls["blocked"].append(n)
+bridge.record_step_attempt = lambda tid, n, rec: calls["attempts"].append(rec["outcome"])
+bridge.mc_log_activity = lambda *a, **k: calls.__setitem__("activity", calls["activity"] + 1)
+bridge._raise_gate_checkpoint = lambda *a, **k: calls.__setitem__("checkpoint", calls["checkpoint"] + 1)
+bridge._gate_check_enabled = lambda: True
+
+runnable = bridge._enforce_gates({"id": "t"}, plan, [{}], plan["steps"])
+print(json.dumps({
+    "dispatched": [s["step"] for s in runnable],
+    "blocked": sorted(calls["blocked"]),
+    "outcomes": calls["attempts"],
+    "checkpoint_raised": calls["checkpoint"],
+}))
+`);
+  // The healthy step is not punished for sharing a plan with a broken gate.
+  assert.deepEqual(r.dispatched, [3]);
+  assert.deepEqual(r.blocked, [1, 2]);
+  // Recorded as the gate's failure, not the model's — this is what keeps the
+  // escalation metrics honest.
+  assert.deepEqual(r.outcomes, ["gate_invalid", "gate_invalid"]);
+  assert.equal(r.checkpoint_raised, 1);
+});
+
+test("turning the gate check off dispatches everything untouched", () => {
+  const r = python(`
+import json, bridge
+bridge._gate_check_enabled = lambda: False
+def explode(*a, **k):
+    raise AssertionError("no probe should run when the check is off")
+bridge.validate_plan_gates = explode
+steps = [{"step": 1}, {"step": 2}]
+print(json.dumps([s["step"] for s in bridge._enforce_gates({"id": "t"}, {}, [], steps)]))
+`);
+  assert.deepEqual(r, [1, 2]);
+});

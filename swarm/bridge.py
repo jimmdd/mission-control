@@ -2952,33 +2952,55 @@ def _plan_and_dispatch(task: dict, repos: List[dict]):
     )
     mc_update_task(task_id, {"status": "assigned"})
 
-    # Prove the gates can pass before spending any agent on them. Cheap: one throwaway
-    # worktree, once per plan, versus every step burning its retries and the top of the
-    # escalation ladder against a command that never passes.
-    if _gate_check_enabled():
-        for finding in validate_plan_gates(task, plan, repos):
-            steps = finding["steps"]
-            for step_num in steps:
-                update_step_progress(task_id, step_num, {
-                    "status": "blocked",
-                    "outcome": f"verify_command unusable: {finding['reason'][:300]}",
-                })
-                record_step_attempt(task_id, step_num, {
-                    "outcome": "gate_invalid",
-                    "attempt": 0,
-                    "exit_code": finding.get("exit_code"),
-                    "command": finding["command"][:300],
-                })
-            mc_log_activity(
-                task_id, "updated",
-                f"Steps {steps} are blocked: their verify_command fails on unmodified "
-                f"code, so it cannot tell finished work from unfinished.\n\n"
-                f"`{finding['command'][:200]}`\n\n{finding['reason'][:600]}"
-            )
-            _raise_gate_checkpoint(task_id, finding)
-
-    # Dispatch first runnable steps
+    # Dispatch first runnable steps. The gate check rides on dispatch, not on
+    # planning — see _enforce_gates.
     _dispatch_next_steps(task, plan, repos)
+
+
+def _enforce_gates(task: dict, plan: dict, repos: List[dict], steps: List[dict]) -> List[dict]:
+    """Block the steps whose verify_command cannot pass. Returns the ones still runnable.
+
+    This sits on the dispatch path rather than the planning path deliberately. It
+    used to run once, inside `_plan_and_dispatch`, which covered a step's first
+    outing and nothing after it: a step re-dispatched on retry went straight back
+    into a broken gate and escalated `claude → codex` against a command that could
+    never pass. Every dispatch is a first dispatch as far as the gate is concerned.
+
+    The probe is cached per command so covering the retry path costs no more than
+    covering the first one — a failing gate is re-probed occasionally, because the
+    checkpoint asks a human to fix it and a fixed gate should recover on its own.
+    """
+    if not _gate_check_enabled() or not steps:
+        return steps
+
+    findings = validate_plan_gates(task, plan, repos, only_steps=[s["step"] for s in steps])
+    if not findings:
+        return steps
+
+    task_id = task["id"]
+    blocked = set()
+    for finding in findings:
+        for step_num in finding["steps"]:
+            blocked.add(step_num)
+            update_step_progress(task_id, step_num, {
+                "status": "blocked",
+                "outcome": f"verify_command unusable: {finding['reason'][:300]}",
+            })
+            record_step_attempt(task_id, step_num, {
+                "outcome": "gate_invalid",
+                "attempt": 0,
+                "exit_code": finding.get("exit_code"),
+                "command": finding["command"][:300],
+            })
+        mc_log_activity(
+            task_id, "updated",
+            f"Steps {finding['steps']} are blocked: their verify_command fails on unmodified "
+            f"code, so it cannot tell finished work from unfinished.\n\n"
+            f"`{finding['command'][:200]}`\n\n{finding['reason'][:600]}"
+        )
+        _raise_gate_checkpoint(task_id, finding)
+
+    return [s for s in steps if s["step"] not in blocked]
 
 
 def _dispatch_next_steps(task: dict, plan: dict, repos: List[dict]):
@@ -2987,6 +3009,7 @@ def _dispatch_next_steps(task: dict, plan: dict, repos: List[dict]):
     title = task["title"]
 
     next_steps = get_next_steps(task_id, plan)
+    next_steps = _enforce_gates(task, plan, repos, next_steps)
     if not next_steps:
         if is_plan_complete(task_id):
             logging.info(f"  All plan steps complete for {task_id[:8]}")
@@ -3205,7 +3228,53 @@ def _raise_gate_checkpoint(task_id: str, finding: dict):
         logging.debug(f"  gate checkpoint failed for {task_id[:8]}: {e}")
 
 
-def validate_plan_gates(task: dict, plan: dict, repos: List[dict]) -> List[dict]:
+# How long a failing gate stays condemned before it is worth probing again. The
+# checkpoint asks a human to fix the command or the environment it needs; when they
+# do, the plan should pick itself back up without anyone re-triggering it.
+GATE_FAILURE_TTL_SECONDS = 900
+
+
+def _gate_cache_path(task_id: str) -> Path:
+    return MC_HOME / "bridge" / "gate-cache" / f"{task_id}.json"
+
+
+def _load_gate_cache(task_id: str) -> dict:
+    try:
+        return json.loads(_gate_cache_path(task_id).read_text())
+    except (OSError, ValueError):
+        return {}
+
+
+def _save_gate_cache(task_id: str, cache: dict):
+    path = _gate_cache_path(task_id)
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps(cache))
+    except OSError as e:
+        logging.debug(f"  could not write gate cache for {task_id[:8]}: {e}")
+
+
+def _cached_gate(cache: dict, command: str) -> Optional[dict]:
+    """A usable verdict for this command, or None if it needs probing.
+
+    A pass is kept: the base commit does not change under a plan. A failure is kept
+    only briefly, so a gate someone has since repaired stops being held against them.
+    """
+    entry = cache.get(command)
+    if not isinstance(entry, dict):
+        return None
+    if entry.get("runnable"):
+        return entry
+    try:
+        checked = datetime.fromisoformat(entry.get("checked_at", ""))
+    except ValueError:
+        return None
+    age = (datetime.now(timezone.utc) - checked).total_seconds()
+    return entry if age < GATE_FAILURE_TTL_SECONDS else None
+
+
+def validate_plan_gates(task: dict, plan: dict, repos: List[dict],
+                        only_steps: Optional[List[int]] = None) -> List[dict]:
     """Check each distinct verify_command against unmodified code, once per plan.
 
     Runs in a throwaway worktree at the task's base branch — the same tree agents will
@@ -3213,18 +3282,42 @@ def validate_plan_gates(task: dict, plan: dict, repos: List[dict]) -> List[dict]
     are marked `gate_invalid`: dispatching them would spend the full retry budget and
     the top of the escalation ladder proving something the base commit already proves.
 
+    `only_steps` narrows the check to the steps about to be dispatched, so the retry
+    path pays for the gate it is about to run and not for the whole plan.
+
     Returns one finding per distinct broken command. An empty list means every gate is
     satisfiable.
     """
     from planner import check_verify_command_baseline
 
+    task_id = task["id"]
+    wanted = set(only_steps) if only_steps is not None else None
     commands = {}
     for step in plan.get("steps", []):
+        if wanted is not None and step["step"] not in wanted:
+            continue
         cmd = (step.get("verify_command") or "").strip()
         if cmd:
             commands.setdefault(cmd, []).append(step["step"])
     if not commands:
         return []
+
+    # Answer from cache where we can. Probing on every dispatch would make the gate
+    # check cost more than the retries it saves.
+    cache = _load_gate_cache(task_id)
+    findings: List[dict] = []
+    to_probe = {}
+    for cmd, steps in commands.items():
+        cached = _cached_gate(cache, cmd)
+        if cached is None:
+            to_probe[cmd] = steps
+        elif not cached["runnable"]:
+            findings.append({"steps": steps, "command": cmd,
+                             "runnable": False,
+                             "exit_code": cached.get("exit_code"),
+                             "reason": cached.get("reason", "")})
+    if not to_probe:
+        return findings
 
     repo = repos[0] if repos else None
     repo_path = find_repo_path(repo["project"], repo["repo"]) if repo else None
@@ -3234,7 +3327,6 @@ def validate_plan_gates(task: dict, plan: dict, repos: List[dict]) -> List[dict]
 
     base = _resolve_base_branch(task, repo_path)
     probe = Path(str(repo_path).rstrip("/")).parent / "worktrees" / f"gatecheck-{task['id'][:8]}"
-    findings: List[dict] = []
     try:
         subprocess.run(["git", "worktree", "add", "-q", "--detach", str(probe), base],
                        cwd=str(repo_path), capture_output=True, text=True, timeout=600, check=True)
@@ -3250,7 +3342,7 @@ def validate_plan_gates(task: dict, plan: dict, repos: List[dict]) -> List[dict]
 
     try:
         installed = False
-        for cmd, steps in commands.items():
+        for cmd, steps in to_probe.items():
             result = check_verify_command_baseline(cmd, str(probe))
             # A gate that fails because the tree was never set up is not evidence
             # about the base commit. Pay for one install, once, and ask again —
@@ -3261,6 +3353,7 @@ def validate_plan_gates(task: dict, plan: dict, repos: List[dict]) -> List[dict]
                 if tool:
                     logging.info(f"  Installed probe deps with {tool} — re-checking gate")
                     result = check_verify_command_baseline(cmd, str(probe))
+            cache[cmd] = {**result, "checked_at": datetime.now(timezone.utc).isoformat()}
             if result["runnable"]:
                 logging.info(f"  Gate OK for steps {steps}")
             else:
@@ -3269,6 +3362,7 @@ def validate_plan_gates(task: dict, plan: dict, repos: List[dict]) -> List[dict]
     finally:
         subprocess.run(["git", "worktree", "remove", "--force", str(probe)],
                        cwd=str(repo_path), capture_output=True, text=True, timeout=300)
+    _save_gate_cache(task_id, cache)
     return findings
 
 
