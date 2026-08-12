@@ -1871,7 +1871,12 @@ def _safe_extract_zip(zip_path: "Path", dest: "Path") -> List["Path"]:
     total = 0
     try:
         with zipfile.ZipFile(zip_path) as z:
-            members = [i for i in z.infolist() if not i.is_dir()]
+            # Zips made on macOS carry a parallel __MACOSX/._name entry for every file.
+            # They are resource forks, never content, and they double the manifest.
+            members = [i for i in z.infolist()
+                       if not i.is_dir()
+                       and not i.filename.startswith("__MACOSX/")
+                       and not Path(i.filename).name.startswith("._")]
             members.sort(key=lambda i: (i.filename.lower().endswith(_BULK_MEMBER_EXTS),
                                         i.file_size, i.filename))
             for info in members:
@@ -1954,6 +1959,56 @@ def _attachment_prompt_section(task: dict) -> str:
     for i, f in enumerate(files, 1):
         lines.append(f"{i}. {f['label']} — `{f['path']}`")
     return "\n".join(lines)
+
+
+# Docs inside a handoff answer scoping questions directly, so they are worth reading
+# during triage. Source is not: it is what the builder needs, and it would crowd out
+# everything else in a triage prompt.
+_TRIAGE_DOC_EXTS = (".md", ".txt", ".rst", ".adoc")
+_ATTACH_TRIAGE_MAX_CHARS = 7000
+
+
+def _attachment_triage_context(task: dict) -> str:
+    """Triage context for ticket attachments: the file manifest, plus the docs.
+
+    An attached handoff is itself a strong signal — it usually settles the very
+    questions triage would otherwise put to a human ("where should the tokens live?"
+    when the package ships the stylesheet). Without this, triage asks the user for
+    what the ticket already supplied.
+
+    Content here is untrusted in the same way the ticket description is: anyone who
+    can edit the ticket can shape it. It informs questions, never permissions.
+    """
+    files = _download_task_attachments(task)
+    if not files:
+        return ""
+
+    names = [f["label"].split("→")[-1].strip() for f in files]
+    paths = [Path(f["path"]) for f in files]
+    manifest = ", ".join(sorted(set(names))[:60])
+
+    parts = [f"\n\n---\n\n## Ticket attachments ({len(files)} file(s))",
+             "The ticket supplies these files. Treat them as answers already given — do "
+             "not ask the user for anything they settle.",
+             f"\n**Contents:** {manifest}"]
+
+    budget = _ATTACH_TRIAGE_MAX_CHARS
+    # Shortest docs first, so one long README cannot crowd out the rest.
+    docs = sorted((p for p in paths if p.suffix.lower() in _TRIAGE_DOC_EXTS
+                   and not p.name.startswith(".")),
+                  key=lambda p: p.stat().st_size if p.exists() else 0)
+    for doc in docs:
+        if budget <= 0:
+            break
+        try:
+            text = doc.read_text(errors="replace")[:budget]
+        except Exception:
+            continue
+        if not text.strip():
+            continue
+        parts.append(f"\n### {doc.name}\n{text}")
+        budget -= len(text)
+    return "\n".join(parts)
 
 
 def _image_prompt_section(task: dict) -> str:
@@ -2635,6 +2690,10 @@ def _plan_and_dispatch(task: dict, repos: List[dict]):
             repo_indexes[f"{r['project']}/{r['repo']}"] = idx
 
     codebase_context = _build_codebase_context(repos, _base_branch_override(task)) if repos else ""
+    # The plan should be written against what the ticket actually supplies. Without
+    # this the planner invents a structure the handoff already specifies, and only
+    # the builder ever sees the real thing.
+    codebase_context += _attachment_triage_context(task)
     knowledge_query = f"{title}\n{description[:500]}"
     knowledge = recall_knowledge(repos, knowledge_query) if repos else {}
     triage_ctx = _build_triage_context(task_id)
@@ -3218,6 +3277,14 @@ def _run_triage(title: str, description: str, manifest: str, model: Optional[str
     if video_ctx:
         codebase_context += video_ctx
         logging.info("  Loaded ticket video summary into triage context")
+
+    # A ticket that attaches a handoff has already answered much of what triage would
+    # otherwise ask. Reading it here is the difference between asking the user where
+    # the tokens live and reading the stylesheet that defines them.
+    attach_ctx = _attachment_triage_context(_fetch_task(task_id) or {"id": task_id, "description": description})
+    if attach_ctx:
+        codebase_context += attach_ctx
+        logging.info("  Loaded ticket attachments into triage context")
 
     triage = triage_task(title, description, manifest, codebase_context, model=model)
 

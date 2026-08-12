@@ -183,3 +183,31 @@ print(json.dumps(sorted(p.name for p in paths)))
   assert.deepEqual(names, ["fine.txt"]);
   rmSync(zipDir, { recursive: true, force: true });
 });
+
+test("attachment context gives triage the manifest and the docs", () => {
+  const dir = mkdtempSync(join(tmpdir(), "mc-att-"));
+  writeFileSync(join(dir, "HANDOFF.md"), "# Handoff\nThe content rail is 1304px.\n");
+  writeFileSync(join(dir, "styles.css"), ":root { --rail: 1304px; }\n");
+  const ctx = python(`
+import json, bridge
+bridge._download_task_attachments = lambda task: [
+    {"label": "h.zip → HANDOFF.md", "path": ${JSON.stringify(join(dir, "HANDOFF.md"))}, "kind": "zip-member"},
+    {"label": "h.zip → styles.css", "path": ${JSON.stringify(join(dir, "styles.css"))}, "kind": "zip-member"},
+]
+print(json.dumps(bridge._attachment_triage_context({"id": "t"})))
+`);
+  // Docs are inlined so triage can read the spec; source appears in the manifest only.
+  assert.match(ctx, /1304px/);
+  assert.match(ctx, /styles\.css/);
+  assert.doesNotMatch(ctx, /--rail:/, "source bodies would crowd out the triage prompt");
+  rmSync(dir, { recursive: true, force: true });
+});
+
+test("no attachments means no attachment context at all", () => {
+  const ctx = python(`
+import json, bridge
+bridge._download_task_attachments = lambda task: []
+print(json.dumps(bridge._attachment_triage_context({"id": "t"})))
+`);
+  assert.equal(ctx, "");
+});
