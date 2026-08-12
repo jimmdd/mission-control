@@ -165,10 +165,19 @@ function spawnExitCode(env) {
   }
 }
 
-test("spawn-agent.sh refuses to start an agent over the global ceiling", () => {
+test("spawn-agent.sh refuses to start an agent when memory is at the ceiling", () => {
   // Exit 3 is "full, retry later" — distinct from exit 2, "this spawn is broken".
-  assert.equal(spawnExitCode({ MC_MAX_CONCURRENT_AGENTS: "2" }), 3);
-  assert.notEqual(spawnExitCode({ MC_MAX_CONCURRENT_AGENTS: "9" }), 3);
+  // The ceiling is memory now, not a count: four small agents and four each holding
+  // a large repo in context are not the same load.
+  assert.equal(spawnExitCode({ MC_MEMORY_CEILING: "0.001" }), 3);
+  assert.notEqual(spawnExitCode({ MC_MEMORY_CEILING: "0.999" }), 3);
+});
+
+test("registry entries whose agent is gone do not hold a slot", () => {
+  // The registry fixture is all dead entries — no tmux sessions behind them. Under
+  // the old count they filled the ceiling and the machine refused to work while
+  // nothing at all was running.
+  assert.notEqual(spawnExitCode({ MC_MAX_CONCURRENT_AGENTS: "2", MC_MEMORY_CEILING: "0.999" }), 3);
 });
 
 test("a full machine is a wait, not a spawn failure", () => {

@@ -51,6 +51,7 @@ from gsd_backend import (
     workflow_ran as gsd_workflow_ran,
 )
 from worktree_env import describe, install_dependencies, looks_unprepared, seed_worktree_env
+from resources import can_start_agent, describe as resource_summary
 from questions import (
     add_message as question_add_message,
     all_settled as questions_all_settled,
@@ -4129,12 +4130,90 @@ def _max_concurrent_agents() -> int:
         return 0
 
 
+# How long an entry marked `running` may go without a heartbeat, and with no tmux
+# session, before it is treated as dead. Generous: a spawn that is still setting up
+# its worktree has not reported yet, and reaping a live agent loses real work.
+REAP_AFTER_SECONDS = 900
+
+
+def _tmux_session_alive(session: str) -> bool:
+    if not session:
+        return False
+    try:
+        return subprocess.run(["tmux", "has-session", "-t", session],
+                              capture_output=True, timeout=30).returncode == 0
+    except (OSError, subprocess.TimeoutExpired):
+        # tmux missing or wedged is not evidence the agent is dead.
+        return True
+
+
+def reap_dead_agents() -> int:
+    """Release registry entries whose agent is gone. Returns how many were reaped.
+
+    Nothing did this. An agent whose process died — a laptop asleep, a daemon
+    restart, a session killed — stayed `running` forever, its heartbeat ageing
+    indefinitely. Three such ghosts were holding three of four slots on this
+    machine while nothing at all was running.
+
+    Liveness is the tmux session, because that is what agents actually run in, and
+    a missing one is checked against the heartbeat too: a spawn still setting up its
+    worktree has not reported yet, and reaping a live agent throws away real work.
+    """
+    reaped = 0
+    now = datetime.now(timezone.utc)
+    for entry in _load_active_tasks():
+        if entry.get("status") != "running":
+            continue
+        if _tmux_session_alive(entry.get("tmuxSession", "")):
+            continue
+
+        stamp = entry.get("lastHeartbeatAt") or entry.get("startedAt") or ""
+        try:
+            age = (now - datetime.fromisoformat(str(stamp).replace("Z", "+00:00"))).total_seconds()
+        except ValueError:
+            age = REAP_AFTER_SECONDS + 1
+        if age < REAP_AFTER_SECONDS:
+            continue
+
+        agent_id = entry.get("id", "")
+        try:
+            subprocess.run([sys.executable, str(SWARM_DIR / "swarm-state.py"), "remove",
+                            "--task-id", agent_id, "--reason", "reaped-no-session"],
+                           capture_output=True, text=True, timeout=60)
+        except (OSError, subprocess.TimeoutExpired) as e:
+            logging.warning(f"  Could not reap {agent_id}: {e}")
+            continue
+
+        reaped += 1
+        logging.info(f"  Reaped {agent_id} — no tmux session, {age / 3600:.1f}h since heartbeat")
+        if entry.get("mcTaskId"):
+            # Recorded, not silent: a reaped agent must never read as one that
+            # finished its work.
+            record_step_attempt(entry["mcTaskId"], 0, {
+                "outcome": "agent_reaped",
+                "attempt": 0,
+                "profile": entry.get("agentProfile", ""),
+                "reason": f"no tmux session, {int(age)}s since heartbeat",
+            })
+    return reaped
+
+
 def _agent_slots_free(registry: list) -> Optional[int]:
     """How many more agent sessions may start right now, or None for no ceiling.
 
-    Counts every running agent, not just this task's — the ceiling is machine
-    memory, which one task's plan has no exclusive claim on.
+    The ceiling is machine memory, so memory is what is measured. A count was only
+    ever a guess at it: four small agents and four each holding a large repo in
+    context are not the same load, and the number needed re-tuning per machine.
+    It was also counted from registry entries, so three agents that had died
+    without being reaped held three of four slots while the machine sat idle.
+
+    A count cap is still honoured when one is explicitly configured, because a
+    machine shared with something else may want one. It is off by default.
     """
+    if not can_start_agent():
+        logging.info(f"  Holding agents back — {resource_summary()}")
+        return 0
+
     cap = _max_concurrent_agents()
     if cap <= 0:
         return None
@@ -5552,6 +5631,9 @@ def run_once():
     else:
         logging.info("No inbox tasks to process")
 
+    # Before anything else: a dead agent holding a slot makes everything below it
+    # look like a capacity problem.
+    reap_dead_agents()
     process_open_questions()
     process_answered_followups()
     process_blocked_gates()

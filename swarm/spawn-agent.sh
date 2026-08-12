@@ -41,12 +41,27 @@ if [ -z "$TASK_ID" ] || [ -z "$REPO_PATH" ] || [ -z "$BRANCH_NAME" ]; then
   exit 1
 fi
 
-# Global ceiling across all profiles, checked before any profile is resolved:
-# falling back to another profile does not create more machine memory. 0 = off.
+# The ceiling is machine memory, so memory is what is checked — measured, not
+# guessed at with a count. Checked before any profile is resolved: falling back to
+# another profile does not create more memory.
+RESOURCES_PY="$(dirname "$(readlink "${BASH_SOURCE[0]}" 2>/dev/null || echo "${BASH_SOURCE[0]}")")/resources.py"
+if [ -f "$RESOURCES_PY" ]; then
+  if ! python3 "$RESOURCES_PY" >/dev/null 2>&1; then
+    echo "ERROR: machine memory is at the ceiling ($(python3 "$RESOURCES_PY" 2>/dev/null)) — retry when it frees"
+    exit 3
+  fi
+fi
+
+# An explicit count cap is still honoured when one is configured, for a machine
+# shared with something else. 0 = off, and off is the default.
 MAX_CONCURRENT=${MC_MAX_CONCURRENT_AGENTS:-$(jq -r '.agents.maxConcurrent // 0' "$CONFIG" 2>/dev/null || echo 0)}
 if [ "${MAX_CONCURRENT:-0}" -gt 0 ]; then
-  RUNNING_TOTAL=$(jq '[.[] | select(.status == "running")] | length' "$REGISTRY" 2>/dev/null || echo 0)
-  if [ "$RUNNING_TOTAL" -ge "$MAX_CONCURRENT" ]; then
+  # Only agents that are actually alive count. Agents run in tmux, so a live tmux
+  # session is the liveness signal; a dead one left marked running used to hold its
+  # slot forever, and the machine idled while work queued.
+  RUNNING_TOTAL=$(jq -r '.[] | select(.status == "running") | .tmuxSession // empty' "$REGISTRY" 2>/dev/null \
+    | while read -r sess; do tmux has-session -t "$sess" 2>/dev/null && echo x; done | wc -l | tr -d ' ')
+  if [ "${RUNNING_TOTAL:-0}" -ge "$MAX_CONCURRENT" ]; then
     echo "ERROR: at global agent limit ($RUNNING_TOTAL/$MAX_CONCURRENT) — retry once a slot frees"
     exit 3
   fi
