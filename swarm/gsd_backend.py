@@ -48,11 +48,29 @@ def ensure_supported_backend() -> str:
     return backend
 
 
+# How much GSD to run for a plan. `/gsd-plan-phase` is built to plan a phase of a
+# project: on MET-635 it ran ~20 gate steps itself — threat model, Nyquist
+# artifacts, API-surface regeneration — before delegating, and took 38 minutes with
+# 1,209 orchestrator turns. Most tickets are not a project phase, and GSD ships
+# lighter doors for them. Measured per ticket rather than assumed.
+PLAN_MODES = {
+    "phase": "/gsd-plan-phase --prd",   # full: multi-phase work
+    "quick": "/gsd-quick --validate",   # GSD guarantees, optional agents skipped
+    "mvp": "/gsd-mvp-phase",            # vertical slice, then plan-phase
+}
+DEFAULT_PLAN_MODE = "phase"
+
+
+def plan_mode() -> str:
+    mode = (os.environ.get("MC_GSD_PLAN_MODE") or DEFAULT_PLAN_MODE).strip().lower()
+    return mode if mode in PLAN_MODES else DEFAULT_PLAN_MODE
+
+
 def plan_command(greenfield: bool = False) -> str:
     ensure_supported_backend()
     if greenfield:
         return "/gsd-new-project --auto"
-    return "/gsd-plan-phase --prd"
+    return PLAN_MODES[plan_mode()]
 
 
 def project_initialised(cwd: str) -> bool:
