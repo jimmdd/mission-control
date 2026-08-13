@@ -101,3 +101,58 @@ test("a failed action keeps what was typed", () => {
   assert.ok(fn.indexOf("throw new Error") < fn.indexOf("onOk?.()"),
     "the throw comes first, so a failure never reaches the clear");
 });
+
+// load() is the only function that assembles the page, and nothing was driving it:
+// every other test called a renderer directly. So it kept calling renderQuestions
+// long after that was deleted, and the page died with "renderQuestions is not
+// defined" while 229 tests passed.
+
+test("load builds the page without calling anything that no longer exists", async () => {
+  const calls = [];
+  const el = () => ({
+    innerHTML: "", value: "", dataset: {}, tagName: "DIV",
+    scrollTop: 0, scrollHeight: 0,
+    addEventListener() {}, closest: () => null, querySelector: () => null,
+  });
+  const root = el();
+  const shim = `
+    const __root = ${"arguments"}; // placeholder, replaced below
+  `;
+  // A DOM stub just complete enough for one render pass.
+  const fn = new Function("__root", "__fetch", "__calls", `
+    const document = {
+      activeElement: null,
+      querySelector: (s) => s === "#root" ? __root : null,
+      querySelectorAll: () => [],
+      addEventListener: () => {},
+    };
+    const location = { search: "?id=t1" };
+    class URLSearchParams { constructor(){} get(){ return "t1"; } }
+    const CSS = { escape: (s) => s };
+    const fetch = __fetch;
+    const setInterval = () => {};
+    ${BODY}
+    return load({ force: true }).then(() => __root.innerHTML);
+  `);
+
+  const body = {
+    "/api/tasks/t1": { id: "t1", title: "MET-635", status: "planning", triage_state: JSON.stringify({
+      questions: [{ id: "p1", source: "planner", becomes: "D-01", question: "Which licence?",
+                    options: ["Host & Link"] }],
+    }) },
+    "/api/tasks/t1/plan": { plan: null, progress: null },
+    "/api/tasks/t1/activities": [],
+  };
+  const fakeFetch = async (url) => {
+    calls.push(url);
+    const key = Object.keys(body).find(k => url.startsWith(k) && url.length === k.length);
+    return { ok: true, json: async () => body[key] ?? {} };
+  };
+
+  const html = await fn(root, fakeFetch, calls);
+  // The real failure was a ReferenceError inside the try, caught and rendered as
+  // "Couldn't load this ticket" — so an error string in #root is the assertion.
+  assert.doesNotMatch(html, /Couldn't load this ticket/, html.slice(0, 200));
+  assert.match(html, /Which licence\?/, "the question reached the page");
+  assert.match(html, /id="say"/, "and so did the composer");
+});

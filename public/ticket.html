@@ -1011,23 +1011,15 @@ async function load({ force = false } = {}) {
     const activities = await getJson(`/api/tasks/${encodeURIComponent(taskId)}/activities`).catch(() => []);
     const triage = parseTriage(task);
     const qs = (triage?.questions || []);
-    // Settled = nothing left to answer, or the work has already moved past asking.
-    const settled = (qs.length > 0 && qs.every(q => q.answer))
-      || ["assigned", "in_progress", "review", "in_review", "done", "completed", "merged"].includes(task.status);
 
-    // A follow-up outranks everything: planning is stopped until it is answered, and
-    // nothing should be built before the plan exists.
-    const fu = followUps(qs);
+    // One conversation, then the plan. What triage found only stands alone before
+    // it has asked anything — after that it is in the stream with everything else.
     root.innerHTML = renderTicket(task, triage, activities)
-      + (fu.length ? renderFollowUps(fu) : "")
-      + (settled
-        // Once the decisions are made the plan is the thing; they collapse above it.
-        ? renderSettled(qs.filter(q => q.answer)) + renderPlan(planData.plan, planData.progress, triage)
-        : `<div class="cols">${renderFound(triage)}${renderQuestions(triage)}</div>`
-          + renderPlan(planData.plan, planData.progress, triage));
+      + (qs.length ? renderConversation(triage, focusedQuestion) : renderFound(triage))
+      + renderPlan(planData.plan, planData.progress, triage);
 
     restoreDrafts(drafts);
-    if (triage && (fu.length || !settled)) wireQuestions(triage);
+    if (qs.length) wireConversation(triage);
     wireGraph(planData.plan, planData.progress);
   } catch (e) {
     root.innerHTML = `<div class="err">Couldn't load this ticket: ${esc(e.message || e)}</div>`;
