@@ -700,8 +700,8 @@ function renderFollowUps(open) {
       should be written before the plan. Answering them resumes planning.</p>
     ${open.map((q, i) => renderQuestion(q, `F${String(i + 1).padStart(2, "0")}`)).join("")}
     <div class="footbar">
-      <button class="btn primary" id="submit" disabled>Submit answers</button>
-      <span class="why" id="hint">Answer all ${open.length} to resume planning.</span>
+      <button class="btn primary" data-submit="followups" disabled>Submit answers</button>
+      <span class="why" data-hint="followups">Answer all ${open.length} to resume planning.</span>
     </div>
   </div>`;
 }
@@ -718,25 +718,39 @@ function renderSettled(qs) {
   </details></div>`;
 }
 
+/**
+ * The opening questions — everything not already leading the page as a follow-up.
+ *
+ * A question belongs in exactly one place. Rendering the whole set here while the
+ * follow-up card showed the planner's put each of those on the page twice, with two
+ * elements sharing id="submit" (so the second button was wired to nothing) and two
+ * radio groups sharing a name (so clicking an option in one drove the other).
+ */
 function renderQuestions(triage) {
-  const qs = (triage?.questions || []);
+  const leading = new Set(followUps(triage?.questions || []).map(q => q.id));
+  const qs = (triage?.questions || []).filter(q => !leading.has(q.id));
+  if (!qs.length) return "";
+
   // Deferred questions are not open. Counting them would make "Decide later" a lie.
   const open = qs.filter(q => !q.answer && !q.deferred);
-  const body = qs.length === 0
-    ? `<p class="empty">No open questions.</p>`
-    : qs.map((q, i) => renderQuestion(q, String(i + 1).padStart(2, "0"))).join("");
+  const body = qs.map((q, i) => renderQuestion(q, String(i + 1).padStart(2, "0"))).join("");
 
   // Count what was answered, not what stopped blocking — a set-aside question is
   // not a settled one, and saying "1/1" about it would misreport the ticket.
   const answered = qs.filter(q => q.answer).length;
   const aside = qs.filter(q => q.deferred && !q.answer).length;
+  // "Answer these to start" is only true before anything has started. Once the
+  // planner is the one asking, these are the decisions it was given.
+  const heading = open.length
+    ? (leading.size ? "Already decided" : "Answer these to start")
+    : "Questions";
   return `<div class="card">
-    <div class="glab">${open.length ? "Answer these to start" : "Questions"}
+    <div class="glab">${heading}
       <span class="gn">${answered}/${qs.length}${aside ? ` · ${aside} set aside` : ""}</span></div>
     ${body}
     ${open.length ? `<div class="footbar">
-      <button class="btn primary" id="submit" disabled>Submit answers</button>
-      <span class="why" id="hint">Answer all ${open.length} to continue.</span></div>` : ""}
+      <button class="btn primary" data-submit="triage" disabled>Submit answers</button>
+      <span class="why" data-hint="triage">Answer all ${open.length} to continue.</span></div>` : ""}
   </div>`;
 }
 
@@ -799,51 +813,76 @@ function openThread(qid) {
   thread.querySelector("input")?.focus();
 }
 
+/**
+ * Wire each question card's submit button separately.
+ *
+ * There used to be one `#submit`. When both cards rendered, two elements shared
+ * that id, `$("#submit")` returned the first, and the second card's button did
+ * nothing at all — a person could fill it in and click with no effect. Each card
+ * now gates on its own questions and saves only those.
+ */
 function wireQuestions(triage) {
-  const btn = $("#submit");
-  if (!btn) return;
-  // Whatever is rendered unanswered is what the button gates on — follow-ups when
-  // planning is blocked, the original set otherwise.
-  const open = (triage.questions || []).filter(q =>
-    !q.answer && document.querySelector(`[data-free="${CSS.escape(q.id)}"]`));
   const answerFor = q => {
     const free = document.querySelector(`[data-free="${CSS.escape(q.id)}"]`);
     if (free && free.value.trim()) return free.value.trim();
     const picked = document.querySelector(`input[name="q-${CSS.escape(q.id)}"]:checked`);
     return picked ? picked.value : "";
   };
+
+  const cards = [];
+  document.querySelectorAll("[data-submit]").forEach(btn => {
+    const scope = btn.closest(".card");
+    if (!scope) return;
+    const hint = document.querySelector(`[data-hint="${btn.dataset.submit}"]`);
+    // A card owns exactly the questions rendered inside it.
+    const open = (triage.questions || []).filter(q =>
+      !q.answer && scope.querySelector(`[data-free="${CSS.escape(q.id)}"]`));
+    if (open.length) cards.push({ btn, hint, open });
+  });
+  if (!cards.length) return;
+
   const refresh = () => {
-    document.querySelectorAll(".choice").forEach(o => o.classList.toggle("on", !!o.querySelector("input")?.checked));
-    const filled = open.filter(q => answerFor(q)).length;
-    btn.disabled = filled < open.length;
-    $("#hint").textContent = btn.disabled ? `${filled}/${open.length} answered.`
-      : "Ready — this hands the ticket to the planner.";
+    document.querySelectorAll(".choice").forEach(o =>
+      o.classList.toggle("on", !!o.querySelector("input")?.checked));
+    for (const { btn, hint, open } of cards) {
+      const filled = open.filter(q => answerFor(q)).length;
+      btn.disabled = filled < open.length;
+      if (hint) {
+        hint.textContent = btn.disabled ? `${filled}/${open.length} answered.`
+          : "Ready — this hands the ticket to the planner.";
+      }
+    }
   };
   document.addEventListener("input", refresh);
   document.addEventListener("change", refresh);
   refresh();
 
-  btn.addEventListener("click", async () => {
-    btn.disabled = true;
-    $("#hint").textContent = "Saving…";
-    const now = new Date().toISOString();
-    const next = JSON.parse(JSON.stringify(triage));
-    next.questions.forEach(q => {
-      if (q.answer) return;
-      const a = answerFor(q);
-      if (a) { q.answer = a; q.answered_at = now; q.answered_by = "you"; }
-    });
-    try {
-      const res = await fetch(`/api/tasks/${encodeURIComponent(taskId)}/triage-state`, {
-        method: "PUT", headers: { "Content-Type": "application/json" }, body: JSON.stringify(next),
+  for (const card of cards) {
+    card.btn.addEventListener("click", async () => {
+      card.btn.disabled = true;
+      if (card.hint) card.hint.textContent = "Saving…";
+      const now = new Date().toISOString();
+      const next = JSON.parse(JSON.stringify(triage));
+      const mine = new Set(card.open.map(q => q.id));
+      next.questions.forEach(q => {
+        // Only this card's questions: saving another card's half-filled answers
+        // would settle questions the person had not finished with.
+        if (q.answer || !mine.has(q.id)) return;
+        const a = answerFor(q);
+        if (a) { q.answer = a; q.answered_at = now; q.answered_by = "you"; }
       });
-      if (!res.ok) throw new Error(`save failed (${res.status})`);
-      load();
-    } catch (e) {
-      $("#hint").textContent = String(e.message || e);
-      btn.disabled = false;
-    }
-  });
+      try {
+        const res = await fetch(`/api/tasks/${encodeURIComponent(taskId)}/triage-state`, {
+          method: "PUT", headers: { "Content-Type": "application/json" }, body: JSON.stringify(next),
+        });
+        if (!res.ok) throw new Error(`save failed (${res.status})`);
+        load();
+      } catch (e) {
+        if (card.hint) card.hint.textContent = String(e.message || e);
+        card.btn.disabled = false;
+      }
+    });
+  }
 }
 
 async function load() {

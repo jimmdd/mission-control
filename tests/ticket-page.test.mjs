@@ -323,7 +323,7 @@ function questionHelpers() {
     const location = { search: "" };
     class URLSearchParams { get() { return "x"; } }
   `;
-  return new Function(`${shim}\n${body}\nreturn { renderQuestion, renderQuestions, followUps };`)();
+  return new Function(`${shim}\n${body}\nreturn { renderQuestion, renderQuestions, renderFollowUps, followUps };`)();
 }
 
 test("a question says why it is being asked and what its answer binds", () => {
@@ -518,4 +518,46 @@ test("each action leaves a trace on the ticket", async () => {
     assert.ok(types.includes("question_asked"), types.join(","));
     assert.ok(types.includes("question_delegated"), types.join(","));
   });
+});
+
+test("a question appears in exactly one card", () => {
+  // The follow-up card showed the planner's questions and the second card showed
+  // all of them, so each planner question rendered twice — with two elements
+  // sharing id="submit" (the second button wired to nothing) and two radio groups
+  // sharing a name, so clicking an option in one silently drove the other.
+  const { renderFollowUps, renderQuestions, followUps } = questionHelpers();
+  const qs = [
+    { id: "p1", source: "planner", question: "Which licence?" },
+    { id: "t1", question: "Which base branch?", answer: "coda/new-ui", answered_by: "you" },
+    { id: "t2", question: "Rate limit?", deferred: true },
+  ];
+  const page = renderFollowUps(followUps(qs)) + renderQuestions({ questions: qs });
+
+  const times = (s) => (page.match(new RegExp(s, "g")) || []).length;
+  assert.equal(times("Which licence\\?"), 1, "the planner question is not repeated");
+  assert.equal(times('id="submit"'), 0, "no shared id");
+  assert.equal(times('name="q-p1"'), 0, "an answered-elsewhere question has no stray radio group");
+  // The opening questions still show — they are the decisions the planner was given.
+  assert.match(page, /Which base branch/);
+});
+
+test("with nothing left outside the follow-ups, the second card does not appear", () => {
+  const { renderFollowUps, renderQuestions, followUps } = questionHelpers();
+  const qs = [{ id: "p1", source: "planner", question: "Which licence?" }];
+  assert.equal(renderQuestions({ questions: qs }), "", "an empty card is not rendered");
+  assert.match(renderFollowUps(followUps(qs)), /Which licence/);
+});
+
+test("each card carries its own submit, scoped to its own questions", () => {
+  const { renderFollowUps, renderQuestions, followUps } = questionHelpers();
+  const qs = [
+    { id: "p1", source: "planner", question: "Which licence?" },
+    { id: "t1", question: "Which base branch?" },
+  ];
+  const page = renderFollowUps(followUps(qs)) + renderQuestions({ questions: qs });
+  assert.match(page, /data-submit="followups"/);
+  assert.match(page, /data-submit="triage"/);
+  assert.equal((page.match(/data-submit=/g) || []).length, 2);
+  // Once the planner is the one asking, "Answer these to start" is no longer true.
+  assert.match(page, /Already decided/);
 });
