@@ -787,6 +787,13 @@ function wireQuestionActions() {
         { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(payload) },
       );
       if (!res.ok) throw new Error(`${action} failed (${res.status})`);
+      // Sent, so it is no longer a draft. Without this the message lands in the
+      // thread and the draft restore puts the same text straight back into the
+      // box — it reads as though the send did not work.
+      if (act === "ask") {
+        const sent = document.querySelector(`[data-ask="${CSS.escape(qid)}"]`);
+        if (sent) sent.value = "";
+      }
       load({ force: true });
     } catch (e) {
       btn.disabled = false;
@@ -887,6 +894,12 @@ function wireQuestions(triage) {
           method: "PUT", headers: { "Content-Type": "application/json" }, body: JSON.stringify(next),
         });
         if (!res.ok) throw new Error(`save failed (${res.status})`);
+        // Same for answers: they are recorded now, so the free-text boxes that
+        // carried them must not be restored as unsent drafts on top of the answer.
+        card.open.forEach(q => {
+          const free = document.querySelector(`[data-free="${CSS.escape(q.id)}"]`);
+          if (free) free.value = "";
+        });
         load({ force: true });
       } catch (e) {
         if (card.hint) card.hint.textContent = String(e.message || e);

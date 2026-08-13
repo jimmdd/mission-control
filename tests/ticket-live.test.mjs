@@ -94,3 +94,33 @@ test("the input listeners are attached once, not on every render", () => {
   const inputListeners = (HTML.match(/addEventListener\("input"/g) || []).length;
   assert.equal(inputListeners, 1, "exactly one input listener registration site");
 });
+
+// Draft preservation and submitting fight each other: captureDrafts runs inside
+// load(), and after a send the field still holds the text, so the restore put it
+// straight back. The message appeared in the thread and stayed in the box, which
+// reads as though the send failed.
+
+test("text that was sent is cleared before the reload that would restore it", () => {
+  // The clear has to happen before load(), because load() is what captures drafts.
+  const askBlock = /if \(act === "ask"\) \{\s*const sent = document\.querySelector\(`\[data-ask="\$\{CSS\.escape\(qid\)\}"\]`\);\s*if \(sent\) sent\.value = "";\s*\}\s*load\(\{ force: true \}\)/;
+  assert.match(HTML, askBlock, "the ask field is emptied, then reloaded");
+});
+
+test("answers that were saved are cleared too", () => {
+  // Otherwise the answer renders as recorded and the same text sits below it in the
+  // box, looking unsaved.
+  const idx = HTML.indexOf("save failed");
+  const after = HTML.slice(idx, idx + 500);
+  assert.match(after, /card\.open\.forEach/);
+  assert.match(after, /free\.value = ""/);
+  assert.ok(after.indexOf('free.value = ""') < after.indexOf("load({ force: true })"),
+    "cleared before the reload, not after");
+});
+
+test("a failed send keeps the text, so nothing is lost to a network blip", () => {
+  // The clear sits after the ok check, inside the try — a throw skips it.
+  const idx = HTML.indexOf("${action} failed (${res.status})");
+  const around = HTML.slice(idx, idx + 400);
+  assert.ok(around.indexOf("throw new Error") < around.indexOf("sent.value"),
+    "the throw comes first, so a failure never reaches the clear");
+});
