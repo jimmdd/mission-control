@@ -787,7 +787,7 @@ function wireQuestionActions() {
         { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(payload) },
       );
       if (!res.ok) throw new Error(`${action} failed (${res.status})`);
-      load();
+      load({ force: true });
     } catch (e) {
       btn.disabled = false;
       const hint = $("#hint");
@@ -821,6 +821,10 @@ function openThread(qid) {
  * nothing at all — a person could fill it in and click with no effect. Each card
  * now gates on its own questions and saves only those.
  */
+// The current cards' refresh, swapped on each render so the once-only listeners
+// always drive the cards that are actually on screen.
+let refreshCards = null;
+
 function wireQuestions(triage) {
   const answerFor = q => {
     const free = document.querySelector(`[data-free="${CSS.escape(q.id)}"]`);
@@ -839,7 +843,7 @@ function wireQuestions(triage) {
       !q.answer && scope.querySelector(`[data-free="${CSS.escape(q.id)}"]`));
     if (open.length) cards.push({ btn, hint, open });
   });
-  if (!cards.length) return;
+  if (!cards.length) { refreshCards = null; return; }
 
   const refresh = () => {
     document.querySelectorAll(".choice").forEach(o =>
@@ -853,8 +857,15 @@ function wireQuestions(triage) {
       }
     }
   };
-  document.addEventListener("input", refresh);
-  document.addEventListener("change", refresh);
+  // Attached once, not per render. wireQuestions runs on every load, so adding
+  // them here added another pair each time: after ten polls, ten refresh handlers
+  // fired on every keystroke, and it got worse the longer the page stayed open.
+  refreshCards = refresh;
+  if (!wireQuestions.listening) {
+    wireQuestions.listening = true;
+    document.addEventListener("input", () => refreshCards?.());
+    document.addEventListener("change", () => refreshCards?.());
+  }
   refresh();
 
   for (const card of cards) {
@@ -876,7 +887,7 @@ function wireQuestions(triage) {
           method: "PUT", headers: { "Content-Type": "application/json" }, body: JSON.stringify(next),
         });
         if (!res.ok) throw new Error(`save failed (${res.status})`);
-        load();
+        load({ force: true });
       } catch (e) {
         if (card.hint) card.hint.textContent = String(e.message || e);
         card.btn.disabled = false;
@@ -885,12 +896,47 @@ function wireQuestions(triage) {
   }
 }
 
-async function load() {
+/**
+ * Is someone part-way through typing?
+ *
+ * The page re-renders by replacing all of #root, so a poll landing mid-sentence
+ * threw the sentence away. Anything focused counts, and so does anything with text
+ * in it — a draft you have clicked away from is still a draft.
+ */
+function isEditing() {
+  const active = document.activeElement;
+  if (active && /^(INPUT|TEXTAREA)$/.test(active.tagName)) return true;
+  return [...document.querySelectorAll("[data-free],[data-ask]")].some(el => el.value.trim());
+}
+
+/** What has been typed but not saved, so a re-render can put it back. */
+function captureDrafts() {
+  const drafts = {};
+  document.querySelectorAll("[data-free],[data-ask]").forEach(el => {
+    const key = el.dataset.free ? `free:${el.dataset.free}` : `ask:${el.dataset.ask}`;
+    if (el.value.trim()) drafts[key] = el.value;
+  });
+  return drafts;
+}
+
+function restoreDrafts(drafts) {
+  for (const [key, value] of Object.entries(drafts)) {
+    const [kind, id] = [key.slice(0, key.indexOf(":")), key.slice(key.indexOf(":") + 1)];
+    const el = document.querySelector(`[data-${kind === "free" ? "free" : "ask"}="${CSS.escape(id)}"]`);
+    if (el && !el.value) el.value = value;
+  }
+}
+
+async function load({ force = false } = {}) {
   const root = $("#root");
   if (!taskId) {
     root.innerHTML = `<div class="err">No ticket id. Open as <code>/ticket?id=&lt;task-id&gt;</code>.</div>`;
     return;
   }
+  // A background poll must never interrupt typing. Forced loads — after you submit
+  // or use one of the exits — still go through, and carry drafts across.
+  if (!force && isEditing()) return;
+  const drafts = captureDrafts();
   try {
     const task = await getJson(`/api/tasks/${encodeURIComponent(taskId)}`);
     const planData = await getJson(`/api/tasks/${encodeURIComponent(taskId)}/plan`).catch(() => ({}));
@@ -913,6 +959,7 @@ async function load() {
         : `<div class="cols">${renderFound(triage)}${renderQuestions(triage)}</div>`
           + renderPlan(planData.plan, planData.progress, triage));
 
+    restoreDrafts(drafts);
     if (triage && (fu.length || !settled)) wireQuestions(triage);
     wireGraph(planData.plan, planData.progress);
   } catch (e) {
@@ -946,8 +993,9 @@ function wireGraph(plan, progress) {
 // Delegated once, not per render: the question list is replaced on every poll.
 wireQuestionActions();
 load();
-// The bridge changes this ticket out of band, so re-read it periodically.
-setInterval(load, 15000);
+// The bridge changes this ticket out of band, so re-read it periodically. Not
+// forced: a poll that lands mid-sentence skips rather than discarding it.
+setInterval(() => load(), 15000);
 </script>
 </body>
 </html>
