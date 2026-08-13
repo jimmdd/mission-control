@@ -180,6 +180,72 @@
   .maplegend i.d { background: var(--amber); }
   .maplegend i.s { background: var(--green); opacity: .6; }
 
+
+  /* ─────────── conversation ─────────── */
+  /* One surface for everything the agent asks and everything you say back. The
+     panel beside it is the durable record — a transcript is worst at "what is
+     settled and what is blocking", which is the thing this page exists to answer. */
+  .convo { display: grid; grid-template-columns: 1.6fr 1fr; gap: 18px; align-items: start; margin-top: 20px; }
+  @media (max-width: 980px) { .convo { grid-template-columns: 1fr; } }
+  .chat { background: var(--card); border: 1px solid var(--line); border-radius: 14px; padding: 18px 20px; box-shadow: var(--shadow); }
+  .stream { max-height: 58vh; overflow-y: auto; display: flex; flex-direction: column; gap: 14px; padding-right: 4px; }
+  .cmsg { display: grid; grid-template-columns: auto 1fr; gap: 10px; align-items: start; }
+  .cmsg .qwho {
+    font-family: var(--mono); font-size: 9.5px; letter-spacing: .06em; text-transform: uppercase;
+    color: var(--ink-3); background: var(--sunk); border: 1px solid var(--line);
+    padding: 3px 7px; border-radius: 5px; white-space: nowrap; margin-top: 2px;
+  }
+  .cmsg.me .qwho { background: var(--accent-bg); border-color: transparent; color: var(--accent); }
+  .cbody { font-size: 13.5px; color: var(--ink-2); line-height: 1.55; white-space: pre-wrap; }
+  .cq { font-size: 14.5px; font-weight: 600; color: var(--ink); letter-spacing: -.012em; white-space: normal; }
+  .cwhy { font-size: 12.5px; color: var(--ink-3); margin-top: 4px; white-space: normal; }
+  .cdec { font-family: var(--mono); font-size: 10px; font-weight: 700; letter-spacing: .06em;
+          background: var(--sunk); color: var(--ink-3); border: 1px solid var(--line);
+          padding: 2px 6px; border-radius: 5px; margin-left: 6px; }
+  .cmsg.decided .cbody b { color: var(--green); }
+  .cmsg.note .cbody { color: var(--ink-3); }
+  .bychip { font-family: var(--mono); font-size: 10px; font-weight: 700; text-transform: uppercase;
+            color: var(--amber); background: var(--amber-bg); padding: 2px 7px; border-radius: 5px; margin-left: 6px; }
+
+  .composer { margin-top: 16px; padding-top: 14px; border-top: 1px solid var(--line-soft); }
+  .cactive { font-size: 12.5px; color: var(--ink-3); margin-bottom: 10px; }
+  .cactive b { font-family: var(--mono); color: var(--accent); }
+  .cactive .cleft { float: right; font-family: var(--mono); font-size: 11px; color: var(--amber); }
+  .copts { display: flex; flex-wrap: wrap; gap: 8px; margin-bottom: 10px; }
+  .copt {
+    font-family: inherit; font-size: 13px; font-weight: 500; padding: 8px 14px; border-radius: 9px;
+    border: 1.5px solid var(--line); background: var(--card); color: var(--ink); cursor: pointer;
+  }
+  .copt:hover { border-color: var(--accent); background: var(--accent-bg); color: var(--accent); }
+  .crow { display: flex; gap: 8px; }
+  .crow input {
+    flex: 1; min-width: 0; font-family: inherit; font-size: 14px; color: var(--ink);
+    background: var(--sunk); border: 1px solid var(--line); border-radius: 9px; padding: 11px 13px;
+  }
+  .crow input:focus { outline: none; border-color: var(--accent); }
+  .cexits { display: flex; align-items: center; gap: 8px; margin-top: 10px; font-size: 12.5px; color: var(--ink-3); }
+  .cnote { font-size: 13px; color: var(--ink-3); margin-bottom: 10px; }
+
+  .decisions { background: var(--card); border: 1px solid var(--line); border-radius: 14px; padding: 18px 18px 14px; box-shadow: var(--shadow); }
+  .drow2 {
+    display: grid; grid-template-columns: auto 1fr; gap: 3px 9px; width: 100%; text-align: left;
+    font-family: inherit; background: none; border: none; border-top: 1px solid var(--line-soft);
+    padding: 10px 6px; cursor: pointer; border-radius: 8px; color: inherit;
+  }
+  .drow2:first-of-type { border-top: none; }
+  .drow2:hover { background: var(--sunk); }
+  .drow2.on { background: var(--accent-bg); }
+  .drow2 .dtag { font-family: var(--mono); font-size: 10.5px; font-weight: 700; color: var(--ink-3); }
+  .drow2 .dq2 { font-size: 13px; color: var(--ink); line-height: 1.4; }
+  .drow2 .dv { grid-column: 2; font-size: 12px; color: var(--ink-3); }
+  .drow2.set .dtag { color: var(--green); }
+  .drow2.set .dv { color: var(--green); }
+  .drow2.agent .dtag, .drow2.agent .dv { color: var(--amber); }
+  .drow2.open .dtag { color: var(--accent); }
+  .drow2.aside .dq2, .drow2.aside .dv { color: var(--ink-3); }
+  .dsum { margin-top: 12px; padding-top: 11px; border-top: 1px solid var(--line-soft); font-size: 12.5px; color: var(--ink-3); }
+  .dsum b { color: var(--amber); }
+
   /* ─────────── questions ─────────── */
   .qbox { border-bottom: 1px solid var(--line-soft); padding: 16px 0; }
   .qbox:first-of-type { padding-top: 0; }
@@ -617,297 +683,273 @@ function followUps(qs) {
 }
 
 /** The conversation about a question, plus the box to add to it. */
-function renderThread(q) {
-  const msgs = (q.thread || []).map(m => `
-    <div class="qmsg${m.role === "you" ? " me" : ""}">
-      <span class="qwho">${m.role === "you" ? "you" : "research"}</span>
-      <span class="qbody">${esc(m.text)}</span>
-    </div>`).join("");
-  // The last word being the human's means a reply is owed. Saying so beats an empty
-  // box that looks like nothing happened.
-  const owed = (q.thread || []).length && q.thread[q.thread.length - 1].role === "you";
-  const pending = owed
-    ? `<div class="qpending"><span>Working out an answer</span><span class="st">in progress</span></div>`
-    : "";
-  return `<div class="qthread" data-thread="${esc(q.id)}">${msgs}${pending}
-    <div class="qask">
-      <input type="text" data-ask="${esc(q.id)}" placeholder="Ask about this…"
-             aria-label="Ask about ${esc(q.question)}">
-      <button class="qout" data-act="ask" data-q="${esc(q.id)}">Send</button>
-    </div>
-  </div>`;
+/** Questions raised by the planner, not by triage. Deferred ones no longer block. */
+function followUps(qs) {
+  return qs.filter(q => !q.answer && !q.deferred && (q.source === "planner" || q.round > 1));
 }
 
 /**
- * One question, whatever state it is in. Shared by the follow-up card and the
- * triage card so an answered question never looks different depending on where
- * it is read.
- */
-function renderQuestion(q, label) {
-  const chip = q.becomes
-    ? `<span class="dchip${q.answered_by === "agent" ? " disc" : ""}">${esc(q.becomes)}${q.answer ? "" : " when answered"}</span>`
-    : "";
-  const head = `<div class="qhead"><span class="qnum">${esc(label)}</span>
-    <span class="qtext">${esc(q.question)}</span>${chip}</div>`;
-  const why = q.why ? `<p class="qwhy">${esc(q.why)}</p>` : "";
-
-  if (q.answer) {
-    const byAgent = q.answered_by === "agent";
-    const body = byAgent
-      ? `<div class="qdone byagent">
-           <span class="pickmark">${esc(q.answer)}</span>
-           <span class="bychip">chosen by the agent</span>
-           <button class="qout undo" data-act="reopen" data-q="${esc(q.id)}">Change it</button>
-         </div>`
-      : `<div class="qdone">${esc(q.answer)}
-           <span class="fby">answered by ${esc(q.answered_by || "you")}</span></div>`;
-    const reason = q.reason ? `<p class="qreason"><b>Why:</b> ${esc(q.reason)}</p>` : "";
-    return `<div class="qbox">${head}${why}${body}${reason}</div>`;
-  }
-
-  if (q.deferred) {
-    return `<div class="qbox deferred">${head}${why}
-      <div class="qset"><span>Set aside — this is not blocking anything.</span>
-        <button class="qout" data-act="undefer" data-q="${esc(q.id)}">Bring it back</button></div>
-    </div>`;
-  }
-
-  const choices = (q.options || []).map(o => `
-    <label class="choice"><input type="radio" name="q-${esc(q.id)}" value="${esc(o)}"><span>${esc(o)}</span></label>`).join("");
-  const delegated = q.delegate_requested
-    ? `<div class="qpending"><span>Handed over — the agent is deciding</span><span class="st">in progress</span></div>`
-    : "";
-  const thread = (q.thread || []).length ? renderThread(q) : "";
-  // The exits go last, after the ways to answer, so answering stays the default.
-  const outs = `<div class="qouts">
-      <span class="lead">Not sure?</span>
-      ${thread ? "" : `<button class="qout" data-act="ask" data-q="${esc(q.id)}">Ask about this</button>`}
-      <button class="qout" data-act="delegate" data-q="${esc(q.id)}">Decide for me</button>
-      <button class="qout" data-act="defer" data-q="${esc(q.id)}">Decide later</button>
-    </div>`;
-
-  return `<div class="qbox">${head}${why}
-    <div class="choices">${choices}</div>
-    <textarea class="qadd" data-free="${esc(q.id)}" placeholder="Or answer in your own words."></textarea>
-    ${delegated}${thread}${outs}</div>`;
-}
-
-function renderFollowUps(open) {
-  return `<div class="card fu">
-    <div class="glab hot">Follow-up questions — planning is waiting on these
-      <span class="gn">${open.length} open</span></div>
-    <p class="fu-why">The plan cannot be written until these are settled, and no code
-      should be written before the plan. Answering them resumes planning.</p>
-    ${open.map((q, i) => renderQuestion(q, `F${String(i + 1).padStart(2, "0")}`)).join("")}
-    <div class="footbar">
-      <button class="btn primary" data-submit="followups" disabled>Submit answers</button>
-      <span class="why" data-hint="followups">Answer all ${open.length} to resume planning.</span>
-    </div>
-  </div>`;
-}
-
-function renderSettled(qs) {
-  return `<div class="qdone-wrap"><details class="settled">
-    <summary><span class="sct">${qs.length} decisions locked</span>
-      <span class="why">Answered — the plan below is built on them.</span></summary>
-    <div class="dlist">${qs.map((q, i) => `
-      <div class="drow">
-        <span class="dtag">D-${String(i + 1).padStart(2, "0")}</span>
-        <div><div class="dq">${esc(q.question)}</div><div class="da">${esc(q.answer || "")}</div></div>
-      </div>`).join("")}</div>
-  </details></div>`;
-}
-
-/**
- * The opening questions — everything not already leading the page as a follow-up.
+ * One conversation, not a page of forms.
  *
- * A question belongs in exactly one place. Rendering the whole set here while the
- * follow-up card showed the planner's put each of those on the page twice, with two
- * elements sharing id="submit" (so the second button was wired to nothing) and two
- * radio groups sharing a name (so clicking an option in one drove the other).
+ * The question cards put a text box on every question, scattered down a list that
+ * re-renders on a timer. That fought itself in every direction: typing raced the
+ * poll, each render restacked listeners, and the actual conversation was buried
+ * inside whichever card you had opened.
+ *
+ * So the agent has one surface. Everything it has asked, everything you have said
+ * back, and everything that got decided runs down a single stream, with one
+ * composer at the bottom. The panel beside it is the durable record — what is
+ * settled, what is still blocking — because that is the thing a transcript is
+ * worst at and the thing this page exists to answer.
+ *
+ * The split that matters: clicking decides, typing talks. An option or "decide for
+ * me" settles the question immediately; anything you type is a message in the
+ * conversation, not a silent answer to a form.
  */
-function renderQuestions(triage) {
-  const leading = new Set(followUps(triage?.questions || []).map(q => q.id));
-  const qs = (triage?.questions || []).filter(q => !leading.has(q.id));
-  if (!qs.length) return "";
 
-  // Deferred questions are not open. Counting them would make "Decide later" a lie.
-  const open = qs.filter(q => !q.answer && !q.deferred);
-  const body = qs.map((q, i) => renderQuestion(q, String(i + 1).padStart(2, "0"))).join("");
+/** Everything that has happened, in order, across every question. */
+function chatTimeline(questions) {
+  const events = [];
+  (questions || []).forEach((q, i) => {
+    const seq = String(i).padStart(4, "0");
+    events.push({
+      at: q.asked_at || "", seq, kind: "asked", q,
+      role: q.source === "planner" ? "planner" : "triage",
+    });
+    (q.thread || []).forEach(m => events.push({
+      at: m.at || "", seq, kind: "said", q, role: m.role, text: m.text,
+    }));
+    if (q.answer) {
+      events.push({
+        at: q.answered_at || "", seq, kind: "decided", q,
+        role: q.answered_by === "agent" ? "agent" : "you",
+      });
+    } else if (q.deferred) {
+      events.push({ at: q.deferred_at || "", seq, kind: "deferred", q, role: "you" });
+    }
+  });
+  // Timestamps where we have them; otherwise the order the questions were asked.
+  // Never a bare sort on `at` — an undated event would jump to the top and the
+  // conversation would read out of sequence.
+  return events.sort((a, b) => (a.at || "").localeCompare(b.at || "") || a.seq.localeCompare(b.seq));
+}
 
-  // Count what was answered, not what stopped blocking — a set-aside question is
-  // not a settled one, and saying "1/1" about it would misreport the ticket.
-  const answered = qs.filter(q => q.answer).length;
-  const aside = qs.filter(q => q.deferred && !q.answer).length;
-  // "Answer these to start" is only true before anything has started. Once the
-  // planner is the one asking, these are the decisions it was given.
-  const heading = open.length
-    ? (leading.size ? "Already decided" : "Answer these to start")
-    : "Questions";
-  return `<div class="card">
-    <div class="glab">${heading}
-      <span class="gn">${answered}/${qs.length}${aside ? ` · ${aside} set aside` : ""}</span></div>
-    ${body}
-    ${open.length ? `<div class="footbar">
-      <button class="btn primary" data-submit="triage" disabled>Submit answers</button>
-      <span class="why" data-hint="triage">Answer all ${open.length} to continue.</span></div>` : ""}
+const WHO = { planner: "planner", triage: "triage", research: "research", you: "you", agent: "agent" };
+
+function renderChatEvent(ev) {
+  const who = `<span class="qwho">${esc(WHO[ev.role] || ev.role)}</span>`;
+  const tag = ev.q.becomes ? `<span class="cdec">${esc(ev.q.becomes)}</span>` : "";
+
+  if (ev.kind === "asked") {
+    const why = ev.q.why ? `<div class="cwhy">${esc(ev.q.why)}</div>` : "";
+    return `<div class="cmsg" data-for="${esc(ev.q.id)}">${who}
+      <div class="cbody"><div class="cq">${esc(ev.q.question)}</div>${why}${tag}</div></div>`;
+  }
+  if (ev.kind === "said") {
+    return `<div class="cmsg${ev.role === "you" ? " me" : ""}" data-for="${esc(ev.q.id)}">${who}
+      <div class="cbody">${esc(ev.text)}</div></div>`;
+  }
+  if (ev.kind === "deferred") {
+    return `<div class="cmsg note" data-for="${esc(ev.q.id)}">${who}
+      <div class="cbody">Set aside — not blocking anything. ${tag}
+      <button class="qout" data-act="undefer" data-q="${esc(ev.q.id)}">Bring it back</button></div></div>`;
+  }
+  const reason = ev.q.reason ? `<div class="cwhy"><b>Why:</b> ${esc(ev.q.reason)}</div>` : "";
+  const undo = ev.role === "agent"
+    ? `<button class="qout" data-act="reopen" data-q="${esc(ev.q.id)}">Change it</button>` : "";
+  return `<div class="cmsg${ev.role === "you" ? " me" : ""} decided" data-for="${esc(ev.q.id)}">${who}
+    <div class="cbody"><b>${esc(ev.q.answer)}</b> ${tag}
+    ${ev.role === "agent" ? '<span class="bychip">chosen for you</span>' : ""}
+    ${reason}${undo}</div></div>`;
+}
+
+/** The question the composer is currently pointed at. */
+function activeQuestion(questions, wantedId) {
+  const open = blockingQuestions(questions);
+  if (wantedId) {
+    const found = (questions || []).find(q => q.id === wantedId);
+    if (found) return found;
+  }
+  // Planner questions first: work is halted behind those.
+  return open.find(q => q.source === "planner") || open[0] || null;
+}
+
+function blockingQuestions(questions) {
+  return (questions || []).filter(q => !q.answer && !q.deferred);
+}
+
+function renderComposer(active, openCount) {
+  if (!active) {
+    return `<div class="composer done">
+      <div class="cnote">Nothing is waiting on you. Anything you send here goes to the agent as context.</div>
+      <div class="crow"><input type="text" id="say" placeholder="Say something to the agent…">
+        <button class="btn primary" data-send="free">Send</button></div>
+    </div>`;
+  }
+  const opts = (active.options || []).map(o =>
+    `<button class="copt" data-answer="${esc(o)}" data-q="${esc(active.id)}">${esc(o)}</button>`).join("");
+  return `<div class="composer" data-active="${esc(active.id)}">
+    <div class="cactive">Answering <b>${esc(active.becomes || "")}</b> · ${esc(active.question)}
+      <span class="cleft">${openCount} still blocking</span></div>
+    ${opts ? `<div class="copts">${opts}</div>` : ""}
+    <div class="crow">
+      <input type="text" id="say" placeholder="Answer in your own words, or ask about it…">
+      <button class="btn" data-send="ask" title="Send as a message — the agent replies">Ask</button>
+      <button class="btn primary" data-send="answer" title="Record this as the decision">Answer</button>
+    </div>
+    <div class="cexits"><span>Not sure?</span>
+      <button class="qout" data-act="delegate" data-q="${esc(active.id)}">Decide for me</button>
+      <button class="qout" data-act="defer" data-q="${esc(active.id)}">Decide later</button>
+    </div>
+  </div>`;
+}
+
+function renderDecisions(questions, activeId) {
+  const rows = (questions || []).map(q => {
+    let state = "open", label = "open";
+    if (q.answer) { state = q.answered_by === "agent" ? "agent" : "set"; label = q.answer; }
+    else if (q.deferred) { state = "aside"; label = "set aside"; }
+    else if (q.delegate_requested) { state = "agent"; label = "agent deciding"; }
+    return `<button class="drow2 ${state}${q.id === activeId ? " on" : ""}" data-focus="${esc(q.id)}">
+      <span class="dtag">${esc(q.becomes || "—")}</span>
+      <span class="dq2">${esc(q.question)}</span>
+      <span class="dv">${esc(String(label).slice(0, 40))}</span>
+    </button>`;
+  }).join("");
+  const settled = (questions || []).filter(q => q.answer).length;
+  const blocking = blockingQuestions(questions).length;
+  return `<aside class="decisions">
+    <div class="glab">Decisions <span class="gn">${settled}/${(questions || []).length}</span></div>
+    ${rows || `<p class="empty">No questions yet.</p>`}
+    <div class="dsum">${blocking
+      ? `<b>${blocking}</b> blocking planning`
+      : `Nothing blocking — planning can proceed.`}</div>
+  </aside>`;
+}
+
+function renderConversation(triage, activeId) {
+  const qs = triage?.questions || [];
+  const active = activeQuestion(qs, activeId);
+  const stream = chatTimeline(qs).map(renderChatEvent).join("")
+    || `<p class="empty">Triage hasn't asked anything yet.</p>`;
+  return `<div class="convo">
+    <div class="chat">
+      <div class="glab">Planning <span class="gn">${blockingQuestions(qs).length} open</span></div>
+      <div class="stream" id="stream">${stream}</div>
+      ${renderComposer(active, blockingQuestions(qs).length)}
+    </div>
+    ${renderDecisions(qs, active?.id)}
   </div>`;
 }
 
 /**
- * The exits, and the thread. Each posts to the question's own endpoint rather than
- * rewriting the whole triage state, so one person answering cannot clobber another's
- * conversation.
+ * One place a question action is posted, so the exits and the composer cannot drift
+ * apart. `onOk` runs only after the response is checked, which is what keeps a
+ * failed request from clearing what you typed.
+ */
+async function postQuestionAction(qid, action, payload = {}, onOk = null) {
+  try {
+    const res = await fetch(
+      `/api/tasks/${encodeURIComponent(taskId)}/questions/${encodeURIComponent(qid)}/${action}`,
+      { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(payload) },
+    );
+    if (!res.ok) throw new Error(`${action} failed (${res.status})`);
+    onOk?.();
+    load({ force: true });
+    return true;
+  } catch (e) {
+    const note = document.querySelector(".cactive") || document.querySelector(".cnote");
+    if (note) note.textContent = String(e.message || e);
+    return false;
+  }
+}
+
+/**
+ * The exits, delegated once. "Decide for me" and "Decide later" settle a question
+ * without answering it; reopen takes an answer or a deferral back.
  */
 function wireQuestionActions() {
   document.addEventListener("click", async (ev) => {
     const btn = ev.target.closest("[data-act][data-q]");
     if (!btn) return;
     const { act, q: qid } = btn.dataset;
-    let action = act;
-    let payload = {};
-
-    if (act === "ask") {
-      const field = document.querySelector(`[data-ask="${CSS.escape(qid)}"]`);
-      // The first "Ask about this" click opens the thread; there is nothing to send yet.
-      if (!field) { openThread(qid); return; }
-      const text = field.value.trim();
-      if (!text) { field.focus(); return; }
-      payload = { text };
-    } else if (act === "undefer") {
-      // Bringing a question back is the same edit as taking an answer back: reopen
-      // clears the answer and the deferral together.
-      action = "reopen";
-    }
-
+    // Bringing a question back is the same edit as taking an answer back: reopen
+    // clears the answer and the deferral together.
+    const action = act === "undefer" ? "reopen" : act;
     btn.disabled = true;
-    try {
-      const res = await fetch(
-        `/api/tasks/${encodeURIComponent(taskId)}/questions/${encodeURIComponent(qid)}/${action}`,
-        { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(payload) },
-      );
-      if (!res.ok) throw new Error(`${action} failed (${res.status})`);
-      // Sent, so it is no longer a draft. Without this the message lands in the
-      // thread and the draft restore puts the same text straight back into the
-      // box — it reads as though the send did not work.
-      if (act === "ask") {
-        const sent = document.querySelector(`[data-ask="${CSS.escape(qid)}"]`);
-        if (sent) sent.value = "";
-      }
-      load({ force: true });
-    } catch (e) {
-      btn.disabled = false;
-      const hint = $("#hint");
-      if (hint) hint.textContent = String(e.message || e);
-    }
+    const ok = await postQuestionAction(qid, action);
+    if (!ok) btn.disabled = false;
   });
 }
 
-/** Reveal the conversation box without a round trip — nothing to save yet. */
-function openThread(qid) {
-  const box = document.querySelector(`[data-free="${CSS.escape(qid)}"]`)?.closest(".qbox");
-  if (!box || box.querySelector("[data-thread]")) return;
-  const thread = document.createElement("div");
-  thread.className = "qthread";
-  thread.dataset.thread = qid;
-  // esc() like every other id site: ids come from planner-emitted JSON, so a quote
-  // in one would break out of the attribute.
-  thread.innerHTML = `<div class="qask">
-    <input type="text" data-ask="${esc(qid)}" placeholder="Ask about this…">
-    <button class="qout" data-act="ask" data-q="${esc(qid)}">Send</button>
-  </div>`;
-  box.querySelector(".qouts")?.before(thread);
-  thread.querySelector("input")?.focus();
-}
+// Which question the composer points at. Held outside the render so a poll cannot
+// move it under someone mid-sentence.
+let focusedQuestion = null;
 
 /**
- * Wire each question card's submit button separately.
+ * The composer, the option buttons, and focusing a question from the panel.
  *
- * There used to be one `#submit`. When both cards rendered, two elements shared
- * that id, `$("#submit")` returned the first, and the second card's button did
- * nothing at all — a person could fill it in and click with no effect. Each card
- * now gates on its own questions and saves only those.
+ * Clicking decides, typing talks — an option or "decide for me" settles the
+ * question outright, while anything typed is a message in the conversation unless
+ * you deliberately press Answer.
  */
-// The current cards' refresh, swapped on each render so the once-only listeners
-// always drive the cards that are actually on screen.
-let refreshCards = null;
+function wireConversation(triage) {
+  const stream = $("#stream");
+  if (stream) stream.scrollTop = stream.scrollHeight;
 
-function wireQuestions(triage) {
-  const answerFor = q => {
-    const free = document.querySelector(`[data-free="${CSS.escape(q.id)}"]`);
-    if (free && free.value.trim()) return free.value.trim();
-    const picked = document.querySelector(`input[name="q-${CSS.escape(q.id)}"]:checked`);
-    return picked ? picked.value : "";
+  const say = $("#say");
+  const composer = document.querySelector("[data-active]");
+  const activeId = composer?.dataset.active || null;
+
+  const send = async (mode) => {
+    const text = (say?.value || "").trim();
+    if (!text || !activeId) { say?.focus(); return; }
+    if (mode === "answer") { await recordAnswer(triage, activeId, text); return; }
+    await postQuestionAction(activeId, "ask", { text }, () => { if (say) say.value = ""; });
   };
 
-  const cards = [];
-  document.querySelectorAll("[data-submit]").forEach(btn => {
-    const scope = btn.closest(".card");
-    if (!scope) return;
-    const hint = document.querySelector(`[data-hint="${btn.dataset.submit}"]`);
-    // A card owns exactly the questions rendered inside it.
-    const open = (triage.questions || []).filter(q =>
-      !q.answer && scope.querySelector(`[data-free="${CSS.escape(q.id)}"]`));
-    if (open.length) cards.push({ btn, hint, open });
+  document.querySelectorAll("[data-send]").forEach(btn =>
+    btn.addEventListener("click", () => send(btn.dataset.send)));
+
+  // Enter sends as a message. Recording a decision is the deliberate button.
+  say?.addEventListener("keydown", e => {
+    if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); send("ask"); }
   });
-  if (!cards.length) { refreshCards = null; return; }
 
-  const refresh = () => {
-    document.querySelectorAll(".choice").forEach(o =>
-      o.classList.toggle("on", !!o.querySelector("input")?.checked));
-    for (const { btn, hint, open } of cards) {
-      const filled = open.filter(q => answerFor(q)).length;
-      btn.disabled = filled < open.length;
-      if (hint) {
-        hint.textContent = btn.disabled ? `${filled}/${open.length} answered.`
-          : "Ready — this hands the ticket to the planner.";
-      }
-    }
-  };
-  // Attached once, not per render. wireQuestions runs on every load, so adding
-  // them here added another pair each time: after ten polls, ten refresh handlers
-  // fired on every keystroke, and it got worse the longer the page stayed open.
-  refreshCards = refresh;
-  if (!wireQuestions.listening) {
-    wireQuestions.listening = true;
-    document.addEventListener("input", () => refreshCards?.());
-    document.addEventListener("change", () => refreshCards?.());
-  }
-  refresh();
+  document.querySelectorAll("[data-answer]").forEach(btn =>
+    btn.addEventListener("click", () => recordAnswer(triage, btn.dataset.q, btn.dataset.answer)));
 
-  for (const card of cards) {
-    card.btn.addEventListener("click", async () => {
-      card.btn.disabled = true;
-      if (card.hint) card.hint.textContent = "Saving…";
-      const now = new Date().toISOString();
-      const next = JSON.parse(JSON.stringify(triage));
-      const mine = new Set(card.open.map(q => q.id));
-      next.questions.forEach(q => {
-        // Only this card's questions: saving another card's half-filled answers
-        // would settle questions the person had not finished with.
-        if (q.answer || !mine.has(q.id)) return;
-        const a = answerFor(q);
-        if (a) { q.answer = a; q.answered_at = now; q.answered_by = "you"; }
-      });
-      try {
-        const res = await fetch(`/api/tasks/${encodeURIComponent(taskId)}/triage-state`, {
-          method: "PUT", headers: { "Content-Type": "application/json" }, body: JSON.stringify(next),
-        });
-        if (!res.ok) throw new Error(`save failed (${res.status})`);
-        // Same for answers: they are recorded now, so the free-text boxes that
-        // carried them must not be restored as unsent drafts on top of the answer.
-        card.open.forEach(q => {
-          const free = document.querySelector(`[data-free="${CSS.escape(q.id)}"]`);
-          if (free) free.value = "";
-        });
-        load({ force: true });
-      } catch (e) {
-        if (card.hint) card.hint.textContent = String(e.message || e);
-        card.btn.disabled = false;
-      }
+  document.querySelectorAll("[data-focus]").forEach(btn =>
+    btn.addEventListener("click", () => { focusedQuestion = btn.dataset.focus; load({ force: true }); }));
+}
+
+/** Record one answer as the decision it binds. */
+async function recordAnswer(triage, qid, answer) {
+  const next = JSON.parse(JSON.stringify(triage));
+  const q = (next.questions || []).find(x => x.id === qid);
+  if (!q) return;
+  q.answer = answer;
+  q.answered_at = new Date().toISOString();
+  q.answered_by = "you";
+  q.deferred = false;
+  q.delegate_requested = false;
+  try {
+    const res = await fetch(`/api/tasks/${encodeURIComponent(taskId)}/triage-state`, {
+      method: "PUT", headers: { "Content-Type": "application/json" }, body: JSON.stringify(next),
     });
+    if (!res.ok) throw new Error(`save failed (${res.status})`);
+    const say = $("#say");
+    if (say) say.value = "";
+    focusedQuestion = null;      // settled, so the composer moves to whatever is next
+    load({ force: true });
+  } catch (e) {
+    const note = document.querySelector(".cactive");
+    if (note) note.textContent = String(e.message || e);
   }
 }
+
+/** Every field someone can be part-way through typing into. */
+const DRAFT_FIELDS = "#say,[data-free],[data-ask]";
 
 /**
  * Is someone part-way through typing?
@@ -919,14 +961,18 @@ function wireQuestions(triage) {
 function isEditing() {
   const active = document.activeElement;
   if (active && /^(INPUT|TEXTAREA)$/.test(active.tagName)) return true;
-  return [...document.querySelectorAll("[data-free],[data-ask]")].some(el => el.value.trim());
+  return [...document.querySelectorAll(DRAFT_FIELDS)].some(el => el.value.trim());
 }
 
-/** What has been typed but not saved, so a re-render can put it back. */
+/** What has been typed but not sent, so a re-render can put it back. */
 function captureDrafts() {
   const drafts = {};
-  document.querySelectorAll("[data-free],[data-ask]").forEach(el => {
-    const key = el.dataset.free ? `free:${el.dataset.free}` : `ask:${el.dataset.ask}`;
+  document.querySelectorAll(DRAFT_FIELDS).forEach(el => {
+    // The composer is one field for the whole conversation, so it keys on itself
+    // rather than on a question id: the text belongs to the person typing, not to
+    // whichever question happened to be in focus when they started.
+    const key = el.id === "say" ? "say"
+      : el.dataset.free ? `free:${el.dataset.free}` : `ask:${el.dataset.ask}`;
     if (el.value.trim()) drafts[key] = el.value;
   });
   return drafts;
@@ -934,8 +980,16 @@ function captureDrafts() {
 
 function restoreDrafts(drafts) {
   for (const [key, value] of Object.entries(drafts)) {
-    const [kind, id] = [key.slice(0, key.indexOf(":")), key.slice(key.indexOf(":") + 1)];
-    const el = document.querySelector(`[data-${kind === "free" ? "free" : "ask"}="${CSS.escape(id)}"]`);
+    let el;
+    if (key === "say") {
+      el = document.querySelector("#say");
+    } else {
+      const kind = key.slice(0, key.indexOf(":"));
+      const id = key.slice(key.indexOf(":") + 1);
+      el = document.querySelector(`[data-${kind === "free" ? "free" : "ask"}="${CSS.escape(id)}"]`);
+    }
+    // Never over a value the new render already put there — the saved answer wins
+    // over a stale draft of itself.
     if (el && !el.value) el.value = value;
   }
 }

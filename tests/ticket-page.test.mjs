@@ -237,35 +237,6 @@ test("clicking a node yields full detail, since the node itself is truncated", (
   assert.doesNotMatch(svg, /no GSD<\/text>/);
 });
 
-test("planner follow-ups lead the page and hide what is already answered", () => {
-  const html = readFileSync(new URL("../public/ticket.html", import.meta.url), "utf8");
-  const body = /<script>([\s\S]*)<\/script>/.exec(html)[1].split("// ---- BOOTSTRAP ----")[0];
-  const shim = `
-    const document = { querySelector: () => null, querySelectorAll: () => [], addEventListener: () => {} };
-    const location = { search: "" };
-    class URLSearchParams { get() { return "x"; } }
-  `;
-  const mod = new Function(`${shim}\n${body}\nreturn { followUps, renderFollowUps };`)();
-
-  const qs = [
-    { id: "t1", question: "Which app?", answer: "apps/new-ui", source: "triage" },
-    { id: "p1", question: "Self-host the font or use Adobe CDN?", source: "planner" },
-    { id: "p2", question: "Answered planner question", answer: "yes", source: "planner" },
-  ];
-  const open = mod.followUps(qs);
-  assert.equal(open.length, 1, "only unanswered planner questions are follow-ups");
-  assert.equal(open[0].id, "p1");
-
-  const out = mod.renderFollowUps(open);
-  assert.match(out, /Self-host the font/);
-  // Answered ones belong in the collapsed decisions list, not here.
-  assert.doesNotMatch(out, /Answered planner question/);
-  assert.doesNotMatch(out, /Which app\?/, "triage questions are not follow-ups");
-  // A follow-up means planning is stopped, and that has to be said, not implied.
-  assert.match(out, /plan cannot be written until these are settled/);
-  assert.match(out, /no code\s+should be written before the plan/);
-});
-
 test("the board flags a task whose planning is blocked, at any status", () => {
   // The existing triage indicator only renders while status === 'planning', which is
   // exactly when planner follow-ups have not been raised yet. Without a second badge a
@@ -307,121 +278,6 @@ test("the canvas grows to fit its decisions instead of clipping them", () => {
 
   // Every decision is drawn — a placeholder saying "+N more" explained nothing.
   assert.equal((svg.match(/class="dec /g) || []).length, 9);
-});
-
-// ─────────── the question block ───────────
-// A question used to be a prompt and some options: enough to collect an answer, not
-// enough to get a good one. These cover what it carries now, and the three exits
-// that stop one unanswerable question holding up the other eight.
-
-/** The page's pure render helpers, extracted headlessly. */
-function questionHelpers() {
-  const html = readFileSync(new URL("../public/ticket.html", import.meta.url), "utf8");
-  const body = /<script>([\s\S]*)<\/script>/.exec(html)[1].split("// ---- BOOTSTRAP ----")[0];
-  const shim = `
-    const document = { querySelector: () => null, querySelectorAll: () => [], addEventListener: () => {} };
-    const location = { search: "" };
-    class URLSearchParams { get() { return "x"; } }
-  `;
-  return new Function(`${shim}\n${body}\nreturn { renderQuestion, renderQuestions, renderFollowUps, followUps };`)();
-}
-
-test("a question says why it is being asked and what its answer binds", () => {
-  const { renderQuestion } = questionHelpers();
-  const out = renderQuestion({
-    id: "q1",
-    question: "Which font licence did we buy?",
-    why: "Adobe Fonts terms forbid self-hosting; the implementation differs per licence.",
-    becomes: "D-01",
-    options: ["Web Project", "Desktop only"],
-  }, "01");
-
-  assert.match(out, /Adobe Fonts terms forbid self-hosting/, "the reason is shown");
-  assert.match(out, /D-01/, "the decision it locks is named");
-  // Without this the answer is a comment; with it, it is a spec.
-  assert.match(out, /when answered/);
-});
-
-test("every open question offers the three exits", () => {
-  const { renderQuestion } = questionHelpers();
-  const out = renderQuestion({ id: "q1", question: "Page size?" }, "01");
-  assert.match(out, /Ask about this/);
-  assert.match(out, /Decide for me/);
-  assert.match(out, /Decide later/);
-  // Answering stays the default: the exits come after the ways to answer.
-  assert.ok(out.indexOf("qadd") < out.indexOf("qouts"), "the exits follow the answer box");
-});
-
-test("an agent's pick reads as delegated, shows its reasoning, and can be taken back", () => {
-  const { renderQuestion } = questionHelpers();
-  const out = renderQuestion({
-    id: "q3", question: "Default page size?", answer: "50",
-    answered_by: "agent", reason: "the list renders 20 and prefetches one page ahead",
-  }, "03");
-
-  assert.match(out, /chosen by the agent/);
-  assert.match(out, /Why:.*prefetches one page ahead/s, "the reasoning is legible enough to disagree with");
-  assert.match(out, /data-act="reopen"/, "it can be taken back");
-});
-
-test("a human's answer is not dressed up as a delegated one", () => {
-  const { renderQuestion } = questionHelpers();
-  const out = renderQuestion({ id: "q1", question: "Which licence?", answer: "Web Project", answered_by: "you" }, "01");
-  assert.doesNotMatch(out, /chosen by the agent/);
-  assert.doesNotMatch(out, /data-act="reopen"/);
-});
-
-test("a deferred question is set aside, not counted as open", () => {
-  const { renderQuestion, renderQuestions, followUps } = questionHelpers();
-  const q = { id: "q2", question: "Rate limit?", deferred: true, source: "planner" };
-
-  const out = renderQuestion(q, "02");
-  assert.match(out, /not blocking anything/);
-  assert.match(out, /Bring it back/);
-  assert.doesNotMatch(out, /Decide for me/, "a set-aside question offers no exits");
-
-  // Counting it would make "Decide later" a lie.
-  assert.equal(followUps([q]).length, 0, "deferred follow-ups stop blocking");
-  // But it is not answered either, and the header must not claim it was.
-  const card = renderQuestions({ questions: [q] });
-  assert.match(card, /0\/1/);
-  assert.match(card, /1 set aside/);
-});
-
-test("a thread shows both sides, and says when a reply is owed", () => {
-  const { renderQuestion } = questionHelpers();
-  const out = renderQuestion({
-    id: "q2", question: "Cursor on created_at or id?",
-    thread: [
-      { role: "you", text: "what would you pick, and why?" },
-      { role: "research", text: "created_at, with id as a tiebreaker." },
-      { role: "you", text: "is created_at indexed on that hypertable?" },
-    ],
-  }, "02");
-
-  assert.match(out, /what would you pick/);
-  assert.match(out, /created_at, with id as a tiebreaker/);
-  // The last word is the human's, so an answer is owed — saying so beats an empty
-  // box that looks like nothing happened.
-  assert.match(out, /Working out an answer/);
-  // The thread is already open, so the button that opens it is redundant — the
-  // input's own placeholder still reads "Ask about this…".
-  assert.doesNotMatch(out, /<button[^>]*>Ask about this<\/button>/);
-});
-
-test("a settled thread does not claim a reply is coming", () => {
-  const { renderQuestion } = questionHelpers();
-  const out = renderQuestion({
-    id: "q2", question: "Cursor?",
-    thread: [{ role: "you", text: "?" }, { role: "research", text: "created_at" }],
-  }, "02");
-  assert.doesNotMatch(out, /Working out an answer/);
-});
-
-test("a delegated question shows the handover instead of pretending to wait on you", () => {
-  const { renderQuestion } = questionHelpers();
-  const out = renderQuestion({ id: "q1", question: "Page size?", delegate_requested: true }, "01");
-  assert.match(out, /the agent is deciding/);
 });
 
 // ─────────── the question endpoints ───────────
@@ -520,48 +376,6 @@ test("each action leaves a trace on the ticket", async () => {
   });
 });
 
-test("a question appears in exactly one card", () => {
-  // The follow-up card showed the planner's questions and the second card showed
-  // all of them, so each planner question rendered twice — with two elements
-  // sharing id="submit" (the second button wired to nothing) and two radio groups
-  // sharing a name, so clicking an option in one silently drove the other.
-  const { renderFollowUps, renderQuestions, followUps } = questionHelpers();
-  const qs = [
-    { id: "p1", source: "planner", question: "Which licence?" },
-    { id: "t1", question: "Which base branch?", answer: "coda/new-ui", answered_by: "you" },
-    { id: "t2", question: "Rate limit?", deferred: true },
-  ];
-  const page = renderFollowUps(followUps(qs)) + renderQuestions({ questions: qs });
-
-  const times = (s) => (page.match(new RegExp(s, "g")) || []).length;
-  assert.equal(times("Which licence\\?"), 1, "the planner question is not repeated");
-  assert.equal(times('id="submit"'), 0, "no shared id");
-  assert.equal(times('name="q-p1"'), 0, "an answered-elsewhere question has no stray radio group");
-  // The opening questions still show — they are the decisions the planner was given.
-  assert.match(page, /Which base branch/);
-});
-
-test("with nothing left outside the follow-ups, the second card does not appear", () => {
-  const { renderFollowUps, renderQuestions, followUps } = questionHelpers();
-  const qs = [{ id: "p1", source: "planner", question: "Which licence?" }];
-  assert.equal(renderQuestions({ questions: qs }), "", "an empty card is not rendered");
-  assert.match(renderFollowUps(followUps(qs)), /Which licence/);
-});
-
-test("each card carries its own submit, scoped to its own questions", () => {
-  const { renderFollowUps, renderQuestions, followUps } = questionHelpers();
-  const qs = [
-    { id: "p1", source: "planner", question: "Which licence?" },
-    { id: "t1", question: "Which base branch?" },
-  ];
-  const page = renderFollowUps(followUps(qs)) + renderQuestions({ questions: qs });
-  assert.match(page, /data-submit="followups"/);
-  assert.match(page, /data-submit="triage"/);
-  assert.equal((page.match(/data-submit=/g) || []).length, 2);
-  // Once the planner is the one asking, "Answer these to start" is no longer true.
-  assert.match(page, /Already decided/);
-});
-
 test("resetting triage archives the plan, so a kicked-back ticket is not still planned", async () => {
   await withHandler(async (handler, db, home) => {
     const task = db.createTask({ title: "brand work" });
@@ -596,4 +410,104 @@ test("resetting a task that was never planned is not an error", async () => {
     await handler(mockReq({ url: `/api/tasks/${task.id}/reset-triage`, method: "POST", body: {} }), res);
     assert.equal(res.statusCode, 200);
   });
+});
+
+// ─────────── the conversation surface ───────────
+// The card layout put a text box on every question down a list that re-rendered on
+// a timer, and buried the actual conversation inside whichever card was open. The
+// agent has one surface now: everything asked, everything said back, everything
+// decided, in one stream — with the durable record beside it, because "what is
+// settled and what is blocking" is exactly what a transcript is worst at.
+
+function convoHelpers() {
+  const html = readFileSync(new URL("../public/ticket.html", import.meta.url), "utf8");
+  const body = /<script>([\s\S]*)<\/script>/.exec(html)[1].split("// ---- BOOTSTRAP ----")[0];
+  const shim = `
+    const document = { querySelector: () => null, querySelectorAll: () => [], addEventListener: () => {} };
+    const location = { search: "" };
+    class URLSearchParams { get() { return "x"; } }
+  `;
+  return new Function(`${shim}\n${body}\nreturn { renderConversation, chatTimeline, activeQuestion, blockingQuestions };`)();
+}
+
+const CONVO = [
+  { id: "p1", source: "planner", becomes: "D-01",
+    question: "Which Aktiv Grotesk licence covers the web build?",
+    why: "Adobe forbids self-hosting; Host & Link permits it.",
+    options: ["Host & Link", "Adobe Web Project"],
+    thread: [
+      { role: "you", text: "what changes between them?", at: "2026-08-13T01:00:00Z" },
+      { role: "research", text: "Self-hosting means files in static/fonts plus a CORP header.", at: "2026-08-13T01:01:00Z" },
+    ] },
+  { id: "t1", becomes: "D-03", question: "Default page size?", answer: "50",
+    answered_by: "agent", reason: "the list renders 20 and prefetches one page ahead",
+    answered_at: "2026-08-13T00:30:00Z" },
+  { id: "t2", becomes: "D-04", question: "Rate-limit now?", deferred: true },
+];
+
+test("everything the agent asked and everything said back is one stream", () => {
+  const { renderConversation } = convoHelpers();
+  const out = renderConversation({ questions: CONVO }, null);
+
+  assert.match(out, /Which Aktiv Grotesk licence/);
+  assert.match(out, /Adobe forbids self-hosting/, "why it is asked travels with the question");
+  assert.match(out, /what changes between them/, "your message is in the same stream");
+  assert.match(out, /CORP header/, "and so is the reply");
+  assert.match(out, /chosen for you/, "so is a decision the agent made");
+  assert.match(out, /Set aside/, "and one you set aside");
+  // One composer for the whole conversation, not one box per question.
+  assert.equal((out.match(/class="composer/g) || []).length, 1);
+  assert.equal((out.match(/id="say"/g) || []).length, 1);
+});
+
+test("the stream reads in the order things happened", () => {
+  const { chatTimeline } = convoHelpers();
+  const kinds = chatTimeline(CONVO).map(e => `${e.q.id}:${e.kind}`);
+  // A question is asked before it is answered, and its thread sits between.
+  assert.ok(kinds.indexOf("p1:asked") < kinds.indexOf("p1:said"));
+  assert.ok(kinds.indexOf("t1:asked") < kinds.indexOf("t1:decided"));
+  // Undated events must not leap to the front and scramble the reading order.
+  assert.equal(kinds[0], "p1:asked");
+});
+
+test("the composer points at what is blocking, planner questions first", () => {
+  const { activeQuestion } = convoHelpers();
+  // Work is halted behind a planner question, so it leads.
+  assert.equal(activeQuestion(CONVO, null).id, "p1");
+  // Unless you pick another from the panel.
+  assert.equal(activeQuestion(CONVO, "t2").id, "t2");
+  // Answered and deferred ones are not waiting on anyone.
+  assert.equal(activeQuestion([CONVO[1], CONVO[2]], null), null);
+});
+
+test("clicking decides and typing talks", () => {
+  const { renderConversation } = convoHelpers();
+  const out = renderConversation({ questions: CONVO }, null);
+  // An option settles the question outright.
+  assert.match(out, /data-answer="Host &amp; Link"/);
+  // Typing has two destinations, and the safe one is a message.
+  assert.match(out, /data-send="ask"/);
+  assert.match(out, /data-send="answer"/);
+  // The exits stay available on whichever question is in focus.
+  assert.match(out, /data-act="delegate"/);
+  assert.match(out, /data-act="defer"/);
+});
+
+test("the panel says what is settled and what is blocking, without scrolling", () => {
+  const { renderConversation, blockingQuestions } = convoHelpers();
+  const out = renderConversation({ questions: CONVO }, null);
+  assert.match(out, /class="decisions"/);
+  assert.match(out, /D-01/);
+  assert.match(out, /D-03/);
+  assert.match(out, /1<\/b> blocking planning/);
+  assert.equal(blockingQuestions(CONVO).length, 1, "deferred and answered do not block");
+  // Every question is reachable from the panel, so nothing is lost up the stream.
+  assert.equal((out.match(/data-focus=/g) || []).length, CONVO.length);
+});
+
+test("with nothing open the composer stops asking for an answer", () => {
+  const { renderConversation } = convoHelpers();
+  const out = renderConversation({ questions: [CONVO[1]] }, null);
+  assert.match(out, /Nothing is waiting on you/);
+  assert.doesNotMatch(out, /data-send="answer"/, "there is nothing to answer");
 });
