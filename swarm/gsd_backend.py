@@ -73,7 +73,23 @@ def init_command() -> str:
     return "/gsd-new-project --auto"
 
 
-def plan_step_text() -> str:
+def workflow_path(command: str) -> Optional[str]:
+    """The workflow document behind a GSD skill, for a runtime that has no skills.
+
+    GSD ships as Claude Code skills, so `/gsd-plan-phase` resolves there and nowhere
+    else. The workflows themselves are markdown under gsd-core/workflows — documents,
+    not code — so any agent that can read a file can follow one. That is what keeps
+    planning a contract rather than a Claude Code feature.
+    """
+    name = command.lstrip("/").removeprefix("gsd-").split()[0]
+    for root in (Path.home() / ".claude" / "gsd-core" / "workflows",):
+        candidate = root / f"{name}.md"
+        if candidate.is_file():
+            return str(candidate)
+    return None
+
+
+def plan_step_text(provider: str = "") -> str:
     """The Plan step, written so the agent handles an uninitialised project itself.
 
     The worktree does not exist when the prompt is built, so the sequence cannot be

@@ -256,7 +256,7 @@ test("init is skipped when the project already exists, at no cost", () => {
 import json, plan_stage
 def explode(*a, **k):
     raise AssertionError("no process should run when .planning/ already exists")
-plan_stage._run_claude = explode
+plan_stage._run_cli = explode
 print(json.dumps(plan_stage.run_init_stage(${JSON.stringify(dir)}, {"id": "t1"})))
 `);
     assert.equal(v.outcome, "initialised");
@@ -269,7 +269,7 @@ test("init that does not create the project is a prerequisite, not an error", ()
   try {
     const v = python(`
 import json, plan_stage
-plan_stage._run_claude = lambda *a, **k: {"output": "all done!", "returncode": 0,
+plan_stage._run_cli = lambda *a, **k: {"output": "all done!", "returncode": 0,
                                           "timed_out": False, "duration_s": 4.2, "failed": None}
 print(json.dumps(plan_stage.run_init_stage(${JSON.stringify(dir)}, {"id": "t1"})))
 `);
@@ -285,7 +285,7 @@ test("a failed init stops before planning is paid for", () => {
     const r = python(`
 import json, plan_stage
 ran = []
-plan_stage._run_claude = lambda *a, **k: (ran.append("init"),
+plan_stage._run_cli = lambda *a, **k: (ran.append("init"),
     {"output": "", "returncode": 1, "timed_out": False, "duration_s": 1, "failed": None})[1]
 plan_stage.run_plan_stage = lambda *a, **k: (_ for _ in ()).throw(
     AssertionError("planning must not run after a failed init"))
@@ -302,7 +302,7 @@ test("both stages are reported, so a post-mortem sees where the time went", () =
   try {
     const r = python(`
 import json, plan_stage
-plan_stage._run_claude = lambda *a, **k: {"output": "", "returncode": 0,
+plan_stage._run_cli = lambda *a, **k: {"output": "", "returncode": 0,
                                           "timed_out": False, "duration_s": 90.0, "failed": None}
 v = plan_stage.plan_in_worktree(${JSON.stringify(dir)}, {"id": "t1"})
 print(json.dumps({"outcome": v["outcome"], "stages": [[s["stage"], s["outcome"]] for s in v["stages"]]}))
@@ -507,10 +507,10 @@ test("planning's model is a setting, not whatever the CLI defaults to", () => {
   const r = python(`
 import json, plan_stage
 seen = {}
-def fake_run(worktree, prompt, transcript, timeout, model=""):
+def fake_run(worktree, prompt, transcript, timeout, model="", provider="", effort=""):
     seen.setdefault("models", []).append(model)
     return {"output": "", "returncode": 0, "timed_out": False, "duration_s": 1, "failed": None}
-plan_stage._run_claude = fake_run
+plan_stage._run_cli = fake_run
 plan_stage._configured_model = lambda role: "configured-" + role
 plan_stage.gsd_backend.project_initialised = lambda w: False
 plan_stage.gsd_backend.workflow_ran = lambda w: (False, "")
@@ -525,7 +525,7 @@ test("an explicit model beats the configured one", () => {
   const r = python(`
 import json, plan_stage
 seen = []
-plan_stage._run_claude = lambda w, p, t, to, model="": (seen.append(model),
+plan_stage._run_cli = lambda w, p, t, to, model="", provider="", effort="": (seen.append(model),
     {"output": "", "returncode": 0, "timed_out": False, "duration_s": 1, "failed": None})[1]
 plan_stage._configured_model = lambda role: "configured"
 plan_stage.gsd_backend.project_initialised = lambda w: False
@@ -620,4 +620,85 @@ print(json.dumps(json.load(open(job))))
   assert.equal(r.state, "done");
   assert.equal(r.verdict.outcome, "error");
   assert.match(r.verdict.reason, /crashed/);
+});
+
+// ─────────── planning is a contract, not a runtime ───────────
+// GSD ships as Claude Code skills, so /gsd-plan-phase resolves there and nowhere
+// else. But the workflows are markdown documents, and any agent that can read a file
+// can follow one — so a runtime without the skill is handed the document instead.
+// The verdict never reads the transcript to decide whether a plan exists, so a plan
+// written by codex counts exactly as much as one written by claude.
+
+test("each runtime gets an invocation it can actually run", () => {
+  const r = python(`
+import json, plan_stage
+out = {}
+for prov in ("claude", "claude-cli", "codex", "codex-cli"):
+    out[prov] = plan_stage.build_command(prov, "PROMPT", "m5", "high")
+try:
+    plan_stage.build_command("nonsense", "PROMPT")
+    out["nonsense"] = "accepted"
+except ValueError as e:
+    out["nonsense"] = str(e)
+print(json.dumps(out))
+`);
+  assert.equal(r.claude[0], "claude");
+  assert.ok(r.claude.includes("--model") && r.claude.includes("m5"));
+  assert.equal(r.codex[0], "codex");
+  assert.ok(r.codex.includes("model_reasoning_effort=high"), "codex takes an effort setting");
+  // Planning writes .planning/ — the read-only sandbox MC uses for Q&A will not do.
+  assert.ok(r.codex.includes("--dangerously-bypass-approvals-and-sandbox"));
+  assert.equal(r["claude-cli"][0], "claude", "config spells it claude-cli");
+  assert.match(r.nonsense, /unknown planning provider/, "an unknown runtime is refused, not guessed at");
+});
+
+test("a runtime without skills is handed the workflow document", () => {
+  const r = python(`
+import json, plan_stage
+print(json.dumps({
+  "claude": plan_stage.build_init_prompt({"title": "t"}, provider="claude"),
+  "codex": plan_stage.build_init_prompt({"title": "t"}, provider="codex"),
+}))
+`);
+  assert.match(r.claude, /Run `\/gsd-new-project/, "claude invokes the skill");
+  assert.doesNotMatch(r.claude, /Read `.*new-project\.md/, "and does not need the document");
+
+  assert.match(r.codex, /has no `\/gsd-new-project --auto` skill/);
+  assert.match(r.codex, /Read `.*workflows\/new-project\.md` in full/);
+  // A runtime that cannot spawn GSD's sub-agents must do the work, not skip it.
+  assert.match(r.codex, /do that step's work\s+yourself/);
+  // And must not substitute its own format — the thesis rests on GSD's decomposition.
+  assert.match(r.codex, /Do not invent your own planning format/);
+});
+
+test("a workflow that cannot be found is reported, not improvised around", () => {
+  const r = python(`
+import json, plan_stage
+plan_stage.gsd_backend.workflow_path = lambda cmd: None
+print(json.dumps({"text": plan_stage.workflow_instruction("codex", "/gsd-plan-phase")}))
+`);
+  // Letting it plan some other way would produce output that counts as GSD's and is not.
+  assert.match(r.text, /Stop and report/);
+});
+
+test("the provider is a setting, and the verdict does not depend on it", () => {
+  const dir = worktree({ planning: true, planText: "<task>written by whichever runtime</task>" });
+  try {
+    const r = python(`
+import json, plan_stage
+seen = []
+plan_stage._run_cli = lambda w, p, t, to, model="", provider="", effort="": (
+    seen.append({"provider": provider, "effort": effort, "model": model}),
+    {"output": "", "returncode": 0, "timed_out": False, "duration_s": 1, "failed": None})[1]
+plan_stage._planning_provider = lambda: "codex"
+plan_stage._planning_effort = lambda: "high"
+plan_stage._configured_model = lambda role: "gpt-x"
+v = plan_stage.plan_in_worktree(${JSON.stringify(dir)}, {"id": "t1"})
+print(json.dumps({"outcome": v["outcome"], "calls": seen}))
+`);
+    assert.ok(r.calls.every((c) => c.provider === "codex"), JSON.stringify(r.calls));
+    assert.ok(r.calls.every((c) => c.effort === "high"));
+    // find_plan reads the filesystem, so the artefact is the contract.
+    assert.equal(r.outcome, "plan_written");
+  } finally { rmSync(dir, { recursive: true, force: true }); }
 });

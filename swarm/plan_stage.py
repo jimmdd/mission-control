@@ -83,6 +83,63 @@ def question_protocol() -> str:
     )
 
 
+def _planning_provider() -> str:
+    """Which runtime plans. `planning_provider` in swarm-config.json; claude by default."""
+    raw = (os.environ.get("MC_PLANNING_PROVIDER") or "").strip()
+    if raw:
+        return raw
+    try:
+        from planner import _get_config
+        return str(_get_config().get("planning_provider", "") or "claude")
+    except Exception:
+        return "claude"
+
+
+def _planning_effort() -> str:
+    """Reasoning effort, for runtimes that take one. Ignored by those that do not."""
+    raw = (os.environ.get("MC_PLANNING_EFFORT") or "").strip()
+    if raw:
+        return raw
+    try:
+        from planner import _get_config
+        return str(_get_config().get("planning_effort", "") or "")
+    except Exception:
+        return ""
+
+
+def workflow_instruction(provider: str, command: str) -> str:
+    """How to invoke a GSD workflow on this runtime.
+
+    GSD ships as Claude Code skills — 71 of them in ~/.claude/skills — so `/gsd-plan-phase`
+    resolves there and nowhere else. But the workflows themselves are markdown documents
+    under gsd-core/workflows, not code, and any agent that can read a file and follow it
+    can execute one. So a runtime without the skill is handed the document instead.
+
+    That keeps planning a contract rather than a runtime: whichever CLI runs, the verdict
+    is still "is there a PLAN.md with <task> blocks on disk", which `find_plan` answers
+    without reading a transcript.
+    """
+    if provider in ("claude", "claude-cli"):
+        return f"Run `{command}`."
+
+    path = gsd_backend.workflow_path(command)
+    if not path:
+        # Better to say so than to let a runtime improvise a plan and have it counted
+        # as GSD output — the whole thesis rests on GSD's decomposition, not on any
+        # plausible-looking plan.
+        return (f"`{command}` is a Claude Code skill and this runtime cannot resolve it, "
+                f"and its workflow document could not be found either. Stop and report "
+                f"this rather than planning some other way.")
+    return (f"This runtime has no `{command}` skill, so follow its workflow directly:\n"
+            f"1. Read `{path}` in full.\n"
+            f"2. Execute the steps it describes, in order, writing the same artefacts to "
+            f"the same paths it specifies.\n"
+            f"3. Where it calls for a sub-agent you cannot spawn, do that step's work "
+            f"yourself in this session rather than skipping it.\n"
+            f"Do not invent your own planning format — the output must match what the "
+            f"workflow specifies.")
+
+
 def _ticket_section(task: Dict) -> List[str]:
     parts = [f"TICKET: {task.get('title', '')}"]
     if task.get("description"):
@@ -90,7 +147,7 @@ def _ticket_section(task: Dict) -> List[str]:
     return parts
 
 
-def build_init_prompt(task: Dict, context: str = "") -> str:
+def build_init_prompt(task: Dict, context: str = "", provider: str = "") -> str:
     """Create the GSD project. Nothing else.
 
     Initialising an established repo is expensive — on MET-635 it read the codebase,
@@ -106,8 +163,9 @@ def build_init_prompt(task: Dict, context: str = "") -> str:
     if context:
         parts.append(context)
     parts.append(
-        f"Run `{gsd_backend.init_command()}`. When {gsd_backend.planning_dir_name()}/ "
-        f"exists with the project documents in it, say so and stop."
+        f"{workflow_instruction(provider or _planning_provider(), gsd_backend.init_command())}\n"
+        f"When {gsd_backend.planning_dir_name()}/ exists with the project documents in it, "
+        f"say so and stop."
     )
     # Scope, or the roadmap becomes a programme. Told only to start a "new project",
     # GSD read one ticket as a body of work and produced a six-phase roadmap — then
@@ -123,7 +181,7 @@ def build_init_prompt(task: Dict, context: str = "") -> str:
     return "\n\n".join(parts)
 
 
-def build_prompt(task: Dict, context: str = "") -> str:
+def build_prompt(task: Dict, context: str = "", provider: str = "") -> str:
     """The planning prompt: what to plan, what is already decided, how to stop.
 
     Assumes the GSD project exists — `plan_in_worktree` guarantees that by running
@@ -137,7 +195,7 @@ def build_prompt(task: Dict, context: str = "") -> str:
     ]
     if context:
         parts.append(context)
-    parts.append(gsd_backend.plan_step_text())
+    parts.append(gsd_backend.plan_step_text(provider or _planning_provider()))
     parts.append(question_protocol())
     parts.append(
         "When the plan is written, say so and stop. Do not begin executing it."
@@ -307,24 +365,54 @@ def text_from_stream(raw: str) -> str:
     return "\n".join(p for p in parts if p) if saw_json else raw
 
 
-def _run_claude(worktree: str, prompt: str, transcript: Path,
-                timeout: int, model: str = "") -> Dict:
-    """Run one tool-using `claude -p` in a worktree, streaming its transcript to disk.
+def build_command(provider: str, prompt: str, model: str = "", effort: str = "") -> List[str]:
+    """The CLI invocation for a runtime. Raises ValueError for one we cannot drive.
 
-    Unlike the planner's question-and-answer calls, these stages need tools: they run
-    GSD skills that read the repo and write `.planning/`.
+    Both need tools and write access: these stages read the repo and create
+    `.planning/`. That rules out the read-only sandbox MC uses for its own
+    question-and-answer calls.
+    """
+    if provider in ("claude", "claude-cli"):
+        cmd = ["claude", "-p", prompt, "--dangerously-skip-permissions",
+               "--output-format", "stream-json", "--verbose"]
+        if model:
+            cmd += ["--model", model]
+        return cmd
 
-    stream-json goes straight to the file as it arrives. Buffered text output is
-    worthless here — the first real run was killed at its timeout having flushed
-    nothing, so the transcript came out empty at exactly the moment it was needed,
-    and a question the planner had already emitted would have gone with it.
+    if provider in ("codex", "codex-cli"):
+        cmd = ["codex", "exec"]
+        if model:
+            cmd += ["--model", model]
+        if effort:
+            cmd += ["-c", f"model_reasoning_effort={effort}"]
+        # Planning writes into the worktree, so the read-only sandbox will not do.
+        cmd += ["--dangerously-bypass-approvals-and-sandbox", prompt]
+        return cmd
+
+    raise ValueError(f"unknown planning provider: {provider!r}")
+
+
+def _run_cli(worktree: str, prompt: str, transcript: Path, timeout: int,
+             model: str = "", provider: str = "claude", effort: str = "") -> Dict:
+    """Run one tool-using planning process in a worktree, streaming to disk.
+
+    Provider-agnostic on purpose. The verdict never reads the transcript to decide
+    whether a plan exists — `find_plan` looks at the filesystem — so a plan written
+    by codex counts exactly as much as one written by claude, and the contract is
+    the artefact rather than the runtime.
+
+    Output goes straight to the file as it arrives. Buffered output is worthless
+    here: the first real run was killed at its timeout having flushed nothing, so
+    the transcript came out empty at exactly the moment it was needed, and a
+    question the planner had already emitted would have gone with it.
 
     Returns `{"output", "returncode", "timed_out", "duration_s", "failed"}`.
     """
-    cmd = ["claude", "-p", prompt, "--dangerously-skip-permissions",
-           "--output-format", "stream-json", "--verbose"]
-    if model:
-        cmd += ["--model", model]
+    try:
+        cmd = build_command(provider, prompt, model, effort)
+    except ValueError as e:
+        return {"output": "", "returncode": None, "timed_out": False,
+                "duration_s": 0, "failed": str(e)}
 
     started = time.time()
     returncode, timed_out = None, False
@@ -341,7 +429,7 @@ def _run_claude(worktree: str, prompt: str, transcript: Path,
                 proc.wait()
     except FileNotFoundError:
         return {"output": "", "returncode": None, "timed_out": False,
-                "duration_s": 0, "failed": "claude CLI not found on PATH"}
+                "duration_s": 0, "failed": f"{cmd[0]} CLI not found on PATH"}
     except OSError as e:
         return {"output": "", "returncode": None, "timed_out": False,
                 "duration_s": 0, "failed": f"could not start planning: {e}"}
@@ -355,7 +443,7 @@ def _run_claude(worktree: str, prompt: str, transcript: Path,
             "duration_s": round(time.time() - started, 1), "failed": None}
 
 
-def run_init_stage(worktree: str, task: Dict, context: str = "",
+def run_init_stage(worktree: str, task: Dict, context: str = "", provider: str = "",
                    timeout: int = INIT_TIMEOUT, model: str = "") -> Dict:
     """Create the GSD project. Verdict is `initialised` or `prerequisite_missing`.
 
@@ -372,7 +460,9 @@ def run_init_stage(worktree: str, task: Dict, context: str = "",
                 "transcript_path": "", "gsd_ran": True, "stage": "init"}
 
     transcript = _transcript_path(task["id"], "init")
-    run = _run_claude(worktree, build_init_prompt(task, context), transcript, timeout, model)
+    provider = provider or _planning_provider()
+    run = _run_cli(worktree, build_init_prompt(task, context, provider), transcript,
+                   timeout, model, provider=provider, effort=_planning_effort())
     ran, detail = gsd_backend.workflow_ran(worktree)
 
     if gsd_backend.project_initialised(worktree):
@@ -391,14 +481,16 @@ def run_init_stage(worktree: str, task: Dict, context: str = "",
             "gsd_ran": ran, "stage": "init"}
 
 
-def run_plan_stage(worktree: str, task: Dict, context: str = "",
+def run_plan_stage(worktree: str, task: Dict, context: str = "", provider: str = "",
                    timeout: int = PLAN_TIMEOUT, model: str = "") -> Dict:
     """Plan in `worktree` as its own process. Assumes the GSD project exists."""
     transcript = _transcript_path(task["id"], "plan")
     # Stamped before the run so only a plan this run wrote can count. One second of
     # slack absorbs filesystem timestamp granularity.
     since = time.time() - 1
-    run = _run_claude(worktree, build_prompt(task, context), transcript, timeout, model)
+    provider = provider or _planning_provider()
+    run = _run_cli(worktree, build_prompt(task, context, provider), transcript,
+                   timeout, model, provider=provider, effort=_planning_effort())
 
     if run["failed"]:
         verdict = {"outcome": "error", "plan_path": None, "questions": [],
@@ -443,7 +535,7 @@ def _configured_model(role: str) -> str:
 
 
 def plan_in_worktree(worktree: str, task: Dict, context: str = "",
-                     model: str = "") -> Dict:
+                     model: str = "", provider: str = "") -> Dict:
     """Get from a bare repo to a plan: initialise if needed, then plan.
 
     Two processes with two budgets rather than one. The init stage is skipped
@@ -457,11 +549,12 @@ def plan_in_worktree(worktree: str, task: Dict, context: str = "",
     # Explicit, so planning's model is a decision rather than a default.
     model = model or _configured_model("planning")
 
-    init = run_init_stage(worktree, task, context, model=model)
+    provider = provider or _planning_provider()
+    init = run_init_stage(worktree, task, context, provider=provider, model=model)
     stages.append(init)
     if init["outcome"] != "initialised":
         return {**init, "stages": stages}
 
-    plan = run_plan_stage(worktree, task, context, model=model)
+    plan = run_plan_stage(worktree, task, context, provider=provider, model=model)
     stages.append(plan)
     return {**plan, "stages": stages}
