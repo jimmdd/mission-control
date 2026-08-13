@@ -3,7 +3,7 @@
 // by the Python planner, so the page reads them through /api/tasks/:id/plan.
 
 import assert from "node:assert/strict";
-import { mkdtempSync, mkdirSync, writeFileSync, rmSync, readFileSync } from "node:fs";
+import { mkdtempSync, mkdirSync, writeFileSync, rmSync, readFileSync, readdirSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { Readable } from "node:stream";
@@ -560,4 +560,40 @@ test("each card carries its own submit, scoped to its own questions", () => {
   assert.equal((page.match(/data-submit=/g) || []).length, 2);
   // Once the planner is the one asking, "Answer these to start" is no longer true.
   assert.match(page, /Already decided/);
+});
+
+test("resetting triage archives the plan, so a kicked-back ticket is not still planned", async () => {
+  await withHandler(async (handler, db, home) => {
+    const task = db.createTask({ title: "brand work" });
+    plantPlan(home, task.id,
+      { steps: [{ step: 1, title: "tokens" }] },
+      { status: "in_progress", steps: { "1": { status: "blocked" }, "2": { status: "pending" } } });
+
+    const res = mockRes();
+    await handler(mockReq({ url: `/api/tasks/${task.id}/reset-triage`, method: "POST", body: {} }), res);
+    assert.equal(res.statusCode, 200);
+
+    // The page must not show a plan from the run that was just discarded.
+    const after = JSON.parse((await call(handler, `/api/tasks/${task.id}/plan`)).body);
+    assert.equal(after.plan, null);
+    // And the daemon must not find a progress file still claiming in_progress with
+    // pending steps — that is enough for it to dispatch agents against a plan for a
+    // ticket sitting in the inbox being re-triaged.
+    assert.equal(after.progress, null);
+
+    // Archived, not destroyed: the reset keeps activity history for the same reason.
+    const archived = readdirSync(join(home, "bridge", "archive", "plans"));
+    assert.equal(archived.length, 1);
+    assert.match(archived[0], new RegExp(`^${task.id}\\.`));
+    assert.match(JSON.parse(readFileSync(join(home, "bridge", "archive", "plans", archived[0]), "utf8")).steps[0].title, /tokens/);
+  });
+});
+
+test("resetting a task that was never planned is not an error", async () => {
+  await withHandler(async (handler, db) => {
+    const task = db.createTask({ title: "never planned" });
+    const res = mockRes();
+    await handler(mockReq({ url: `/api/tasks/${task.id}/reset-triage`, method: "POST", body: {} }), res);
+    assert.equal(res.statusCode, 200);
+  });
 });

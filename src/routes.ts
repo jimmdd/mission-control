@@ -1,4 +1,4 @@
-import { readFileSync, writeFileSync, existsSync, readdirSync, mkdirSync } from "node:fs";
+import { readFileSync, writeFileSync, existsSync, readdirSync, mkdirSync, renameSync } from "node:fs";
 import { join, dirname } from "node:path";
 import { homedir, cpus, totalmem, freemem, loadavg } from "node:os";
 import { fileURLToPath } from "node:url";
@@ -711,6 +711,37 @@ function handleEventStream(req: IncomingMessage, res: ServerResponse, events: Mc
   res.on("close", cleanup);
 }
 
+/**
+ * Move a task's plan and progress out of the live directories.
+ *
+ * A reset used to clear only the triage state, so the plan from the discarded run
+ * stayed on disk: the ticket page still rendered it, and the progress file still
+ * claimed `in_progress` with pending steps, which is enough for the daemon to
+ * dispatch agents against a plan for a ticket that is back in the inbox.
+ *
+ * Archived rather than deleted — the reset already keeps activity history as an
+ * audit trail, and a discarded plan is worth the same.
+ */
+function archivePlanFiles(taskId: string): boolean {
+  if (!/^[A-Za-z0-9_-]+$/.test(taskId)) return false;
+  const stamp = new Date().toISOString().replace(/[:.]/g, "-");
+  let moved = false;
+  for (const kind of ["plans", "progress"]) {
+    try {
+      const live = resolveRuntimePath("bridge", kind, `${taskId}.json`);
+      if (!existsSync(live)) continue;
+      const archiveDir = resolveRuntimePath("bridge", "archive", kind);
+      mkdirSync(archiveDir, { recursive: true });
+      renameSync(live, join(archiveDir, `${taskId}.${stamp}.json`));
+      moved = true;
+    } catch {
+      // Best effort: a reset that cannot archive is still a reset, and leaving the
+      // task un-reset would be worse than leaving a stale file behind.
+    }
+  }
+  return moved;
+}
+
 export function createHandler(
   db: MissionControlDB,
   logger?: McLogger,
@@ -1289,10 +1320,23 @@ async function handleApiRequest(
                 sendJson(res, 404, { error: "Task not found" });
                 return;
               }
+              // The plan and its progress live on disk, and resetting only cleared
+              // the triage state — so a kicked-back ticket still showed the plan
+              // from the run that had just been discarded, and looked planned when
+              // it was not. Worse, the progress file still said `in_progress` with
+              // pending steps, so the daemon could dispatch agents against a plan
+              // for a ticket that was back in the inbox being re-triaged.
+              //
+              // Archived rather than deleted, to match the activity history this
+              // reset already keeps as an audit trail.
+              const archived = archivePlanFiles(taskId);
+
               db.createActivity({
                 task_id: taskId,
                 activity_type: "updated",
-                message: "Triage reset — task returned to inbox for re-triage.",
+                message: archived
+                  ? "Triage reset — task returned to inbox for re-triage. The previous plan and its progress were archived."
+                  : "Triage reset — task returned to inbox for re-triage.",
               });
               events.emit("triage_reset", { taskId });
               sendJson(res, 200, task);
