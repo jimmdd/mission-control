@@ -149,21 +149,56 @@ failures re-probed after 15 minutes so a repaired gate recovers on its own).
 
 ## The design, and what is left of it
 
-`~/Downloads/Mission control ticketing UI.zip` — handoff with a README of specs and
-an HTML reference. Built: **2b, the triage chat**, onto `public/ticket.html`, using
-the dashboard's dark tokens where amber means only "a human is the blocker".
+The design now lives in the Claude Design project
+`4c059ea3-b551-48a7-884f-527e59f466b1`, file `Mission Control UI.dc.html`, read
+through the `DesignSync` MCP (`get_file`). It supersedes
+`~/Downloads/Mission control ticketing UI.zip`, which is the older handoff.
+
+Built, as of 2026-08-14: **2b and 2c, the whole ticket thread**, on
+`public/ticket.html`.
+
+The earlier read — that 2b's 206px rail was cross-ticket navigation belonging on
+the dashboard — was wrong, and dropping it was most of why the page was "closer,
+still not right". Without it the page was a document with a conversation inside
+it; with it, it is the shell the design draws. The rail answers "what else is
+waiting on me" without a trip back to the board.
+
+The shell is a three-track CSS grid, not nested boxes: the rails need to run the
+full height beside a header that belongs only to the middle column, and every
+part has to stay a flat sibling so it can be rendered and tested on its own.
+Under 1080px it collapses back to a document.
+
+**2c is the same thread after triage settles** — no second screen. A rule marks
+where the questions stopped and the plan arrives under it as a message. The plan
+map is no longer a separate view: it was below the fold, which put the
+decomposition on the far side of a scroll from the decisions it was built out
+of. It is behind `open ▸` on the plan card.
+
+Two wordings are deliberate and should not be "fixed":
+
+- The card says **"from D-01 · D-02"**, not "cites". What is true is that those
+  decisions were settled and handed to the planner. Whether the plan text cites
+  them is a claim about a document nobody on this page has read.
+- Every state in it is **counted off `progress`**, never read off `task.status`.
+  "in_progress" on the ticket and a step actually running are different claims.
+
+Rail sections render only when they have content — an empty `DELIVERABLES`
+heading asserts the run produced nothing, which is not the same as "nothing is
+recorded". `RECALLED` is `GET /api/knowledge/recall`, which shells out to Python
+and is allowed to fail silently. `CONTEXT USED` from the design is **not built**:
+no endpoint records which files triage read, and inventing the list was the one
+thing worse than omitting the section.
 
 Not built, and each lives somewhere different:
 
 - **3a–3d intake** (describe → draft → scope → questions → confirm) is a new
-  pre-ticket surface, 620px chat frames.
-- **1a attention inbox / Needs you** is the general view — `public/index.html` and
-  `app.js`, not the ticket page.
-- **4a Running / Review** is the ticket page, replacing the plan-map area.
-- The 206px thread rail from 2b is cross-ticket navigation; it belongs on the
-  dashboard.
-
-The user's verdict on the current chat: closer, still not right.
+  pre-ticket surface, 620px chat frames. 3d, the confirm card, is still
+  next-step 2 below.
+- **1a attention inbox / Needs you** is the general view — `public/index.html`
+  and `app.js`, not the ticket page.
+- 2c's mid-run controls — `Pause after this step`, `Attach tmux`, `/pause`,
+  `/replan` — have no endpoints behind them. The composer shows only what works:
+  "Change a decision", which reopens one.
 
 ## Session of 2026-08-13/14
 
@@ -253,6 +288,25 @@ Every one of these was found by the user opening the page, not by the suite:
 There is now a test that drives `load()` against a stubbed DOM — the gap that let
 the dead page through. **The UI is still not covered by anything that exercises real
 interaction** (focus, timers, typing); that is where the next one hides.
+
+### Bugs found by looking, again (session of 2026-08-14)
+
+Rebuilding the page as 2b/2c surfaced four more, none of which any test could have
+caught, because each is a thing that is only wrong once you see it:
+
+| | |
+|---|---|
+| The brief printed its attachment URLs raw | MET-635's are 140 characters each — four lines of signed S3 query string above the conversation the page exists for |
+| Tracker legs ahead of the current one were dated | `LEG_MARKERS` is loose on purpose (`/review/i` matches plenty of messages), so Review claimed a date on a ticket still in Triage |
+| The composer said "planning starts when the questions are settled" | on a thread where all six were settled — the page disagreeing with itself |
+| A collapsed decision's outcome ran off the column | sliced mid-word by the edge, with no ellipsis to say so |
+
+To see the page without the Chrome extension:
+`"/Applications/Google Chrome.app/Contents/MacOS/Google Chrome" --headless
+--screenshot=t.png --window-size=1440,1000 --virtual-time-budget=5000
+--user-data-dir=<scratch> "http://127.0.0.1:18900/ticket?id=<id>"`. It is slow to
+start (~20s) but it renders the real page against the real server, which is the
+only thing that found any of the above.
 
 ### Also fixed
 
