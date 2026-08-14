@@ -453,8 +453,8 @@ test("everything the agent asked and everything said back is one stream", () => 
   assert.match(out, /Adobe forbids self-hosting/, "why it is asked travels with the question");
   assert.match(out, /what changes between them/, "your message is in the same stream");
   assert.match(out, /CORP header/, "and so is the reply");
-  assert.match(out, /chosen for you/, "so is a decision the agent made");
-  assert.match(out, /Set aside/, "and one you set aside");
+  assert.match(out, /Recorded as D-03/, "so is a decision the agent made");
+  assert.match(out, /set aside — not blocking planning/, "and one you set aside");
   // One composer for the whole conversation, not one box per question.
   assert.equal((out.match(/class="composer/g) || []).length, 1);
   assert.equal((out.match(/id="say"/g) || []).length, 1);

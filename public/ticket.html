@@ -6,49 +6,38 @@
   <title>Ticket · Mission Control</title>
   <link rel="icon" type="image/svg+xml" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='6' fill='%231A1F29'/%3E%3Cpath d='M8 20h16M8 20l4-8 4 5 3-4 5 7' stroke='%232563EB' stroke-width='1.8' fill='none' stroke-linejoin='round'/%3E%3C/svg%3E">
   <style>
+  /* The dashboard's tokens, verbatim. Colour carries one meaning here: amber means
+     a human is the blocker and nothing else may use it, green is live/settled,
+     cyan is the current actionable thing, red is dead/denied. */
   :root {
-    --ground:   #F7F8FA;
-    --card:     #FFFFFF;
-    --sunk:     #F2F4F7;
-    --line:     #E5E8EE;
-    --line-soft:#EFF1F5;
-    --ink:      #1A1F29;
-    --ink-2:    #5B6673;
-    --ink-3:    #8B95A3;
-    --accent:   #2563EB;
-    --accent-bg:#EFF4FE;
-    --accent-line:#C7D9FC;
-    --amber:    #B45309;
-    --amber-bg: #FEF6EC;
-    --amber-line:#F5DFC0;
-    --green:    #16794C;
-    --green-bg: #EDF7F1;
-    --cyan:     #0E7490;
-    --cyan-bg:  #ECF7FA;
-    --red:      #B42318;
-    --red-bg:   #FEF0EE;
-    --shadow:   0 1px 2px rgba(26,31,41,.04), 0 1px 3px rgba(26,31,41,.03);
-    --shadow-lift: 0 2px 4px rgba(26,31,41,.05), 0 8px 20px -12px rgba(26,31,41,.18);
-    --ui: "Avenir Next", "Segoe UI", system-ui, -apple-system, sans-serif;
+    --bg-main:   #0a0a0f;
+    --bg-card:   #12121a;
+    --bg-drawer: #161622;
+    --line:      #1a1a2e;
+    --line-soft: rgba(255,255,255,.05);
+    --ink:       #e0e0e0;
+    --ink-2:     rgba(224,224,224,.86);
+    --ink-3:     rgba(224,224,224,.44);
+    --ink-4:     rgba(224,224,224,.34);
+    --accent:    #00d4ff;
+    --accent-bg: rgba(0,212,255,.06);
+    --accent-line: rgba(0,212,255,.16);
+    --amber:     #f59e0b;
+    --amber-bg:  rgba(245,158,11,.05);
+    --amber-line:rgba(245,158,11,.28);
+    --green:     #00ff88;
+    --green-bg:  rgba(0,255,136,.13);
+    --cyan:      #00d4ff;
+    --cyan-bg:   rgba(0,212,255,.08);
+    --red:       #ef4444;
+    --red-bg:    rgba(239,68,68,.1);
+    --indigo:    #818cf8;
+    --card:      #12121a;
+    --sunk:      rgba(255,255,255,.035);
+    --ground:    #0a0a0f;
+    --shadow:    none;
+    --ui: "Inter", -apple-system, BlinkMacSystemFont, "Segoe UI", system-ui, sans-serif;
     --mono: ui-monospace, "SF Mono", "JetBrains Mono", Menlo, monospace;
-  }
-  @media (prefers-color-scheme: dark) {
-    :root:not([data-theme="light"]) {
-      --ground:#1B2029; --card:#232935; --sunk:#1F2530; --line:#333B49; --line-soft:#2B323E;
-      --ink:#EDF0F5; --ink-2:#A9B4C2; --ink-3:#7C8798;
-      --accent:#7BA5FA; --accent-bg:#293448; --accent-line:#3D4F6E;
-      --amber:#F0B45E; --amber-bg:#3A3226; --amber-line:#5C4B32;
-      --green:#5FCB94; --green-bg:#26362F; --cyan:#4FC7DD; --cyan-bg:#22363C;
-      --red:#F0918A; --red-bg:#3A2725;
-    }
-  }
-  :root[data-theme="dark"] {
-    --ground:#1B2029; --card:#232935; --sunk:#1F2530; --line:#333B49; --line-soft:#2B323E;
-    --ink:#EDF0F5; --ink-2:#A9B4C2; --ink-3:#7C8798;
-    --accent:#7BA5FA; --accent-bg:#293448; --accent-line:#3D4F6E;
-    --amber:#F0B45E; --amber-bg:#3A3226; --amber-line:#5C4B32;
-    --green:#5FCB94; --green-bg:#26362F; --cyan:#4FC7DD; --cyan-bg:#22363C;
-    --red:#F0918A; --red-bg:#3A2725;
   }
 
   * { box-sizing: border-box; }
@@ -181,70 +170,111 @@
   .maplegend i.s { background: var(--green); opacity: .6; }
 
 
-  /* ─────────── conversation ─────────── */
-  /* One surface for everything the agent asks and everything you say back. The
-     panel beside it is the durable record — a transcript is worst at "what is
-     settled and what is blocking", which is the thing this page exists to answer. */
-  .convo { display: grid; grid-template-columns: 1.6fr 1fr; gap: 18px; align-items: start; margin-top: 20px; }
-  @media (max-width: 980px) { .convo { grid-template-columns: 1fr; } }
-  .chat { background: var(--card); border: 1px solid var(--line); border-radius: 14px; padding: 18px 20px; box-shadow: var(--shadow); }
-  .stream { max-height: 58vh; overflow-y: auto; display: flex; flex-direction: column; gap: 14px; padding-right: 4px; }
-  .cmsg { display: grid; grid-template-columns: auto 1fr; gap: 10px; align-items: start; }
-  .cmsg .qwho {
-    font-family: var(--mono); font-size: 9.5px; letter-spacing: .06em; text-transform: uppercase;
-    color: var(--ink-3); background: var(--sunk); border: 1px solid var(--line);
-    padding: 3px 7px; border-radius: 5px; white-space: nowrap; margin-top: 2px;
-  }
-  .cmsg.me .qwho { background: var(--accent-bg); border-color: transparent; color: var(--accent); }
-  .cbody { font-size: 13.5px; color: var(--ink-2); line-height: 1.55; white-space: pre-wrap; }
-  .cq { font-size: 14.5px; font-weight: 600; color: var(--ink); letter-spacing: -.012em; white-space: normal; }
-  .cwhy { font-size: 12.5px; color: var(--ink-3); margin-top: 4px; white-space: normal; }
-  .cdec { font-family: var(--mono); font-size: 10px; font-weight: 700; letter-spacing: .06em;
-          background: var(--sunk); color: var(--ink-3); border: 1px solid var(--line);
-          padding: 2px 6px; border-radius: 5px; margin-left: 6px; }
-  .cmsg.decided .cbody b { color: var(--green); }
-  .cmsg.note .cbody { color: var(--ink-3); }
-  .bychip { font-family: var(--mono); font-size: 10px; font-weight: 700; text-transform: uppercase;
-            color: var(--amber); background: var(--amber-bg); padding: 2px 7px; border-radius: 5px; margin-left: 6px; }
+  /* ─────────── conversation (design 2b) ─────────── */
+  /* Chat column and decision rail. The thread rail from the design is cross-ticket
+     navigation and belongs on the dashboard, not on one ticket's page. */
+  .convo { display: grid; grid-template-columns: 1fr 224px; gap: 26px; align-items: start; margin-top: 22px; }
+  @media (max-width: 900px) { .convo { grid-template-columns: 1fr; } }
 
-  .composer { margin-top: 16px; padding-top: 14px; border-top: 1px solid var(--line-soft); }
-  .cactive { font-size: 12.5px; color: var(--ink-3); margin-bottom: 10px; }
-  .cactive b { font-family: var(--mono); color: var(--accent); }
-  .cactive .cleft { float: right; font-family: var(--mono); font-size: 11px; color: var(--amber); }
-  .copts { display: flex; flex-wrap: wrap; gap: 8px; margin-bottom: 10px; }
-  .copt {
-    font-family: inherit; font-size: 13px; font-weight: 500; padding: 8px 14px; border-radius: 9px;
-    border: 1.5px solid var(--line); background: var(--card); color: var(--ink); cursor: pointer;
+  .chat { min-width: 0; }
+  .chead {
+    display: flex; align-items: center; gap: 10px; padding-bottom: 16px;
+    border-bottom: 1px solid var(--line-soft); font-size: 12px; color: var(--ink-3);
   }
-  .copt:hover { border-color: var(--accent); background: var(--accent-bg); color: var(--accent); }
-  .crow { display: flex; gap: 8px; }
+  .chead .live { display: inline-flex; align-items: center; gap: 6px; font-family: var(--mono); font-size: 11px; color: var(--green); }
+  .chead .live i { width: 6px; height: 6px; border-radius: 50%; background: var(--green); animation: mcpulse 2s ease-in-out infinite; }
+  @keyframes mcpulse { 0%,100% { opacity: 1; } 50% { opacity: .35; } }
+  .chead .settled { margin-left: auto; font-size: 11.5px; color: var(--ink-3); }
+
+  .stream { max-width: 668px; margin: 0 auto; padding: 26px 0; display: flex; flex-direction: column; gap: 26px; max-height: 60vh; overflow-y: auto; }
+  .cmsg { display: grid; grid-template-columns: 24px 1fr; gap: 13px; align-items: start; }
+  .cav {
+    width: 24px; height: 24px; border-radius: 50%; display: grid; place-items: center;
+    font-family: var(--mono); font-size: 9.5px; background: var(--green-bg); color: var(--green);
+  }
+  .cav.you { background: rgba(255,255,255,.07); color: var(--ink-3); }
+  .cbody { font-size: 13.5px; line-height: 1.7; color: var(--ink-2); white-space: pre-wrap; }
+  .cq { font-size: 13.5px; line-height: 1.7; color: var(--ink); white-space: pre-wrap; }
+
+  /* A finding is amber because a human is the blocker — the one meaning amber has. */
+  .cfind {
+    border-left: 2px solid var(--amber); background: var(--amber-bg);
+    border-radius: 0 7px 7px 0; padding: 12px 15px; margin-top: 12px;
+  }
+  .cfind .ft { font-size: 12.5px; font-weight: 600; color: var(--ink); }
+  .cfind .fb { font-size: 12px; line-height: 1.6; color: var(--ink-2); margin-top: 3px; white-space: normal; }
+
+  .cpills { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 14px; }
+  .cpill {
+    font-family: inherit; font-size: 12.5px; padding: 9px 14px; border-radius: 16px;
+    border: 1px solid rgba(255,255,255,.12); background: transparent; color: var(--ink-2); cursor: pointer;
+  }
+  .cpill:hover { border-color: rgba(255,255,255,.28); color: var(--ink); }
+  .cpill.rec { border-color: rgba(0,212,255,.3); color: var(--cyan); }
+  .cpill.esc { color: var(--ink-3); }
+
+  /* Your turn reads as yours: right-aligned, one corner squared off. */
+  .cmsg.me { grid-template-columns: 1fr; }
+  .cmsg.me .cbody {
+    justify-self: end; max-width: 440px; background: rgba(255,255,255,.07);
+    border-radius: 14px 14px 3px 14px; padding: 13px 16px; color: var(--ink);
+  }
+
+  .creceipt { font-size: 10.5px; color: var(--green); font-family: var(--mono); }
+  .ctool {
+    display: flex; gap: 10px; align-items: center; font-family: var(--mono); font-size: 11px;
+    border: 1px solid var(--line); border-radius: 6px; padding: 8px 11px; color: var(--ink-3);
+  }
+  .ctool .ok { color: var(--green); margin-left: auto; }
+  .cwait {
+    display: flex; align-items: center; gap: 9px; border: 1px dashed rgba(255,255,255,.14);
+    border-radius: 7px; padding: 10px 13px; font-size: 12px; color: var(--ink-3); margin-top: 12px;
+  }
+  .cwait i { width: 6px; height: 6px; border-radius: 50%; background: var(--cyan); animation: mcpulse 1.4s ease-in-out infinite; }
+
+  /* ─── composer ─── */
+  .composer { max-width: 668px; margin: 0 auto; padding-top: 16px; border-top: 1px solid var(--line-soft); }
+  .cactive { font-size: 11.5px; color: var(--ink-4); margin-bottom: 10px; }
+  .cactive b { font-family: var(--mono); color: var(--cyan); font-weight: 500; }
+  .crow { display: flex; gap: 9px; align-items: center; }
   .crow input {
-    flex: 1; min-width: 0; font-family: inherit; font-size: 14px; color: var(--ink);
-    background: var(--sunk); border: 1px solid var(--line); border-radius: 9px; padding: 11px 13px;
+    flex: 1; min-width: 0; font-family: inherit; font-size: 13.5px; color: var(--ink);
+    background: transparent; border: 1px solid rgba(255,255,255,.12); border-radius: 12px; padding: 12px 15px;
   }
-  .crow input:focus { outline: none; border-color: var(--accent); }
-  .cexits { display: flex; align-items: center; gap: 8px; margin-top: 10px; font-size: 12.5px; color: var(--ink-3); }
-  .cnote { font-size: 13px; color: var(--ink-3); margin-bottom: 10px; }
+  .crow input::placeholder { color: var(--ink-4); }
+  .crow input:focus { outline: none; border-color: rgba(0,212,255,.4); }
+  .csend {
+    width: 30px; height: 30px; border-radius: 8px; border: none; background: var(--cyan);
+    color: #04121a; font-size: 15px; cursor: pointer; flex: none;
+  }
+  .csend:hover { filter: brightness(1.12); }
+  .cbtn {
+    font-family: inherit; font-size: 12px; padding: 9px 13px; border-radius: 8px;
+    border: 1px solid rgba(255,255,255,.14); background: transparent; color: var(--ink-2); cursor: pointer;
+  }
+  .cbtn:hover { border-color: var(--cyan); color: var(--cyan); }
+  .cfoot { margin-top: 10px; font-size: 11.5px; color: var(--ink-4); }
+  .cexits { display: flex; align-items: center; gap: 8px; margin-top: 11px; font-size: 11.5px; color: var(--ink-4); }
 
-  .decisions { background: var(--card); border: 1px solid var(--line); border-radius: 14px; padding: 18px 18px 14px; box-shadow: var(--shadow); }
+  /* ─── decision rail ─── */
+  .decisions { position: sticky; top: 20px; }
+  .drail-h { font-family: var(--mono); font-size: 10.5px; letter-spacing: .1em; text-transform: uppercase; color: var(--ink-4); margin-bottom: 14px; }
   .drow2 {
-    display: grid; grid-template-columns: auto 1fr; gap: 3px 9px; width: 100%; text-align: left;
-    font-family: inherit; background: none; border: none; border-top: 1px solid var(--line-soft);
-    padding: 10px 6px; cursor: pointer; border-radius: 8px; color: inherit;
+    display: block; width: 100%; text-align: left; font-family: inherit; cursor: pointer;
+    background: none; border: none; border-left: 2px solid rgba(255,255,255,.12);
+    padding: 2px 0 2px 11px; margin-bottom: 15px; color: inherit;
   }
-  .drow2:first-of-type { border-top: none; }
-  .drow2:hover { background: var(--sunk); }
-  .drow2.on { background: var(--accent-bg); }
-  .drow2 .dtag { font-family: var(--mono); font-size: 10.5px; font-weight: 700; color: var(--ink-3); }
-  .drow2 .dq2 { font-size: 13px; color: var(--ink); line-height: 1.4; }
-  .drow2 .dv { grid-column: 2; font-size: 12px; color: var(--ink-3); }
+  .drow2.set { border-left-color: var(--green); }
+  .drow2.on  { border-left-color: var(--cyan); }
+  .drow2.agent { border-left-color: var(--amber); }
+  .drow2 .dtag { font-family: var(--mono); font-size: 10.5px; color: var(--ink-3); display: block; }
   .drow2.set .dtag { color: var(--green); }
-  .drow2.set .dv { color: var(--green); }
-  .drow2.agent .dtag, .drow2.agent .dv { color: var(--amber); }
-  .drow2.open .dtag { color: var(--accent); }
-  .drow2.aside .dq2, .drow2.aside .dv { color: var(--ink-3); }
-  .dsum { margin-top: 12px; padding-top: 11px; border-top: 1px solid var(--line-soft); font-size: 12.5px; color: var(--ink-3); }
-  .dsum b { color: var(--amber); }
+  .drow2.on .dtag { color: var(--cyan); }
+  .drow2.agent .dtag { color: var(--amber); }
+  .drow2 .dq2 { font-size: 11.5px; line-height: 1.4; color: var(--ink-2); display: block; margin-top: 3px; }
+  .drow2 .dv { font-size: 11px; color: var(--ink-4); display: block; margin-top: 2px; }
+  .dsum { margin-top: 18px; padding-top: 14px; border-top: 1px solid var(--line-soft); font-size: 11px; line-height: 1.6; color: var(--ink-4); }
+  .dsum b { color: var(--amber); font-weight: 500; }
 
   /* ─────────── questions ─────────── */
   .qbox { border-bottom: 1px solid var(--line-soft); padding: 16px 0; }
@@ -734,33 +764,59 @@ function chatTimeline(questions) {
   return events.sort((a, b) => (a.at || "").localeCompare(b.at || "") || a.seq.localeCompare(b.seq));
 }
 
-const WHO = { planner: "planner", triage: "triage", research: "research", you: "you", agent: "agent" };
-
+/**
+ * One message in the stream, per design 2b.
+ *
+ * Agent turns get an avatar and run full width; yours is a right-aligned bubble
+ * with one corner squared off, so whose turn it was is legible without reading.
+ * A decision is a receipt line rather than a message, because it records something
+ * settled rather than somebody speaking.
+ */
 function renderChatEvent(ev) {
-  const who = `<span class="qwho">${esc(WHO[ev.role] || ev.role)}</span>`;
-  const tag = ev.q.becomes ? `<span class="cdec">${esc(ev.q.becomes)}</span>` : "";
+  const initials = { planner: "PL", triage: "TR", research: "RS", agent: "AG" }[ev.role] || "AG";
+  const tag = ev.q.becomes ? esc(ev.q.becomes) : "";
 
   if (ev.kind === "asked") {
-    const why = ev.q.why ? `<div class="cwhy">${esc(ev.q.why)}</div>` : "";
-    return `<div class="cmsg" data-for="${esc(ev.q.id)}">${who}
-      <div class="cbody"><div class="cq">${esc(ev.q.question)}</div>${why}${tag}</div></div>`;
+    // Why it is asked renders as a finding — amber, which in this design means one
+    // thing only: a human is the blocker.
+    const why = ev.q.why
+      ? `<div class="cfind"><div class="ft">Why this is being asked</div><div class="fb">${esc(ev.q.why)}</div></div>`
+      : "";
+    // Suggested replies as pills, the first recommended. There is always an escape
+    // pill, because no question may be a dead end.
+    const pills = (ev.q.options || []).map((o, i) =>
+      `<button class="cpill${i === 0 ? " rec" : ""}" data-answer="${esc(o)}" data-q="${esc(ev.q.id)}">${esc(o)}</button>`).join("");
+    const escapePill = `<button class="cpill esc" data-act="delegate" data-q="${esc(ev.q.id)}">You decide</button>`;
+    const owed = (ev.q.thread || []).length && ev.q.thread[ev.q.thread.length - 1].role === "you";
+    const waiting = owed ? `<div class="cwait"><i></i>Working out an answer — read-only check</div>` : "";
+    return `<div class="cmsg" data-for="${esc(ev.q.id)}">
+      <span class="cav">${initials}</span>
+      <div><div class="cq">${esc(ev.q.question)}</div>${why}
+      <div class="cpills">${pills}${escapePill}</div>${waiting}</div></div>`;
   }
+
   if (ev.kind === "said") {
-    return `<div class="cmsg${ev.role === "you" ? " me" : ""}" data-for="${esc(ev.q.id)}">${who}
-      <div class="cbody">${esc(ev.text)}</div></div>`;
+    if (ev.role === "you") {
+      return `<div class="cmsg me" data-for="${esc(ev.q.id)}"><div class="cbody">${esc(ev.text)}</div></div>`;
+    }
+    return `<div class="cmsg" data-for="${esc(ev.q.id)}">
+      <span class="cav">RS</span><div class="cbody">${esc(ev.text)}</div></div>`;
   }
+
   if (ev.kind === "deferred") {
-    return `<div class="cmsg note" data-for="${esc(ev.q.id)}">${who}
-      <div class="cbody">Set aside — not blocking anything. ${tag}
-      <button class="qout" data-act="undefer" data-q="${esc(ev.q.id)}">Bring it back</button></div></div>`;
+    return `<div class="cmsg" data-for="${esc(ev.q.id)}"><span class="cav you">—</span>
+      <div class="cbody"><span class="creceipt">◦ ${tag} set aside — not blocking planning</span>
+      <button class="cbtn" data-act="undefer" data-q="${esc(ev.q.id)}" style="margin-left:10px">Bring it back</button></div></div>`;
   }
-  const reason = ev.q.reason ? `<div class="cwhy"><b>Why:</b> ${esc(ev.q.reason)}</div>` : "";
-  const undo = ev.role === "agent"
-    ? `<button class="qout" data-act="reopen" data-q="${esc(ev.q.id)}">Change it</button>` : "";
-  return `<div class="cmsg${ev.role === "you" ? " me" : ""} decided" data-for="${esc(ev.q.id)}">${who}
-    <div class="cbody"><b>${esc(ev.q.answer)}</b> ${tag}
-    ${ev.role === "agent" ? '<span class="bychip">chosen for you</span>' : ""}
-    ${reason}${undo}</div></div>`;
+
+  const byAgent = ev.role === "agent";
+  const reason = ev.q.reason ? `<div class="fb" style="margin-top:6px">${esc(ev.q.reason)}</div>` : "";
+  const undo = byAgent
+    ? `<button class="cbtn" data-act="reopen" data-q="${esc(ev.q.id)}" style="margin-left:10px">Change it</button>` : "";
+  return `<div class="cmsg" data-for="${esc(ev.q.id)}"><span class="cav${byAgent ? "" : " you"}">${byAgent ? "AG" : "YOU"}</span>
+    <div><div class="creceipt">✓ Recorded as ${tag} — the plan has to cite it</div>
+    <div class="cbody" style="margin-top:4px">${esc(ev.q.answer)}${byAgent ? " · chosen for you" : ""}${undo}</div>
+    ${reason}</div></div>`;
 }
 
 /** The question the composer is currently pointed at. */
@@ -780,61 +836,66 @@ function blockingQuestions(questions) {
 
 function renderComposer(active, openCount) {
   if (!active) {
-    return `<div class="composer done">
-      <div class="cnote">Nothing is waiting on you. Anything you send here goes to the agent as context.</div>
-      <div class="crow"><input type="text" id="say" placeholder="Say something to the agent…">
-        <button class="btn primary" data-send="free">Send</button></div>
+    return `<div class="composer">
+      <div class="cactive">Nothing is waiting on you.</div>
+      <div class="crow"><input type="text" id="say" placeholder="Say something to the agent…" disabled>
+        <button class="csend" data-send="ask" disabled>↑</button></div>
+      <div class="cfoot">Planning can proceed.</div>
     </div>`;
   }
-  const opts = (active.options || []).map(o =>
-    `<button class="copt" data-answer="${esc(o)}" data-q="${esc(active.id)}">${esc(o)}</button>`).join("");
+  const left = openCount - 1;
   return `<div class="composer" data-active="${esc(active.id)}">
-    <div class="cactive">Answering <b>${esc(active.becomes || "")}</b> · ${esc(active.question)}
-      <span class="cleft">${openCount} still blocking</span></div>
-    ${opts ? `<div class="copts">${opts}</div>` : ""}
+    <div class="cactive">Answering <b>${esc(active.becomes || "")}</b> · ${esc(active.question)}</div>
     <div class="crow">
       <input type="text" id="say" placeholder="Answer in your own words, or ask about it…">
-      <button class="btn" data-send="ask" title="Send as a message — the agent replies">Ask</button>
-      <button class="btn primary" data-send="answer" title="Record this as the decision">Answer</button>
+      <button class="cbtn" data-send="answer">Answer</button>
+      <button class="csend" data-send="ask" title="Send as a message">↑</button>
     </div>
     <div class="cexits"><span>Not sure?</span>
-      <button class="qout" data-act="delegate" data-q="${esc(active.id)}">Decide for me</button>
-      <button class="qout" data-act="defer" data-q="${esc(active.id)}">Decide later</button>
+      <button class="cbtn" data-act="delegate" data-q="${esc(active.id)}">Decide for me</button>
+      <button class="cbtn" data-act="defer" data-q="${esc(active.id)}">Decide later</button>
     </div>
+    <div class="cfoot">planning starts when the last question is settled${left > 0 ? ` · ${left} left after this` : ""}</div>
   </div>`;
 }
 
+/**
+ * The decision rail: what is settled, what is still open, without scrolling.
+ * The one thing a transcript is worst at, and the thing this page exists to answer.
+ */
 function renderDecisions(questions, activeId) {
   const rows = (questions || []).map(q => {
     let state = "open", label = "open";
-    if (q.answer) { state = q.answered_by === "agent" ? "agent" : "set"; label = q.answer; }
-    else if (q.deferred) { state = "aside"; label = "set aside"; }
+    if (q.answer) { state = "set"; label = "settled"; }
+    else if (q.deferred) { label = "set aside"; }
     else if (q.delegate_requested) { state = "agent"; label = "agent deciding"; }
-    return `<button class="drow2 ${state}${q.id === activeId ? " on" : ""}" data-focus="${esc(q.id)}">
-      <span class="dtag">${esc(q.becomes || "—")}</span>
+    else if (q.id === activeId) { state = "on"; label = "discussing"; }
+    return `<button class="drow2 ${state}" data-focus="${esc(q.id)}">
+      <span class="dtag">${esc(q.becomes || "—")} · ${esc(label)}</span>
       <span class="dq2">${esc(q.question)}</span>
-      <span class="dv">${esc(String(label).slice(0, 40))}</span>
+      ${q.answer ? `<span class="dv">${esc(String(q.answer).slice(0, 48))}${q.answered_by === "agent" ? " · agent" : ""}</span>` : ""}
     </button>`;
   }).join("");
   const settled = (questions || []).filter(q => q.answer).length;
   const blocking = blockingQuestions(questions).length;
   return `<aside class="decisions">
-    <div class="glab">Decisions <span class="gn">${settled}/${(questions || []).length}</span></div>
+    <div class="drail-h">Decisions ${settled}/${(questions || []).length}</div>
     ${rows || `<p class="empty">No questions yet.</p>`}
-    <div class="dsum">${blocking
-      ? `<b>${blocking}</b> blocking planning`
-      : `Nothing blocking — planning can proceed.`}</div>
+    <div class="dsum">${blocking ? `<b>${blocking}</b> blocking planning<br>` : ""}
+      Everything settled here lands in <code>.planning/</code> as the phase brief.</div>
   </aside>`;
 }
 
 function renderConversation(triage, activeId) {
   const qs = triage?.questions || [];
   const active = activeQuestion(qs, activeId);
+  const settled = qs.filter(q => q.answer).length;
   const stream = chatTimeline(qs).map(renderChatEvent).join("")
     || `<p class="empty">Triage hasn't asked anything yet.</p>`;
   return `<div class="convo">
     <div class="chat">
-      <div class="glab">Planning <span class="gn">${blockingQuestions(qs).length} open</span></div>
+      <div class="chead"><span class="live"><i></i>discuss</span>
+        <span class="settled">${settled} of ${qs.length} settled</span></div>
       <div class="stream" id="stream">${stream}</div>
       ${renderComposer(active, blockingQuestions(qs).length)}
     </div>
@@ -844,8 +905,8 @@ function renderConversation(triage, activeId) {
 
 /**
  * One place a question action is posted, so the exits and the composer cannot drift
- * apart. `onOk` runs only after the response is checked, which is what keeps a
- * failed request from clearing what you typed.
+ * apart. `onOk` runs only after the response is checked, which keeps a failed
+ * request from clearing what you typed.
  */
 async function postQuestionAction(qid, action, payload = {}, onOk = null) {
   try {
@@ -858,7 +919,7 @@ async function postQuestionAction(qid, action, payload = {}, onOk = null) {
     load({ force: true });
     return true;
   } catch (e) {
-    const note = document.querySelector(".cactive") || document.querySelector(".cnote");
+    const note = document.querySelector(".cactive") || document.querySelector(".cfoot");
     if (note) note.textContent = String(e.message || e);
     return false;
   }
