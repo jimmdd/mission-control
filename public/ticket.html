@@ -193,6 +193,10 @@
     font-family: var(--mono); font-size: 9.5px; background: var(--green-bg); color: var(--green);
   }
   .cav.you { background: rgba(255,255,255,.07); color: var(--ink-3); }
+  .crole {
+    display: block; font-family: var(--mono); font-size: 9.5px; letter-spacing: .09em;
+    text-transform: uppercase; color: var(--ink-4); margin-bottom: 5px;
+  }
   .cbody { font-size: 13.5px; line-height: 1.7; color: var(--ink-2); white-space: pre-wrap; }
   .cq { font-size: 13.5px; line-height: 1.7; color: var(--ink); white-space: pre-wrap; }
 
@@ -773,7 +777,11 @@ function chatTimeline(questions) {
  * settled rather than somebody speaking.
  */
 function renderChatEvent(ev) {
-  const initials = { planner: "PL", triage: "TR", research: "RS", agent: "AG" }[ev.role] || "AG";
+  // One avatar for the agent, and the role spelled out beside it where it means
+  // something. The split between triage, research and planner is our plumbing;
+  // from the reader's side it is all the agent, and "TR"/"RS" were abbreviations
+  // that needed a decoder ring.
+  const role = { planner: "planner", triage: "triage", research: "research" }[ev.role] || "agent";
   const tag = ev.q.becomes ? esc(ev.q.becomes) : "";
 
   if (ev.kind === "asked") {
@@ -790,8 +798,8 @@ function renderChatEvent(ev) {
     const owed = (ev.q.thread || []).length && ev.q.thread[ev.q.thread.length - 1].role === "you";
     const waiting = owed ? `<div class="cwait"><i></i>Working out an answer — read-only check</div>` : "";
     return `<div class="cmsg" data-for="${esc(ev.q.id)}">
-      <span class="cav">${initials}</span>
-      <div><div class="cq">${esc(ev.q.question)}</div>${why}
+      <span class="cav">◆</span>
+      <div><span class="crole">${esc(role)}</span><div class="cq">${esc(ev.q.question)}</div>${why}
       <div class="cpills">${pills}${escapePill}</div>${waiting}</div></div>`;
   }
 
@@ -800,7 +808,8 @@ function renderChatEvent(ev) {
       return `<div class="cmsg me" data-for="${esc(ev.q.id)}"><div class="cbody">${esc(ev.text)}</div></div>`;
     }
     return `<div class="cmsg" data-for="${esc(ev.q.id)}">
-      <span class="cav">RS</span><div class="cbody">${esc(ev.text)}</div></div>`;
+      <span class="cav">◆</span>
+      <div><span class="crole">${esc(role)}</span><div class="cbody">${esc(ev.text)}</div></div></div>`;
   }
 
   if (ev.kind === "deferred") {
@@ -813,7 +822,7 @@ function renderChatEvent(ev) {
   const reason = ev.q.reason ? `<div class="fb" style="margin-top:6px">${esc(ev.q.reason)}</div>` : "";
   const undo = byAgent
     ? `<button class="cbtn" data-act="reopen" data-q="${esc(ev.q.id)}" style="margin-left:10px">Change it</button>` : "";
-  return `<div class="cmsg" data-for="${esc(ev.q.id)}"><span class="cav${byAgent ? "" : " you"}">${byAgent ? "AG" : "YOU"}</span>
+  return `<div class="cmsg" data-for="${esc(ev.q.id)}"><span class="cav${byAgent ? "" : " you"}">${byAgent ? "◆" : "✓"}</span>
     <div><div class="creceipt">✓ Recorded as ${tag} — the plan has to cite it</div>
     <div class="cbody" style="margin-top:4px">${esc(ev.q.answer)}${byAgent ? " · chosen for you" : ""}${undo}</div>
     ${reason}</div></div>`;
