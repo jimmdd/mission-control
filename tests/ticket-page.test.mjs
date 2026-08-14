@@ -548,8 +548,11 @@ test("the stream asks one question, not all of them at once", () => {
   // The composer says what the answer binds and what is left, not the question again.
   assert.match(out, /Your answer becomes <b>D-02<\/b>/);
   assert.match(out, /2 more after this/);
-  assert.equal((out.match(/Variable or static\?/g) || []).length, 2,
-    "once in the stream, once in the decision rail — never twice in the chat column");
+  // Exactly one askable question: only the live one carries pills. Settled ones
+  // still hold their own question text inside their collapsed group, which is the
+  // record, not a second thing to answer.
+  assert.equal((out.match(/class="cpills"/g) || []).length, 1);
+  assert.match(out, /title="Variable or static\?"/, "the rail keeps the full text on hover");
 });
 
 test("the last question says so", () => {
@@ -621,4 +624,46 @@ test("a suggestion from research is labelled as a suggestion", () => {
     options: ["separate repo", "same repo"], recommended: "separate repo" }] }, null);
   assert.match(out, /research suggests <b>separate repo<\/b> — still your call/);
   assert.match(out, /class="cpill rec" data-answer="separate repo"/);
+});
+
+test("the rail names what is being decided, not the whole question", () => {
+  // MET-635's questions run to 511 characters. Truncating one lands mid-parenthesis,
+  // so triage writes a short summary and the fallback keeps the opening words
+  // rather than pretending to summarise.
+  const { renderConversation } = convoHelpers();
+  const long = "The ticket names target app `apps/new-ui` (SvelteKit) living only on branch "
+    + "`coda/new-ui`, but the only frontend repo in the manifest is `metadao/metadao-frontend-v2`, "
+    + "whose visible structure doesn't match. Is it a new workspace, or a different repo?";
+
+  const written = renderConversation({ questions: [
+    { id: "a", becomes: "D-01", question: long, summary: "target repo" }] }, null);
+  assert.match(written, /class="dq2">target repo</);
+
+  const fallback = renderConversation({ questions: [
+    { id: "a", becomes: "D-01", question: long }] }, null);
+  const label = /class="dq2">([^<]*)</.exec(fallback)[1];
+  assert.ok(label.length <= 60, `rail label still long: ${label.length}`);
+  assert.ok(label.endsWith("…"), "and says it was cut");
+  assert.ok(!/\s$/.test(label.replace("…", "")), "cut on a word, not mid-word");
+});
+
+test("a very long question cannot push the composer off the screen", () => {
+  const html = readFileSync(new URL("../public/ticket.html", import.meta.url), "utf8");
+  // It scrolls where it stands: nothing hidden, and the answer box stays reachable.
+  assert.match(html, /\.cq \{[^}]*max-height: 30vh; overflow-y: auto;/s);
+  assert.match(html, /\.cfind \.fb \{ max-height: 18vh; overflow-y: auto; \}/);
+});
+
+test("a settled question stops offering its options", () => {
+  // Inside its collapsed group it was still rendering clickable pills — inviting you
+  // to answer something already decided, with the receipt saying so directly below.
+  const { renderConversation } = convoHelpers();
+  const out = renderConversation({ questions: [
+    { id: "a", becomes: "D-01", question: "Which licence?", options: ["Host & Link", "Adobe"],
+      answer: "Host & Link", answered_by: "you" },
+    { id: "b", becomes: "D-02", question: "Which font?", options: ["Variable"] },
+  ] }, null);
+  assert.equal((out.match(/class="cpills"/g) || []).length, 1, "only the live question offers options");
+  assert.doesNotMatch(out, /data-answer="Adobe"/, "the settled one offers nothing");
+  assert.match(out, /data-answer="Variable"/);
 });

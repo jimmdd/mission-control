@@ -1120,6 +1120,7 @@ Respond with ONLY valid JSON (no markdown fences):
     {{
       "category": "scope|technical|design|requirements",
       "question": "The clarifying question",
+      "summary": "three to six words naming what is being decided, e.g. 'target repo' or 'font licence'",
       "question_type": "multiple_choice|text|yes_no",
       "options": ["Option A", "Option B", "Option C"]
     }}

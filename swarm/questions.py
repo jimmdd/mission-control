@@ -55,6 +55,10 @@ def canonical(q: Dict, index: int = 1) -> Dict:
     return {
         "id": q.get("id") or f"q{index}",
         "question": q.get("question", q.get("q", "")),
+        # A few words naming what is being decided, for the decision rail. The full
+        # question runs to hundreds of characters and truncating one lands mid
+        # parenthesis, so this is written rather than derived.
+        "summary": q.get("summary", ""),
         "category": q.get("category", "scope"),
         "question_type": q.get("question_type", "text"),
         "options": q.get("options"),
@@ -102,6 +106,7 @@ def merge(existing: List[Dict], incoming: List[Dict]) -> List[Dict]:
             kept["question"] = fresh["question"] or kept["question"]
             kept["options"] = fresh["options"] or kept["options"]
             kept["why"] = fresh["why"] or kept["why"]
+            kept["summary"] = fresh["summary"] or kept["summary"]
             kept["source"] = fresh["source"] if fresh["source"] != "triage" else kept["source"]
             merged.append(kept)
         else:

@@ -186,7 +186,7 @@
   @keyframes mcpulse { 0%,100% { opacity: 1; } 50% { opacity: .35; } }
   .chead .settled { margin-left: auto; font-size: 11.5px; color: var(--ink-3); }
 
-  .stream { max-width: 668px; margin: 0 auto; padding: 26px 0; display: flex; flex-direction: column; gap: 26px; max-height: 60vh; overflow-y: auto; }
+  .stream { max-width: 668px; margin: 0 auto; padding: 26px 0; display: flex; flex-direction: column; gap: 26px; max-height: 58vh; overflow-y: auto; }
   .cmsg { display: grid; grid-template-columns: 24px 1fr; gap: 13px; align-items: start; }
   .cav {
     width: 24px; height: 24px; border-radius: 50%; display: grid; place-items: center;
@@ -198,7 +198,11 @@
     text-transform: uppercase; color: var(--ink-4); margin-bottom: 5px;
   }
   .cbody { font-size: 13.5px; line-height: 1.7; color: var(--ink-2); white-space: pre-wrap; }
-  .cq { font-size: 13.5px; line-height: 1.7; color: var(--ink); white-space: pre-wrap; }
+  /* A 500-character question must not push the composer off the screen. It scrolls
+     where it stands: nothing is hidden and the answer box stays reachable. */
+  .cq { font-size: 13.5px; line-height: 1.7; color: var(--ink); white-space: pre-wrap;
+        max-height: 30vh; overflow-y: auto; }
+  .cfind .fb { max-height: 18vh; overflow-y: auto; }
 
   /* A finding is amber because a human is the blocker — the one meaning amber has. */
   .cfind {
@@ -301,7 +305,8 @@
   .drow2.set .dtag { color: var(--green); }
   .drow2.on .dtag { color: var(--cyan); }
   .drow2.agent .dtag { color: var(--amber); }
-  .drow2 .dq2 { font-size: 11.5px; line-height: 1.4; color: var(--ink-2); display: block; margin-top: 3px; }
+  .drow2 .dq2 { font-size: 11.5px; line-height: 1.4; color: var(--ink-2); display: block; margin-top: 3px;
+                overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   .drow2 .dv { font-size: 11px; color: var(--ink-4); display: block; margin-top: 2px; }
   .dsum { margin-top: 18px; padding-top: 14px; border-top: 1px solid var(--line-soft); font-size: 11px; line-height: 1.6; color: var(--ink-4); }
   .dsum b { color: var(--amber); font-weight: 500; }
@@ -824,9 +829,12 @@ function renderChatEvent(ev) {
     // it is only ever worn by an option the data actually names. Highlighting the
     // first one because it is first invents a recommendation nobody made, and reads
     // as a value already selected on a question that is still wide open.
-    const pills = (ev.q.options || []).map(o =>
+    // A settled question is the record. Offering its options again invites you to
+    // answer something already decided, and the receipt below already says so.
+    const settled = ev.q.answer || ev.q.deferred;
+    const pills = settled ? "" : (ev.q.options || []).map(o =>
       `<button class="cpill${o === ev.q.recommended ? " rec" : ""}" data-answer="${esc(o)}" data-q="${esc(ev.q.id)}">${esc(o)}</button>`).join("");
-    const escapePill = `<button class="cpill esc" data-act="delegate" data-q="${esc(ev.q.id)}">You decide</button>`;
+    const escapePill = settled ? "" : `<button class="cpill esc" data-act="delegate" data-q="${esc(ev.q.id)}">You decide</button>`;
     const rec = ev.q.recommended
       ? `<div class="crec">research suggests <b>${esc(ev.q.recommended)}</b> — still your call</div>` : "";
     const owed = (ev.q.thread || []).length && ev.q.thread[ev.q.thread.length - 1].role === "you";
@@ -836,7 +844,7 @@ function renderChatEvent(ev) {
       <div><span class="crole">${esc(role)}</span>
       <div class="cq">${esc(ev.q.question)}</div>
       ${tag ? `<span class="cbecomes">becomes ${tag}</span>` : ""}${why}
-      ${rec}<div class="cpills">${pills}${escapePill}</div>${waiting}</div></div>`;
+      ${settled ? "" : `${rec}<div class="cpills">${pills}${escapePill}</div>${waiting}`}</div></div>`;
   }
 
   if (ev.kind === "said") {
@@ -913,6 +921,20 @@ function renderComposer(active, openCount) {
  * The decision rail: what is settled, what is still open, without scrolling.
  * The one thing a transcript is worst at, and the thing this page exists to answer.
  */
+/**
+ * A few words naming what a question decides, for the rail.
+ *
+ * Triage writes this. The full question runs to several hundred characters — one
+ * on MET-635 is 511 — and truncating one lands mid-parenthesis, so the fallback
+ * keeps the opening words rather than pretending to summarise. The full text is
+ * still there on hover, and in the chat.
+ */
+function questionLabel(q) {
+  if (q.summary) return q.summary;
+  const text = (q.question || "").replace(/\s+/g, " ").trim();
+  return text.length > 58 ? text.slice(0, 58).replace(/\s\S*$/, "") + "…" : text;
+}
+
 function renderDecisions(questions, activeId) {
   const rows = (questions || []).map(q => {
     let state = "open", label = "open";
@@ -920,10 +942,9 @@ function renderDecisions(questions, activeId) {
     else if (q.deferred) { label = "set aside"; }
     else if (q.delegate_requested) { state = "agent"; label = "agent deciding"; }
     else if (q.id === activeId) { state = "on"; label = "discussing"; }
-    return `<button class="drow2 ${state}" data-focus="${esc(q.id)}">
+    return `<button class="drow2 ${state}" data-focus="${esc(q.id)}" title="${esc(q.question)}">
       <span class="dtag">${esc(q.becomes || "—")} · ${esc(label)}</span>
-      <span class="dq2">${esc(q.question)}</span>
-      ${q.answer ? `<span class="dv">${esc(String(q.answer).slice(0, 48))}${q.answered_by === "agent" ? " · agent" : ""}</span>` : ""}
+      <span class="dq2">${esc(questionLabel(q))}</span>
     </button>`;
   }).join("");
   const settled = (questions || []).filter(q => q.answer).length;
