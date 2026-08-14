@@ -4669,13 +4669,25 @@ Rules:
 - If you have a recommendation, give it and say what it costs.
 - If the answer depends on something only they know (a purchase, a contract, an
   internal preference), say so plainly instead of guessing.
-- If it depends on something in the code that you have not been shown, say what you
-  would need to look at. Do not invent what the code does.
+- YOU CANNOT READ ANY FILES. You have no repository access and no tools — only the
+  text above. If answering needs the code, say exactly that: "I can't read the repo
+  from here" and name the file someone should look at. Never explain your inability
+  as a scope or permission problem, and never describe what any file contains.
+- If one of the options offered is clearly the right one given what you now know,
+  name it in "recommends" exactly as written. Otherwise leave it empty.
 
-Respond with ONLY valid JSON: {{"reply": "your answer"}}"""
-    result = _parse_gemini_json(call_gemini(prompt, max_tokens=900, model=_triage_model_deep()))
+Respond with ONLY valid JSON: {{"reply": "your answer", "recommends": "one of the options, or \"\""}}"""
+    model = _triage_model_deep()
+    result = _parse_gemini_json(call_gemini(prompt, max_tokens=900, model=model))
     reply = (result or {}).get("reply", "").strip()
-    return reply or None
+    if not reply:
+        return None
+    # A recommendation only counts when it names an option that exists. The pill it
+    # lights up says "the agent suggests this", so it must never be inferred.
+    recommends = str((result or {}).get("recommends", "")).strip()
+    if recommends and recommends not in options:
+        recommends = next((o for o in options if o.lower() == recommends.lower()), "")
+    return {"reply": reply, "model": model, "recommends": recommends}
 
 
 def _decide_delegated(task: dict, question: dict, context: str) -> Optional[Tuple[str, str]]:
@@ -4736,9 +4748,13 @@ def _service_task_questions(task: dict) -> bool:
     changed = False
 
     for q in replies:
-        reply = _answer_thread(task, q, context)
-        if reply:
-            question_add_message(q, "research", reply)
+        answer = _answer_thread(task, q, context)
+        if answer:
+            question_add_message(q, "research", answer["reply"])
+            # Which model said it, so the reader can weigh it.
+            q["thread"][-1]["model"] = answer.get("model", "")
+            if answer.get("recommends"):
+                q["recommended"] = answer["recommends"]
             changed = True
             logging.info(f"  Replied in the thread on {q.get('id')} for {task_id[:8]}")
         else:

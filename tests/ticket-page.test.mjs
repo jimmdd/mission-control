@@ -605,3 +605,20 @@ test("a question shows the decision id its answer will bind", () => {
     { id: "q2", becomes: "D-02", question: "Which font?", options: ["Variable"] }] }, null);
   assert.match(out, /class="cbecomes">becomes D-02</);
 });
+
+test("a research reply says which model produced it", () => {
+  const { renderConversation } = convoHelpers();
+  const out = renderConversation({ questions: [{ id: "q1", becomes: "D-01", question: "Which repo?",
+    thread: [{ role: "research", text: "pick the separate repo", model: "claude-opus-5", at: "1" }] }] }, null);
+  assert.match(out, /research · claude-opus-5/, "an answer can be weighed, not just read");
+});
+
+test("a suggestion from research is labelled as a suggestion", () => {
+  // A bare cyan pill says "the agent recommends this" without saying who or that
+  // it is still yours to decide.
+  const { renderConversation } = convoHelpers();
+  const out = renderConversation({ questions: [{ id: "q1", becomes: "D-01", question: "Which repo?",
+    options: ["separate repo", "same repo"], recommended: "separate repo" }] }, null);
+  assert.match(out, /research suggests <b>separate repo<\/b> — still your call/);
+  assert.match(out, /class="cpill rec" data-answer="separate repo"/);
+});

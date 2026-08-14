@@ -216,6 +216,9 @@
     border-radius: 5px; padding: 2px 7px;
   }
 
+  .crec { margin-top: 12px; font-size: 12px; color: var(--ink-3); }
+  .crec b { color: var(--cyan); font-weight: 500; }
+
   .cpills { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 14px; }
   .cpill {
     font-family: inherit; font-size: 12.5px; padding: 9px 14px; border-radius: 16px;
@@ -774,7 +777,7 @@ function chatTimeline(questions) {
       role: q.source === "planner" ? "planner" : "triage",
     });
     (q.thread || []).forEach(m => events.push({
-      at: m.at || "", seq, kind: "said", q, role: m.role, text: m.text,
+      at: m.at || "", seq, kind: "said", q, role: m.role, text: m.text, model: m.model || "",
     }));
     if (q.answer) {
       events.push({
@@ -824,6 +827,8 @@ function renderChatEvent(ev) {
     const pills = (ev.q.options || []).map(o =>
       `<button class="cpill${o === ev.q.recommended ? " rec" : ""}" data-answer="${esc(o)}" data-q="${esc(ev.q.id)}">${esc(o)}</button>`).join("");
     const escapePill = `<button class="cpill esc" data-act="delegate" data-q="${esc(ev.q.id)}">You decide</button>`;
+    const rec = ev.q.recommended
+      ? `<div class="crec">research suggests <b>${esc(ev.q.recommended)}</b> — still your call</div>` : "";
     const owed = (ev.q.thread || []).length && ev.q.thread[ev.q.thread.length - 1].role === "you";
     const waiting = owed ? `<div class="cwait"><i></i>Working out an answer — read-only check</div>` : "";
     return `<div class="cmsg" data-for="${esc(ev.q.id)}">
@@ -831,16 +836,18 @@ function renderChatEvent(ev) {
       <div><span class="crole">${esc(role)}</span>
       <div class="cq">${esc(ev.q.question)}</div>
       ${tag ? `<span class="cbecomes">becomes ${tag}</span>` : ""}${why}
-      <div class="cpills">${pills}${escapePill}</div>${waiting}</div></div>`;
+      ${rec}<div class="cpills">${pills}${escapePill}</div>${waiting}</div></div>`;
   }
 
   if (ev.kind === "said") {
     if (ev.role === "you") {
       return `<div class="cmsg me" data-for="${esc(ev.q.id)}"><div class="cbody">${esc(ev.text)}</div></div>`;
     }
+    // Which model said it, so an answer can be weighed rather than just read.
+    const by = ev.model ? ` · ${esc(ev.model)}` : "";
     return `<div class="cmsg" data-for="${esc(ev.q.id)}">
       <span class="cav">◆</span>
-      <div><span class="crole">${esc(role)}</span><div class="cbody">${esc(ev.text)}</div></div></div>`;
+      <div><span class="crole">${esc(role)}${by}</span><div class="cbody">${esc(ev.text)}</div></div></div>`;
   }
 
   if (ev.kind === "deferred") {
