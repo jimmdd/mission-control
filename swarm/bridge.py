@@ -5117,6 +5117,18 @@ def process_planning_tasks():
                 description = description + "\n\n" + answers
             repos = identify_repos(title, description, manifest)
             logging.info(f"  No repos in triage state — identified {len(repos)} from manifest + answers")
+            # Write them back, or this runs again on every poll. Planning takes
+            # tens of minutes and the loop turns once a minute, so an unsaved
+            # result is an LLM call a minute for the length of the run — and a
+            # fresh chance to route somewhere different each time, which is the
+            # failure that cost MET-635 its morning.
+            if repos:
+                try:
+                    mc_request("PUT", f"/api/tasks/{task_id}/triage-state",
+                               {**(state or {}), "triage_repos": repos})
+                    state = {**(state or {}), "triage_repos": repos}
+                except Exception as e:
+                    logging.warning(f"  Could not persist identified repos for {task_id[:8]}: {e}")
 
         if not repos:
             existing_qs = state.get("questions", []) if state else []

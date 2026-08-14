@@ -1109,3 +1109,65 @@ test("a note the page sends marks itself as a person's", () => {
   const fn = html.slice(html.indexOf("async function postNote("), html.indexOf("async function postNote(") + 1100);
   assert.match(fn, /source: "human"/);
 });
+
+test("a message with nothing back yet shows that a reply is coming", () => {
+  // Otherwise it just sits there and the page looks broken — the reply is a poll
+  // away at best, and on a busy bridge a minute or more.
+  const { renderConversation } = threadHelpers();
+  const waiting = renderConversation({ questions: SETTLED, confirmed: true }, null, {
+    taskStatus: "review",
+    activities: [{ activity_type: "manual_feedback", message: "why UTC?", created_at: "1" }] });
+  assert.match(waiting, /class="cthink"/);
+
+  const answered = renderConversation({ questions: SETTLED, confirmed: true }, null, {
+    taskStatus: "review",
+    activities: [
+      { activity_type: "manual_feedback", message: "why UTC?", created_at: "1" },
+      { activity_type: "agent_reply", agent_id: "a1", message: "Because the server is UTC.", created_at: "2" },
+    ] });
+  assert.doesNotMatch(answered, /class="cthink"/, "the reply landed, so nothing is pending");
+});
+
+test("routine chatter after your message does not count as a reply", () => {
+  // A heartbeat is not an answer, and letting one clear the indicator would say
+  // the agent responded when it did not.
+  const { renderConversation } = threadHelpers();
+  const out = renderConversation({ questions: SETTLED, confirmed: true }, null, {
+    taskStatus: "review",
+    activities: [
+      { activity_type: "manual_feedback", message: "why UTC?", created_at: "1" },
+      { activity_type: "updated", message: "Agent heartbeat: running.", created_at: "2" },
+    ] });
+  assert.match(out, /class="cthink"/);
+});
+
+test("machine events live in the rail, not interleaved with the conversation", () => {
+  // A conversation with "step 2 completed" every few lines is a log with speech in
+  // it. The two are read at different moments, for different reasons.
+  const { renderConversation } = threadHelpers();
+  const out = renderConversation({ questions: SETTLED, confirmed: true }, null, {
+    taskStatus: "in_progress",
+    activities: [
+      { activity_type: "manual_feedback", message: "use UTC please", created_at: "1" },
+      { activity_type: "step_completed", message: "Step 2 completed", created_at: "2" },
+    ] });
+  const [chat, rail] = out.split('<aside class="decisions">');
+  assert.match(chat, /use UTC please/, "what a person said stays in the chat");
+  assert.doesNotMatch(chat, /Step 2 completed/, "what the machine did does not");
+  assert.match(rail, /Step 2 completed/);
+  assert.match(rail, /Activity/);
+});
+
+test("the rail's activity reads newest first", () => {
+  // The question it answers is "what is it doing now", and making someone scroll a
+  // column to reach the answer defeats having a column.
+  const { renderConversation } = threadHelpers();
+  const out = renderConversation({ questions: SETTLED, confirmed: true }, null, {
+    taskStatus: "in_progress",
+    activities: [
+      { activity_type: "step_completed", message: "OLDEST", created_at: "2026-08-14T01:00:00Z" },
+      { activity_type: "step_completed", message: "NEWEST", created_at: "2026-08-14T02:00:00Z" },
+    ] });
+  const rail = out.split('<aside class="decisions">')[1];
+  assert.ok(rail.indexOf("NEWEST") < rail.indexOf("OLDEST"));
+});

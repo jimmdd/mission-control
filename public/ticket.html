@@ -58,7 +58,7 @@
   #root { height: 100dvh; }
   .shell {
     display: grid; height: 100dvh;
-    grid-template-columns: 206px minmax(0, 1fr) 224px;
+    grid-template-columns: 206px minmax(0, 1fr) 296px;
     grid-template-rows: 46px auto minmax(0, 1fr);
   }
   .topnav    { grid-column: 1 / 4; grid-row: 1; border-bottom: 1px solid var(--line-soft); }
@@ -368,18 +368,35 @@
   /* The thread's system half. An event is not somebody speaking, so it is a line
      rather than a message — no avatar, no bubble. Trouble is amber, which on this
      page means a human is the blocker, and that is what a failure makes you. */
+  /* The run's own account of itself, in the rail. Newest first — the question it
+     answers is "what is it doing now". */
+  .dacts { display: flex; flex-direction: column; gap: 8px; max-height: 34vh; overflow-y: auto; }
   .cevent {
-    display: flex; gap: 9px; align-items: baseline; font-family: var(--mono);
-    font-size: 10.5px; line-height: 1.5; color: var(--ink-4);
+    display: flex; gap: 8px; align-items: baseline; font-family: var(--mono);
+    font-size: 10px; line-height: 1.5; color: var(--ink-4);
   }
   .cevent .mk { flex: none; color: rgba(224,224,224,.28); }
+  .cevent .tx { min-width: 0; overflow-wrap: anywhere; }
   .cevent.bad { color: var(--amber); }
   .cevent.bad .mk { color: var(--amber); }
   /* Fifty repetitions of "heartbeat: running" is not a conversation, but silence
      is not honest either — the run becomes one line saying how many there were. */
   .cnoise {
     font-family: var(--mono); font-size: 10px; color: rgba(224,224,224,.22);
-    padding-left: 19px;
+    padding-left: 18px;
+  }
+  /* Waiting on a reply. Three dots rather than a spinner: a spinner implies
+     something is actively computing, and between polls nothing is. */
+  .cthink { display: flex; align-items: center; gap: 5px; height: 24px; }
+  .cthink i {
+    width: 5px; height: 5px; border-radius: 50%; background: rgba(224,224,224,.35);
+    animation: mcthink 1.3s ease-in-out infinite;
+  }
+  .cthink i:nth-child(2) { animation-delay: .18s; }
+  .cthink i:nth-child(3) { animation-delay: .36s; }
+  @keyframes mcthink {
+    0%, 60%, 100% { opacity: .25; transform: translateY(0); }
+    30% { opacity: 1; transform: translateY(-2px); }
   }
   .cwait {
     display: flex; align-items: center; gap: 9px; border: 1px solid rgba(255,255,255,.09);
@@ -481,7 +498,7 @@
   .cfoot { margin-top: 10px; font-family: var(--mono); font-size: 10px; color: rgba(224,224,224,.28); }
 
   /* ─── decision rail ─── */
-  .decisions { padding: 22px 18px; display: flex; flex-direction: column; gap: 20px; overflow-y: auto; }
+  .decisions { padding: 22px 20px; display: flex; flex-direction: column; gap: 20px; overflow-y: auto; }
   .dsec > h2, .drail-h {
     display: flex; align-items: baseline; gap: 8px; font-family: var(--mono); font-size: 9.5px;
     font-weight: 400; letter-spacing: .14em; text-transform: uppercase;
@@ -1359,34 +1376,54 @@ function ticketNotes(activities) {
  * is not a conversation, but neither is silence — the run of them becomes one
  * line saying how many there were.
  */
+/**
+ * The chat: only what was said. Machine events moved to the rail — a conversation
+ * interleaved with "step 2 completed" every few lines is a log with speech in it,
+ * and the two are read at different moments for different reasons.
+ */
 function renderNotes(activities) {
-  const rows = ticketNotes(activities);
+  const rows = ticketNotes(activities).filter(x => x.kind === "human" || x.kind === "agent");
+  if (!rows.length) return "";
+  const out = rows.map(({ a, kind }) => kind === "human"
+    ? `<div class="cmsg me"><div class="cbody">${esc(a.message)}</div></div>`
+    : `<div class="cmsg"><span class="cav">${esc(AVATAR)}</span>
+        <div><span class="crole">agent</span><div class="cbody">${esc(a.message)}</div></div></div>`);
+  // You said something and nothing has come back. Without this the message just
+  // sits there and the page looks broken — the reply is a poll away at best, and
+  // on a busy bridge a minute or more.
+  if (rows[rows.length - 1].kind === "human") {
+    out.push(`<div class="cmsg"><span class="cav">${esc(AVATAR)}</span>
+      <div class="cthink"><i></i><i></i><i></i></div></div>`);
+  }
+  return out.join("");
+}
+
+/**
+ * What the machine did, in the rail beneath the decisions.
+ *
+ * Newest first: the question this answers is "what is it doing now", and making
+ * someone scroll a column to reach the answer defeats having a column. Routine
+ * chatter still collapses to a count, and trouble is never collapsed.
+ */
+function renderActivity(activities) {
+  const rows = ticketNotes(activities).filter(x => x.kind === "event" || x.kind === "trouble" || x.kind === "noise");
   if (!rows.length) return "";
   const out = [];
   let run = 0;
-
   const flush = () => {
     if (!run) return;
     out.push(`<div class="cnoise">${run} routine update${run > 1 ? "s" : ""}</div>`);
     run = 0;
   };
-
-  for (const { a, kind } of rows) {
+  for (const { a, kind } of rows.slice().reverse()) {
     if (kind === "noise") { run++; continue; }
     flush();
-    if (kind === "human") {
-      out.push(`<div class="cmsg me"><div class="cbody">${esc(a.message)}</div></div>`);
-    } else if (kind === "agent") {
-      out.push(`<div class="cmsg"><span class="cav">${esc(AVATAR)}</span>
-        <div><span class="crole">agent</span><div class="cbody">${esc(a.message)}</div></div></div>`);
-    } else {
-      // An event is not somebody speaking, so it reads as a line, not a message.
-      out.push(`<div class="cevent ${kind === "trouble" ? "bad" : ""}">
-        <span class="mk">${kind === "trouble" ? "!" : "·"}</span>${esc(clip(a.message, 160))}</div>`);
-    }
+    out.push(`<div class="cevent ${kind === "trouble" ? "bad" : ""}">
+      <span class="mk">${kind === "trouble" ? "!" : "·"}</span>
+      <span class="tx">${esc(clip(a.message, 120))}</span></div>`);
   }
   flush();
-  return out.join("");
+  return `<div class="dsec"><h2>Activity</h2><div class="dacts">${out.join("")}</div></div>`;
 }
 
 /** The question the composer is currently pointed at. */
@@ -1538,6 +1575,7 @@ function renderDecisions(questions, activeId, side = {}) {
       ${allSettled ? `<div class="dnote">Reopen one and it goes back to the agent as an open question.</div>` : ""}
     </div>
     ${memory}
+    ${renderActivity(side.activities)}
     ${deliverables}
     ${subtasks}
     <div class="dsum">${blocking ? `<b>${blocking}</b> blocking planning<br>`
