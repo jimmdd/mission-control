@@ -238,6 +238,49 @@ Two fixes came out of it, both measured:
 defining ~20 self-run steps and only 6 delegations. MC's own contribution is 25
 lines. We were never the bottleneck — we picked the wrong entry point.
 
+### GSD cannot ask a question here — verified, and it fails silently
+
+The open question was whether MC should keep its own triage layer or hand the
+asking to `/gsd-discuss-phase`. It cannot be handed over, and the evidence is on
+disk rather than in an argument.
+
+`~/.mission-control/bridge/plan-stage/*.plan.log` records the `system` init event
+listing every tool the session was offered. **`AskUserQuestion` is not among the
+163.** Claude Code withholds it under `-p`. Across all three transcripts there is
+not one `tool_use` block naming it; the 60 / 7 / 9 textual hits are the workflow
+markdown being read by `Read`.
+
+That is worse than a stall, and it is the same failure as the `gsd:` colon
+commands: **a tool named in a prompt but absent from the runtime fails silently.**
+The agent drops the step and works from the surrounding prose — so a discussion
+gate becomes the agent deciding alone, with nothing recording that a question
+existed. GSD's own escape, `--text` / `workflow.text_mode`, is documented as
+"required for non-Claude runtimes where `AskUserQuestion` is not available", but
+it only replaces the call with a numbered list and a request to type a choice.
+Under `-p` there is nobody to type it.
+
+Two consequences, both now closed:
+
+- **`quick` is safe and that is not luck.** Its single `AskUserQuestion`
+  (`quick.md:53`) fires only when the description is empty, and MC always supplies
+  one. Being the cheap door and being the headless-safe door are the same fact.
+- **`plan-phase` was not.** `PLAN_MODES["phase"]` passed `--prd` with no filepath,
+  and `plan-phase.md:71` only sets `PRD_PARAM` when the flag is followed by a
+  non-flag token — so the express path never fired, the run fell through to step 4
+  ("Load CONTEXT.md"), and its empty branch called `AskUserQuestion`. MET-635 was
+  planned without its decisions, silently. Dead since it was written, and it read
+  as a feature.
+
+`swarm/gsd_brief.py` now writes the settled decisions into the worktree as a PRD
+and the phase door is given its path. GSD's express path converts every
+requirement into a locked decision in `CONTEXT.md` and bypasses the gate. Deferred
+questions are written under "out of scope" — deciding not to decide is a
+constraint, and dropping it invites the planner to build the thing the deferral
+was avoiding.
+
+`FORBIDDEN_FLAGS` asserts no door emits `--discuss`. Do not add one: there is no
+way to answer it here.
+
 ### Planning is a contract, not a Claude feature
 
 `plan_in_worktree` takes a provider. GSD ships as Claude Code skills, so
