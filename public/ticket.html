@@ -208,6 +208,14 @@
   .cfind .ft { font-size: 12.5px; font-weight: 600; color: var(--ink); }
   .cfind .fb { font-size: 12px; line-height: 1.6; color: var(--ink-2); margin-top: 3px; white-space: normal; }
 
+  /* The id the answer will bind. Without it on the question, the receipt below
+     says "Recorded as D-02" and nothing on screen ever said which one D-02 was. */
+  .cbecomes {
+    display: inline-block; margin-top: 8px; font-family: var(--mono); font-size: 10px;
+    letter-spacing: .06em; color: var(--ink-3); border: 1px solid rgba(255,255,255,.14);
+    border-radius: 5px; padding: 2px 7px;
+  }
+
   .cpills { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 14px; }
   .cpill {
     font-family: inherit; font-size: 12.5px; padding: 9px 14px; border-radius: 16px;
@@ -820,7 +828,9 @@ function renderChatEvent(ev) {
     const waiting = owed ? `<div class="cwait"><i></i>Working out an answer — read-only check</div>` : "";
     return `<div class="cmsg" data-for="${esc(ev.q.id)}">
       <span class="cav">◆</span>
-      <div><span class="crole">${esc(role)}</span><div class="cq">${esc(ev.q.question)}</div>${why}
+      <div><span class="crole">${esc(role)}</span>
+      <div class="cq">${esc(ev.q.question)}</div>
+      ${tag ? `<span class="cbecomes">becomes ${tag}</span>` : ""}${why}
       <div class="cpills">${pills}${escapePill}</div>${waiting}</div></div>`;
   }
 

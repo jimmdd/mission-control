@@ -596,3 +596,12 @@ test("a settled question collapses to one line but keeps its exchange", () => {
   assert.doesNotMatch(out.split("Which font?")[1] || "", /csettled/);
   assert.equal((out.match(/<details class="csettled">/g) || []).length, 1);
 });
+
+test("a question shows the decision id its answer will bind", () => {
+  // Without it, the receipt underneath says "Recorded as D-02" and nothing on
+  // screen ever said which question D-02 was.
+  const { renderConversation } = convoHelpers();
+  const out = renderConversation({ questions: [
+    { id: "q2", becomes: "D-02", question: "Which font?", options: ["Variable"] }] }, null);
+  assert.match(out, /class="cbecomes">becomes D-02</);
+});
