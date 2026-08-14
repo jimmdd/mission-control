@@ -59,12 +59,13 @@
   .shell {
     display: grid; height: 100dvh;
     grid-template-columns: 206px minmax(0, 1fr) 224px;
-    grid-template-rows: auto minmax(0, 1fr);
+    grid-template-rows: 46px auto minmax(0, 1fr);
   }
-  .rail      { grid-column: 1; grid-row: 1 / 3; border-right: 1px solid var(--line-soft); min-height: 0; }
-  .ticket    { grid-column: 2; grid-row: 1; min-width: 0; }
-  .convo     { grid-column: 2; grid-row: 2; min-width: 0; min-height: 0; }
-  .decisions { grid-column: 3; grid-row: 1 / 3; border-left: 1px solid var(--line-soft); min-height: 0; }
+  .topnav    { grid-column: 1 / 4; grid-row: 1; border-bottom: 1px solid var(--line-soft); }
+  .rail      { grid-column: 1; grid-row: 2 / 4; border-right: 1px solid var(--line-soft); min-height: 0; }
+  .ticket    { grid-column: 2; grid-row: 2; min-width: 0; }
+  .convo     { grid-column: 2; grid-row: 3; min-width: 0; min-height: 0; }
+  .decisions { grid-column: 3; grid-row: 2 / 4; border-left: 1px solid var(--line-soft); min-height: 0; }
   /* Below the rails' width the page stops being an app shell and becomes a
      document: one column, ordinary scroll, nothing overlapping. */
   @media (max-width: 1080px) {
@@ -73,15 +74,48 @@
     .rail { display: none; }
   }
 
+  /* ─────────── the top nav ─────────── */
+  /* Where in the product you are, and what is happening elsewhere in it. The
+     wordmark lives here rather than in the ticket rail: it names the app, and the
+     rail names one list inside it. */
+  .topnav { display: flex; align-items: center; gap: 24px; padding: 0 22px; min-width: 0; }
+  .topnav .wordmark {
+    font-family: var(--mono); font-size: 10.5px; font-weight: 700; letter-spacing: .16em;
+    color: var(--ink); text-decoration: none; flex: none;
+  }
+  .tabs { display: flex; gap: 2px; min-width: 0; overflow: hidden; }
+  .tab {
+    display: flex; gap: 5px; padding: 6px 11px; border-radius: 5px; font-size: 10.5px;
+    color: rgba(224,224,224,.55); text-decoration: none; white-space: nowrap;
+  }
+  .tab:hover { color: var(--ink-2); background: rgba(255,255,255,.03); }
+  .tab.on { background: rgba(0,212,255,.1); color: var(--cyan); }
+  .tab.on .c { color: rgba(0,212,255,.7); }
+  .tab .c { font-family: var(--mono); }
+  .tab .c.need { color: var(--amber); }
+  .tab .c.run  { color: var(--green); }
+  .tab .c.rev  { color: var(--indigo); }
+  .navright {
+    margin-left: auto; display: flex; align-items: center; gap: 16px; flex: none;
+    font-family: var(--mono); font-size: 10px; color: var(--ink-4);
+  }
+  .navright .live { display: flex; align-items: center; gap: 7px; }
+  .navright .live i { width: 5px; height: 5px; border-radius: 50%; background: var(--green); animation: mcpulse 1.9s ease-in-out infinite; }
+  .navright .need { color: var(--amber); }
+  .navright kbd {
+    font-family: var(--mono); font-size: 10px; padding: 5px 10px;
+    border: 1px solid rgba(255,255,255,.12); border-radius: 5px; color: rgba(224,224,224,.55);
+  }
+  /* The breadcrumb the design puts before the ticket id — the rail is one list
+     among several now, so the header says which. */
+  .tk-crumb { font-family: var(--mono); font-size: 10.5px; color: var(--ink-4); text-decoration: none; flex: none; }
+  .tk-crumb:hover { color: var(--ink-2); }
+
   /* ─────────── the ticket rail ─────────── */
   /* Cross-ticket navigation. It is on the ticket page because the question you are
      answering here is regularly "what else is waiting on me" — and the answer
      should not cost a trip back to the board. */
-  .rail { display: flex; flex-direction: column; padding: 20px 0; overflow-y: auto; }
-  .rail .brand {
-    padding: 0 18px 20px; font-family: var(--mono); font-size: 11px; font-weight: 700;
-    letter-spacing: .16em; color: var(--ink); text-decoration: none;
-  }
+  .rail { display: flex; flex-direction: column; padding: 18px 0; overflow-y: auto; }
   .rgroup {
     padding: 14px 18px 12px; font-family: var(--mono); font-size: 9.5px;
     letter-spacing: .14em; color: rgba(255,255,255,.3);
@@ -629,6 +663,7 @@ function renderTicket(task, triage, activities, extra = {}) {
   return `
     <div class="ticket">
       <div class="thead">
+        <a class="tk-crumb" href="/">Tickets ›</a>
         <span class="tk-id">${esc(task.external_id || task.id.slice(0, 8))}</span>
         <h1 class="tk-title">${esc(task.title)}</h1>
         ${extra.agent ? `<span class="tk-live"><i></i>${esc(extra.agent)}</span>` : ""}
@@ -680,6 +715,43 @@ function openCount(task) {
   return blockingQuestions(st && st.questions).length;
 }
 
+/**
+ * The top nav (design 2b, revised): where you are, and what is happening elsewhere.
+ *
+ * Every count is derived from the ticket list the rail already needed, so the bar
+ * costs no extra request. Every tab points at a page that exists — the design's
+ * "Knowledge" tab has no route behind it here, and a tab that goes nowhere is worse
+ * than one that is absent. The dashboard filters are hash-driven, so Inbox/Swarm/
+ * Review land on the list they name rather than all on the same unfiltered board.
+ */
+function renderNav(tasks, current) {
+  const rows = tasks || [];
+  const open = rows.filter(t => !DONE.includes(t.status));
+  const needsYou = rows.filter(t => openCount(t) > 0).length;
+  const running = rows.filter(t => t.status === "in_progress").length;
+  const inReview = rows.filter(t => ["review", "in_review", "testing"].includes(t.status)).length;
+
+  const tab = (label, href, count, cls, on) =>
+    `<a class="tab ${on ? "on" : ""}" href="${href}">${esc(label)}${
+      count ? `<span class="c ${cls}">${count}</span>` : ""}</a>`;
+
+  return `<nav class="topnav">
+    <a class="wordmark" href="/">MISSION CONTROL</a>
+    <div class="tabs">
+      ${tab("Inbox", "/#planning", needsYou, "need", false)}
+      ${tab("Tickets", "/", open.length, "", true)}
+      ${tab("Swarm", "/space", running, "run", false)}
+      ${tab("Review", "/#review", inReview, "rev", false)}
+    </div>
+    <div class="navright">
+      ${running ? `<span class="live"><i></i>${running} running</span>` : ""}
+      ${needsYou ? `<span class="need">${needsYou} need${needsYou === 1 ? "s" : ""} you</span>` : ""}
+    </div>
+  </nav>`;
+}
+
+const DONE = ["done", "completed", "merged", "cancelled"];
+
 function renderRail(tasks, current, triage, planData = {}) {
   const qs = (triage && triage.questions) || [];
   const settled = qs.filter(q => q.answer).length;
@@ -730,11 +802,10 @@ function renderRail(tasks, current, triage, planData = {}) {
       <div class="rlist">${list}</div>`;
   }).join("");
 
-  return `<nav class="rail">
-    <a class="brand" href="/">MISSION CONTROL</a>
+  return `<div class="rail">
     ${rows || `<div class="rgroup">NO OTHER TICKETS</div>`}
     <a class="foot" href="/">← all tasks</a>
-  </nav>`;
+  </div>`;
 }
 
 /* ─────────── the plan, as a map ─────────── */
@@ -1632,6 +1703,7 @@ async function load({ force = false } = {}) {
     };
 
     root.innerHTML = `<div class="shell">`
+      + renderNav(sideData.tasks.length ? sideData.tasks : [task], task)
       + renderRail(sideData.tasks, task, triage, planData)
       + renderTicket(task, triage, activities, { agent: liveAgent(task, planData.progress) })
       + (qs.length

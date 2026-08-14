@@ -681,7 +681,7 @@ function threadHelpers() {
     const location = { search: "" };
     class URLSearchParams { get() { return "x"; } }
   `;
-  return new Function(`${shim}\n${body}\nreturn { renderConversation, renderPlanCard, renderTicket, brief, runStatus, renderRail };`)();
+  return new Function(`${shim}\n${body}\nreturn { renderConversation, renderPlanCard, renderTicket, brief, runStatus, renderRail, renderNav };`)();
 }
 
 const SETTLED = [
@@ -805,4 +805,49 @@ test("the rail's segments follow the steps once there is a plan", () => {
     { questions: SETTLED }, {});
   assert.match(triaging, /class="dim">triage<\/span>/);
   assert.match(triaging, /class="n">2\/2</);
+});
+
+// ─────────── the top nav (design 2b, revised) ───────────
+// The wordmark moved out of the ticket rail: it names the app, and the rail names
+// one list inside it. Every count comes off the ticket list the rail already
+// needed, so the bar costs no extra request.
+
+test("the nav counts what is actually there, and links where something exists", () => {
+  const { renderNav } = threadHelpers();
+  const blocked = JSON.stringify({ questions: [{ id: "q" }, { id: "r" }] });
+  const tasks = [
+    { id: "a", status: "planning", triage_state: blocked },
+    { id: "b", status: "in_progress" },
+    { id: "c", status: "review" },
+    { id: "d", status: "done" },
+  ];
+  const out = renderNav(tasks, tasks[0]);
+
+  assert.match(out, /MISSION CONTROL/);
+  assert.match(out, /Inbox<span class="c need">1<\/span>/, "one ticket is blocked on a human");
+  assert.match(out, /Tickets<span class="c ">3<\/span>/, "done does not count as open");
+  assert.match(out, /Swarm<span class="c run">1<\/span>/);
+  assert.match(out, /Review<span class="c rev">1<\/span>/);
+  assert.match(out, /class="tab on" href="\/"/, "Tickets is the tab you are on");
+  // Every href must resolve to a served route — a tab that goes nowhere is worse
+  // than one that is absent, which is why the design's Knowledge tab is not here.
+  for (const href of [...out.matchAll(/href="([^"]+)"/g)].map(m => m[1])) {
+    assert.match(href, /^\/(#(planning|review))?$|^\/space$/, `nav links somewhere unserved: ${href}`);
+  }
+  assert.doesNotMatch(out, /Knowledge/);
+});
+
+test("a count of zero is left off rather than shown as a zero", () => {
+  const { renderNav } = threadHelpers();
+  const out = renderNav([{ id: "a", status: "planning" }], { id: "a" });
+  assert.doesNotMatch(out, /class="c run">0/);
+  assert.doesNotMatch(out, /need you/, "nothing is blocked, so nothing claims to be");
+});
+
+test("the dashboard honours the filter the nav links to", () => {
+  // Otherwise the tab saying "Review 2" lands on the whole board and the count has
+  // to be taken on trust.
+  const appJs = readFileSync(new URL("../public/app.js", import.meta.url), "utf8");
+  assert.match(appJs, /location\.hash\.slice\(1\)/);
+  assert.match(appJs, /\['planning', 'in_progress', 'review', 'on_hold', 'done'\]/);
 });

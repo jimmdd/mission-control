@@ -17,7 +17,12 @@
             triageState: null,
             selectedTaskId: null,
             activeTriageTaskId: null,
-            filter: 'all',
+            // The ticket page's top nav links here by filter (`/#review`), so the
+            // tab that says "Review 2" lands on those two rather than on the whole
+            // board with the count left to be taken on trust. An unknown hash is
+            // ignored rather than filtering everything away.
+            filter: ['planning', 'in_progress', 'review', 'on_hold', 'done']
+                .includes(location.hash.slice(1)) ? location.hash.slice(1) : 'all',
             sort: 'newest',
             lastUpdated: null,
             isDrawerOpen: false,
