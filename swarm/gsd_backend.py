@@ -58,19 +58,32 @@ PLAN_MODES = {
     "quick": "/gsd-quick --validate",   # GSD guarantees, optional agents skipped
     "mvp": "/gsd-mvp-phase",            # vertical slice, then plan-phase
 }
-DEFAULT_PLAN_MODE = "phase"
+# Quick by default: measured against the full path on MET-635 it produced the same
+# 19-task decomposition in 155 turns instead of 1,365, and 7.4M context tokens
+# instead of 237M. The full phase workflow is for work that genuinely spans phases,
+# and a ticket can ask for it.
+DEFAULT_PLAN_MODE = "quick"
 
 
-def plan_mode() -> str:
-    mode = (os.environ.get("MC_GSD_PLAN_MODE") or DEFAULT_PLAN_MODE).strip().lower()
-    return mode if mode in PLAN_MODES else DEFAULT_PLAN_MODE
+def plan_mode(requested: str = "") -> str:
+    """Which door to use. A ticket's own choice outranks the machine's default.
+
+    Precedence: what the ticket asks for, then the environment, then the default.
+    An unrecognised value falls back rather than failing — a typo on a ticket must
+    not stop it being planned.
+    """
+    for candidate in (requested, os.environ.get("MC_GSD_PLAN_MODE", ""), DEFAULT_PLAN_MODE):
+        mode = (candidate or "").strip().lower()
+        if mode in PLAN_MODES:
+            return mode
+    return DEFAULT_PLAN_MODE
 
 
-def plan_command(greenfield: bool = False) -> str:
+def plan_command(greenfield: bool = False, mode: str = "") -> str:
     ensure_supported_backend()
     if greenfield:
         return "/gsd-new-project --auto"
-    return PLAN_MODES[plan_mode()]
+    return PLAN_MODES[plan_mode(mode)]
 
 
 def project_initialised(cwd: str) -> bool:
@@ -107,7 +120,7 @@ def workflow_path(command: str) -> Optional[str]:
     return None
 
 
-def plan_step_text(provider: str = "") -> str:
+def plan_step_text(provider: str = "", mode: str = "") -> str:
     """The Plan step, written so the agent handles an uninitialised project itself.
 
     The worktree does not exist when the prompt is built, so the sequence cannot be
@@ -122,7 +135,7 @@ def plan_step_text(provider: str = "") -> str:
         f"- If it is MISSING, run `{init_command()}` first. `{plan_command()}` cannot plan into a\n"
         f"  repo with no {planning_dir_name()}/ — it will stop and ask for this, and you must not\n"
         f"  skip ahead to writing code when that happens.\n"
-        f"- Then run `{plan_command()}`."
+        f"- Then run `{plan_command(mode=mode)}`."
     )
 
 

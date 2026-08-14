@@ -3082,6 +3082,15 @@ def _planning_worktree(task: dict, repo_path: Path) -> Optional[Path]:
     return path
 
 
+def _ticket_plan_mode(task_id: str) -> str:
+    """The plan mode this ticket asked for, if it asked for one."""
+    try:
+        state = mc_request("GET", f"/api/tasks/{task_id}/triage-state") or {}
+        return str(state.get("plan_mode") or "")
+    except Exception:
+        return ""
+
+
 def _planning_job_path(task_id: str) -> Path:
     return MC_HOME / "bridge" / "plan-stage" / f"{task_id}.job.json"
 
@@ -3116,6 +3125,9 @@ def _start_planning_job(task: dict, worktree: Path, job: Path):
         "worktree": str(worktree),
         "context": _build_triage_context(task_id),
         "model": "",
+        # A ticket may name the GSD door it wants; the default suits most, and the
+        # ones that genuinely span phases can say so.
+        "mode": _ticket_plan_mode(task_id),
         "state": "running",
     }
     try:

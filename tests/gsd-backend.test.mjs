@@ -139,9 +139,9 @@ import gsd_backend as g
 print(json.dumps(g.plan_sequence(${JSON.stringify(cwd)})))
 `], { encoding: "utf8", stdio: ["ignore", "pipe", "ignore"] }));
 
-  assert.deepEqual(seq(bare), ["/gsd-new-project --auto", "/gsd-plan-phase --prd"],
+  assert.deepEqual(seq(bare), ["/gsd-new-project --auto", "/gsd-quick --validate"],
     "an uninitialised repo must be initialised before a phase can be planned into it");
-  assert.deepEqual(seq(ready), ["/gsd-plan-phase --prd"],
+  assert.deepEqual(seq(ready), ["/gsd-quick --validate"],
     "an initialised repo must not be re-initialised");
 
   rmSync(bare, { recursive: true, force: true });
@@ -160,4 +160,25 @@ print(g.plan_step_text())
   assert.match(text, /gsd-new-project/, "and what to run when it is missing");
   // The observed failure was skipping ahead to code when planning could not proceed.
   assert.match(text, /must not\s+skip ahead to writing code/);
+});
+
+test("a ticket's own choice of GSD door outranks the default", () => {
+  // Quick by default — same 19-task decomposition on MET-635 in 155 turns instead
+  // of 1,365 — but work that genuinely spans phases can ask for the full workflow.
+  const r = JSON.parse(execFileSync("python3", ["-c", `
+import json, sys
+sys.path.insert(0, ${JSON.stringify(SWARM)})
+import gsd_backend as g
+print(json.dumps({
+  "default": g.plan_command(),
+  "asked_phase": g.plan_command(mode="phase"),
+  "asked_mvp": g.plan_command(mode="mvp"),
+  "typo": g.plan_command(mode="nonsense"),
+}))
+`], { encoding: "utf8", stdio: ["ignore", "pipe", "ignore"] }));
+  assert.match(r.default, /gsd-quick/);
+  assert.match(r.asked_phase, /gsd-plan-phase/);
+  assert.match(r.asked_mvp, /gsd-mvp-phase/);
+  // A typo on a ticket must not stop it being planned.
+  assert.match(r.typo, /gsd-quick/);
 });

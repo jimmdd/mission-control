@@ -49,6 +49,7 @@ def main(argv=None) -> int:
         verdict = plan_in_worktree(
             job["worktree"], job["task"],
             context=job.get("context", ""), model=job.get("model", ""),
+            mode=job.get("mode", ""),
         )
     except Exception as e:                      # noqa: BLE001 — the verdict must land
         logging.exception("planning job failed")

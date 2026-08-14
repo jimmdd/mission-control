@@ -42,36 +42,37 @@
 
   * { box-sizing: border-box; }
   body {
-    margin: 0; background: var(--ground); color: var(--ink);
-    font-family: var(--ui); font-size: 14px; line-height: 1.55;
+    margin: 0; background: var(--bg-main); color: var(--ink);
+    font-family: var(--ui); font-size: 13.5px; line-height: 1.55;
     -webkit-font-smoothing: antialiased;
   }
-  .page { max-width: 1180px; margin: 0 auto; padding: 26px 22px 90px; }
+  .page { max-width: 1180px; margin: 0 auto; padding: 0 26px 90px; }
   a { color: var(--accent); }
   h1, h2 { margin: 0; font-weight: 600; }
   .crumb { display: flex; justify-content: space-between; align-items: center; margin-bottom: 16px; font-size: 12.5px; }
   .crumb .brand { font-weight: 700; letter-spacing: .08em; text-transform: uppercase; color: var(--ink-3); font-size: 11px; }
 
   /* ─────────── ticket ─────────── */
-  .ticket {
-    background: var(--card); border: 1px solid var(--line); border-radius: 14px;
-    padding: 26px 28px 24px; box-shadow: var(--shadow);
-  }
+  /* A top bar with a hairline under it, not a raised card. The chat below has no
+     box around it, and two different container idioms on one page read as two
+     different apps. */
+  .ticket { padding: 18px 0 22px; border-bottom: 1px solid var(--line-soft); }
   .tk-row1 { display: flex; align-items: center; gap: 12px; margin-bottom: 12px; flex-wrap: wrap; }
   .tk-id {
     display: inline-flex; align-items: center; gap: 7px; font-family: var(--mono);
     font-size: 12px; font-weight: 600; color: var(--ink-2); text-decoration: none;
   }
   .tk-id:hover { color: var(--accent); }
-  .state { font-size: 12px; font-weight: 600; padding: 4px 11px; border-radius: 20px; display: inline-flex; align-items: center; gap: 6px; }
+  .state { font-family: var(--mono); font-size: 10px; letter-spacing: .08em; text-transform: uppercase; font-weight: 500; padding: 4px 11px; border-radius: 20px; display: inline-flex; align-items: center; gap: 6px; }
   .state i { width: 7px; height: 7px; border-radius: 50%; background: currentColor; }
-  .state.s-plan { color: var(--amber); background: var(--amber-bg); }
-  .state.s-run  { color: var(--cyan);  background: var(--cyan-bg); }
-  .state.s-rev  { color: var(--green); background: var(--green-bg); }
+  .state.s-plan { color: var(--amber); background: rgba(245,158,11,.1); }
+  .state.s-run  { color: var(--cyan);  background: rgba(0,212,255,.1); }
+  .state.s-rev  { color: var(--indigo); background: rgba(129,140,248,.12); }
   .tk-meta { margin-left: auto; display: flex; gap: 18px; font-size: 12.5px; color: var(--ink-3); flex-wrap: wrap; }
   .tk-meta b { color: var(--ink-2); font-weight: 500; font-family: var(--mono); }
-  h1.tk-title { font-size: 25px; letter-spacing: -.028em; margin: 0 0 9px; line-height: 1.22; }
-  .tk-desc { font-size: 14.5px; color: var(--ink-2); margin: 0; max-width: 74ch; }
+  h1.tk-title { font-size: 15px; font-weight: 600; letter-spacing: -.01em; margin: 0 0 6px; line-height: 1.35; }
+  .tk-desc { font-size: 12.5px; line-height: 1.6; color: var(--ink-3); margin: 0; max-width: 74ch;
+             max-height: 4.8em; overflow-y: auto; }
 
   /* ─────────── progress track ─────────── */
   .tracker { margin-top: 24px; padding-top: 8px; border-top: 1px solid var(--line-soft); }
@@ -105,11 +106,12 @@
   .tk-labels .now .t { color: var(--cyan); opacity: 1; }
 
   /* ─────────── cards ─────────── */
-  .card { background: var(--card); border: 1px solid var(--line); border-radius: 14px; padding: 20px 22px; box-shadow: var(--shadow); margin-top: 20px; }
-  .card.sunk { background: var(--sunk); box-shadow: none; }
+  .card { padding: 22px 0 0; margin-top: 22px; border-top: 1px solid var(--line-soft); }
+  .card.sunk { background: transparent; }
   .glab {
-    font-size: 11.5px; font-weight: 700; letter-spacing: .07em; text-transform: uppercase;
-    color: var(--ink-3); margin: 0 0 13px; display: flex; align-items: center; gap: 8px;
+    font-family: var(--mono); font-size: 10.5px; font-weight: 400; letter-spacing: .1em;
+    text-transform: uppercase; color: var(--ink-4); margin: 0 0 14px;
+    display: flex; align-items: center; gap: 8px;
   }
   .glab .gn { margin-left: auto; font-family: var(--mono); font-size: 11px; letter-spacing: 0; font-weight: 500; }
   .cols { display: grid; grid-template-columns: 1fr 1.9fr; gap: 18px; align-items: start; }

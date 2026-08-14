@@ -210,7 +210,7 @@ def build_init_prompt(task: Dict, context: str = "", provider: str = "") -> str:
     return "\n\n".join(parts)
 
 
-def build_prompt(task: Dict, context: str = "", provider: str = "") -> str:
+def build_prompt(task: Dict, context: str = "", provider: str = "", mode: str = "") -> str:
     """The planning prompt: what to plan, what is already decided, how to stop.
 
     Assumes the GSD project exists — `plan_in_worktree` guarantees that by running
@@ -224,7 +224,7 @@ def build_prompt(task: Dict, context: str = "", provider: str = "") -> str:
     ]
     if context:
         parts.append(context)
-    parts.append(gsd_backend.plan_step_text(provider or _planning_provider()))
+    parts.append(gsd_backend.plan_step_text(provider or _planning_provider(), mode))
     parts.append(question_protocol())
     parts.append(waiting_protocol())
     parts.append(
@@ -511,7 +511,7 @@ def run_init_stage(worktree: str, task: Dict, context: str = "", provider: str =
             "gsd_ran": ran, "stage": "init"}
 
 
-def run_plan_stage(worktree: str, task: Dict, context: str = "", provider: str = "",
+def run_plan_stage(worktree: str, task: Dict, context: str = "", provider: str = "", mode: str = "",
                    timeout: int = PLAN_TIMEOUT, model: str = "") -> Dict:
     """Plan in `worktree` as its own process. Assumes the GSD project exists."""
     transcript = _transcript_path(task["id"], "plan")
@@ -519,7 +519,7 @@ def run_plan_stage(worktree: str, task: Dict, context: str = "", provider: str =
     # slack absorbs filesystem timestamp granularity.
     since = time.time() - 1
     provider = provider or _planning_provider()
-    run = _run_cli(worktree, build_prompt(task, context, provider), transcript,
+    run = _run_cli(worktree, build_prompt(task, context, provider, mode), transcript,
                    timeout, model, provider=provider, effort=_planning_effort())
 
     if run["failed"]:
@@ -565,7 +565,7 @@ def _configured_model(role: str) -> str:
 
 
 def plan_in_worktree(worktree: str, task: Dict, context: str = "",
-                     model: str = "", provider: str = "") -> Dict:
+                     model: str = "", provider: str = "", mode: str = "") -> Dict:
     """Get from a bare repo to a plan: initialise if needed, then plan.
 
     Two processes with two budgets rather than one. The init stage is skipped
@@ -585,6 +585,6 @@ def plan_in_worktree(worktree: str, task: Dict, context: str = "",
     if init["outcome"] != "initialised":
         return {**init, "stages": stages}
 
-    plan = run_plan_stage(worktree, task, context, provider=provider, model=model)
+    plan = run_plan_stage(worktree, task, context, provider=provider, model=model, mode=mode)
     stages.append(plan)
     return {**plan, "stages": stages}
