@@ -4673,10 +4673,19 @@ Rules:
   text above. If answering needs the code, say exactly that: "I can't read the repo
   from here" and name the file someone should look at. Never explain your inability
   as a scope or permission problem, and never describe what any file contains.
-- If one of the options offered is clearly the right one given what you now know,
-  name it in "recommends" exactly as written. Otherwise leave it empty.
+- If the conversation has actually settled this — the answer follows from what has
+  been established and no judgement is left for a person — put it in "settles" and
+  stop asking. A question you can answer is not a question; asking it anyway trains
+  people to click through, which is how the real ones stop being read.
+- Only leave "settles" empty when a person genuinely has to choose: a purchase they
+  made, a product preference, a tradeoff with no technically correct answer, or
+  something you would need to read the repo to know.
+- Use "recommends" for the weaker case: you lean one way but the call is still theirs.
 
-Respond with ONLY valid JSON: {{"reply": "your answer", "recommends": "one of the options, or \"\""}}"""
+Respond with ONLY valid JSON:
+{{"reply": "your answer",
+  "settles": "the decision, or \"\" if a person must make it",
+  "recommends": "one of the options, or \"\""}}"""
     model = _triage_model_deep()
     result = _parse_gemini_json(call_gemini(prompt, max_tokens=900, model=model))
     reply = (result or {}).get("reply", "").strip()
@@ -4684,10 +4693,20 @@ Respond with ONLY valid JSON: {{"reply": "your answer", "recommends": "one of th
         return None
     # A recommendation only counts when it names an option that exists. The pill it
     # lights up says "the agent suggests this", so it must never be inferred.
-    recommends = str((result or {}).get("recommends", "")).strip()
-    if recommends and recommends not in options:
-        recommends = next((o for o in options if o.lower() == recommends.lower()), "")
-    return {"reply": reply, "model": model, "recommends": recommends}
+    def _match(value: str) -> str:
+        value = str(value or "").strip()
+        if not value or not options:
+            return value
+        if value in options:
+            return value
+        return next((o for o in options if o.lower() == value.lower()), value)
+
+    return {
+        "reply": reply,
+        "model": model,
+        "recommends": _match((result or {}).get("recommends")),
+        "settles": _match((result or {}).get("settles")),
+    }
 
 
 def _decide_delegated(task: dict, question: dict, context: str) -> Optional[Tuple[str, str]]:
@@ -4753,7 +4772,17 @@ def _service_task_questions(task: dict) -> bool:
             question_add_message(q, "research", answer["reply"])
             # Which model said it, so the reader can weigh it.
             q["thread"][-1]["model"] = answer.get("model", "")
-            if answer.get("recommends"):
+            if answer.get("settles"):
+                # It answered its own question, so it records it rather than asking
+                # again. Marked as the agent's call with its reasoning, and takeable
+                # back — the same shape as a delegated decision, because it is one.
+                question_record_answer(q, answer["settles"], by="agent",
+                                      reason=answer["reply"])
+                mc_log_activity(
+                    task_id, "updated",
+                    f"Settled without asking: **{q.get('question', '')}** → "
+                    f"{answer['settles']}\n\n{answer['reply']}")
+            elif answer.get("recommends"):
                 q["recommended"] = answer["recommends"]
             changed = True
             logging.info(f"  Replied in the thread on {q.get('id')} for {task_id[:8]}")

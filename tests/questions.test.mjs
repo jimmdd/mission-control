@@ -194,3 +194,46 @@ test("a settled question stops costing a model call for its old thread", () => {
   ];
   assert.deepEqual(call("awaiting_reply", [qs]).map((x) => x.id), ["open"]);
 });
+
+test("research settles what it can answer, and only asks what it cannot", () => {
+  // A question research can answer is not a question. Asking it anyway trains
+  // people to click through, which is how the real ones stop being read.
+  const program = `
+import json, sys
+sys.path.insert(0, ${JSON.stringify(SWARM)})
+import bridge
+
+state = {"questions": [
+  {"id": "settles", "question": "Which base branch?", "options": ["coda/new-ui", "master"],
+   "thread": [{"role": "you", "text": "apps/new-ui only exists on coda/new-ui"}]},
+  {"id": "asks", "question": "Which font licence did we buy?", "options": ["Host & Link", "Adobe"],
+   "thread": [{"role": "you", "text": "which one?"}]},
+]}
+replies = {
+  "settles": {"reply": "It follows from what you said.", "model": "m", "settles": "coda/new-ui", "recommends": ""},
+  "asks":    {"reply": "Only you know what was purchased.", "model": "m", "settles": "", "recommends": "Host & Link"},
+}
+bridge.mc_request = lambda m, p, body=None: (state if m == "GET" else {})
+bridge.mc_log_activity = lambda *a, **k: None
+bridge._build_triage_context = lambda tid: ""
+bridge._answer_thread = lambda task, q, ctx: replies[q["id"]]
+bridge._decide_delegated = lambda *a, **k: None
+bridge._service_task_questions({"id": "t1", "title": "x"})
+out = {q["id"]: {"answer": q.get("answer"), "by": q.get("answered_by"),
+                 "rec": q.get("recommended"), "reason": bool(q.get("reason"))}
+       for q in state["questions"]}
+print(json.dumps(out))
+`;
+  const r = JSON.parse(execFileSync("python3", ["-c", program], {
+    encoding: "utf8", stdio: ["ignore", "pipe", "ignore"],
+  }));
+
+  // Determinable: recorded, attributed to the agent, with its reasoning kept.
+  assert.equal(r.settles.answer, "coda/new-ui");
+  assert.equal(r.settles.by, "agent");
+  assert.equal(r.settles.reason, true, "why it settled is kept, so it can be argued with");
+
+  // Only a person can answer what was bought — it stays open, with a suggestion.
+  assert.equal(r.asks.answer, null);
+  assert.equal(r.asks.rec, "Host & Link");
+});
