@@ -1049,8 +1049,8 @@ function renderFound(triage, activities) {
     /triaged as ready/i.test(a.message || ""));
   const ranWithNoQuestions = triagedActivity || (!!triage && !(triage.questions || []).length);
   const empty = ranWithNoQuestions
-    ? `<p class="empty">Triage read this and had no questions, so it goes straight to planning —
-       there is nothing here for you to confirm. Its reasoning was not recorded.</p>`
+    ? `<p class="empty">Triage read this and had no questions. Nothing has been created yet —
+       confirm below to branch and start planning.</p>`
     : `<p class="empty">Nothing yet — triage hasn't run.</p>`;
 
   return `<div class="card">
@@ -1588,8 +1588,11 @@ function renderConversation(triage, activeId, side = {}) {
   // thread, but the bridge's confirm path requires every question answered, so a
   // ticket with one set aside cannot be confirmed from here and must not pretend
   // otherwise.
-  const needsConfirm = nothingBlocking && qs.length > 0 && !triage?.confirmed
-    && qs.every(q => q.answer);
+  // A ticket triage had no questions about still needs confirming — that is the
+  // path with no gate at all until now, and the one where nobody was consulted.
+  // Its state exists only because the bridge creates one for exactly this.
+  const needsConfirm = nothingBlocking && !!triage && !triage.confirmed
+    && (qs.length ? qs.every(q => q.answer) : true);
   // Between the last answer and the plan landing there is a real wait — planning
   // took 18 minutes on the run this was built against. The thread says so rather
   // than ending on a rule with nothing under it.

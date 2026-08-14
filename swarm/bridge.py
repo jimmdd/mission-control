@@ -4989,6 +4989,34 @@ def process_answered_followups():
                 logging.warning(f"Resume failed for {task['id'][:8]}: {e}")
 
 
+def _ensure_confirmable(task_id: str, state: Optional[dict]) -> None:
+    """Give a question-less ticket somewhere for `confirmed` to be written.
+
+    Triage passing a ticket as ready persists no triage state at all, so there was
+    no object to confirm and nothing on the page to confirm it with. This writes
+    the minimum: an empty question list, and the reasoning if triage left any, so
+    the judgement that skipped the review is at least recorded.
+
+    Written once — if a state already exists it is left alone, since re-writing it
+    every poll would clobber whatever a human just did to it.
+    """
+    if state and state.get("questions") is not None:
+        return
+    try:
+        mc_request("PUT", f"/api/tasks/{task_id}/triage-state", {
+            **(state or {}),
+            "questions": (state or {}).get("questions") or [],
+            "confirmed": False,
+            "awaiting_confirmation": True,
+        })
+        mc_log_activity(task_id, "new_triage_question",
+                        "Triage had no questions. Confirm on the ticket to create the branch "
+                        "and start planning.")
+        logging.info(f"  {task_id[:8]} had no questions — awaiting confirmation before dispatch")
+    except Exception as e:
+        logging.warning(f"  Could not mark {task_id[:8]} confirmable: {e}")
+
+
 def process_planning_tasks():
     planning_tasks = fetch_tasks_by_status("planning")
     if not planning_tasks:
@@ -5001,7 +5029,20 @@ def process_planning_tasks():
         title = task["title"]
 
         answers = check_for_answers(task_id)
-        if not answers:
+        # A ticket with no questions has no answers, and used to be skipped here
+        # forever. That is not a rare shape: triage passing a ticket as ready posts
+        # none, and a spawn failure returns such a ticket to `planning` — where it
+        # then sat, polled every 60 seconds and skipped every time, while its own
+        # activity log said "will retry on the next cycle". MET-635's demo ticket
+        # wedged exactly that way.
+        #
+        # The gate belongs on "is anything still open", not on "did anyone answer".
+        try:
+            state_probe = mc_request("GET", f"/api/tasks/{task_id}/triage-state")
+        except Exception:
+            state_probe = None
+        has_questions = bool((state_probe or {}).get("questions"))
+        if has_questions and not answers:
             continue
 
         # Skip if we already acted on the CURRENT triage round (avoid re-logging every
@@ -5047,9 +5088,23 @@ def process_planning_tasks():
             if unanswered:
                 logging.info(f"  {task_id[:8]} has {len(unanswered)} unanswered question(s) — waiting")
                 continue
-            if not state.get("confirmed"):
-                logging.info(f"  {task_id[:8]} all answered but not confirmed — waiting for human confirmation")
-                continue
+
+        # Confirmation is required whether or not triage had questions. It used to
+        # live inside the branch above, so the one path with no human gate was the
+        # one where triage was most confident — a ticket it waved through went
+        # straight to a branch, a worktree and a tmux session with nobody asked.
+        # That is also the path that records nothing: `post_planning_questions`
+        # only runs on the not-ready branch, so there is no triage_state, no
+        # reasoning, and no trace of the judgement that skipped the review.
+        #
+        # A ticket with no questions therefore needs its state created here, or
+        # there is nowhere for `confirmed` to be written and the gate can never be
+        # satisfied.
+        if not (state or {}).get("confirmed"):
+            if not state or not state.get("questions"):
+                _ensure_confirmable(task_id, state)
+            logging.info(f"  {task_id[:8]} not confirmed — waiting for human confirmation")
+            continue
 
         logging.info(f"Answers confirmed for: {title} ({task_id[:8]}) — proceeding to spawn agents")
 

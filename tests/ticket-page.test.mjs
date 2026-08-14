@@ -1013,8 +1013,14 @@ test("every ticket is a thread, including one triage had no questions about", ()
   const out = renderConversation({ questions: [], triage_reasoning: "Single file, clear scope." },
     null, { taskStatus: "planning" });
   assert.match(out, /class="stream"/);
-  assert.match(out, /id="say"/, "there is somewhere to type");
   assert.match(out, /Single file, clear scope\./, "and what triage found is in the stream");
+  // Unconfirmed, so the composer is the confirm gate rather than a text box —
+  // there is still somewhere to act, which is the point.
+  assert.match(out, /data-act="confirm"/);
+
+  const confirmed = renderConversation(
+    { questions: [], confirmed: true, triage_reasoning: "Single file." }, null, { taskStatus: "in_progress" });
+  assert.match(confirmed, /id="say"/, "once confirmed there is somewhere to type");
 });
 
 test("triage having no questions reads differently from triage not having run", () => {
@@ -1023,7 +1029,9 @@ test("triage having no questions reads differently from triage not having run", 
   const { renderConversation } = threadHelpers();
   const ran = renderConversation({ questions: [] }, null, {});
   assert.match(ran, /had no questions/);
-  assert.match(ran, /nothing here for you to confirm/);
+  // And it is confirmable: a ticket triage waved through is exactly the one that
+  // used to reach a branch and a worktree with nobody asked.
+  assert.match(ran, /data-act="confirm"/);
 
   const never = renderConversation(null, null, {});
   assert.match(never, /triage hasn't run/);
@@ -1034,7 +1042,6 @@ test("triage having no questions reads differently from triage not having run", 
   const readyNoState = renderConversation(null, null, {
     activities: [{ activity_type: "status_changed", message: "Task triaged as ready (implementation) — assigning to agents" }] });
   assert.match(readyNoState, /had no questions/);
-  assert.match(readyNoState, /reasoning was not recorded/);
 });
 
 // ─────────── attribution and noise in the ticket thread ───────────
