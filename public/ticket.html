@@ -236,6 +236,21 @@
   }
   .cwait i { width: 6px; height: 6px; border-radius: 50%; background: var(--cyan); animation: mcpulse 1.4s ease-in-out infinite; }
 
+  /* A settled question is the record, not the conversation. One line, openable. */
+  .csettled { border-left: 2px solid var(--green); padding-left: 11px; }
+  .csettled > summary {
+    list-style: none; cursor: pointer; display: grid;
+    grid-template-columns: auto 1fr auto; gap: 3px 10px; align-items: baseline;
+  }
+  .csettled > summary::-webkit-details-marker { display: none; }
+  .csettled > summary:hover .cs-q { color: var(--ink); }
+  .cs-tag { font-family: var(--mono); font-size: 10.5px; color: var(--green); }
+  .cs-q { font-size: 12px; line-height: 1.45; color: var(--ink-3); }
+  .cs-a { font-size: 11px; color: var(--green); font-family: var(--mono); white-space: nowrap; }
+  .cs-n { grid-column: 2; font-size: 10.5px; color: var(--ink-4); }
+  .csettled[open] > summary { margin-bottom: 16px; }
+  .cs-body { display: flex; flex-direction: column; gap: 20px; }
+
   /* ─── composer ─── */
   .composer { max-width: 668px; margin: 0 auto; padding-top: 16px; border-top: 1px solid var(--line-soft); }
   .cactive { font-size: 11.5px; color: var(--ink-4); margin-bottom: 10px; }
@@ -762,10 +777,14 @@ function chatTimeline(questions) {
       events.push({ at: q.deferred_at || "", seq, kind: "deferred", q, role: "you" });
     }
   });
-  // Timestamps where we have them; otherwise the order the questions were asked.
-  // Never a bare sort on `at` — an undated event would jump to the top and the
-  // conversation would read out of sequence.
-  return events.sort((a, b) => (a.at || "").localeCompare(b.at || "") || a.seq.localeCompare(b.seq));
+  // Question order first, time only within a question. Sorting on the timestamp
+  // first put every question at the front — they carry no asked_at, and an empty
+  // string sorts before everything — so any reply you typed trailed at the very
+  // bottom, detached from the question it answered and looking like it came from
+  // nowhere. A conversation reads: question, what was said about it, what it
+  // settled; then the next question.
+  return events.sort((a, b) =>
+    a.seq.localeCompare(b.seq) || (a.at || "").localeCompare(b.at || ""));
 }
 
 /**
@@ -908,13 +927,31 @@ function renderConversation(triage, activeId) {
   // dumping all six at once is a form, not a conversation, and it forced the
   // composer to restate which one you were on — the same question twice, once
   // full size and once as a grey line by the box.
-  const upTo = [];
+  // Everything settled, then the one question being answered. Nothing further.
+  // Settled questions collapse to a single line: they are the record, and a record
+  // does not need to occupy the room the live question needs. Open one and the
+  // whole exchange is still there.
+  const groups = new Map();
   for (const ev of chatTimeline(qs)) {
-    if (ev.q.answer || ev.q.deferred || ev.q.id === active?.id) upTo.push(ev);
+    if (!(ev.q.answer || ev.q.deferred || ev.q.id === active?.id)) continue;
+    if (!groups.has(ev.q.id)) groups.set(ev.q.id, { q: ev.q, events: [] });
+    groups.get(ev.q.id).events.push(ev);
   }
   const later = blockingQuestions(qs).filter(q => q.id !== active?.id).length;
-  const stream = upTo.map(renderChatEvent).join("")
-    || `<p class="empty">Triage hasn't asked anything yet.</p>`;
+  const stream = [...groups.values()].map(({ q, events }) => {
+    const inner = events.map(renderChatEvent).join("");
+    if (q.id === active?.id) return inner;
+    const said = events.filter(e => e.kind === "said").length;
+    const outcome = q.answer
+      ? `${esc(String(q.answer).slice(0, 60))}${q.answered_by === "agent" ? " · chosen for you" : ""}`
+      : "set aside";
+    return `<details class="csettled"><summary>
+      <span class="cs-tag">${esc(q.becomes || "—")}</span>
+      <span class="cs-q">${esc(q.question)}</span>
+      <span class="cs-a">${outcome}</span>
+      ${said ? `<span class="cs-n">${said} message${said > 1 ? "s" : ""}</span>` : ""}
+    </summary><div class="cs-body">${inner}</div></details>`;
+  }).join("") || `<p class="empty">Triage hasn't asked anything yet.</p>`;
   return `<div class="convo">
     <div class="chat">
       <div class="chead"><span class="live"><i></i>discuss</span>

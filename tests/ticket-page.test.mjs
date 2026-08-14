@@ -558,3 +558,41 @@ test("the last question says so", () => {
     { id: "a", becomes: "D-01", question: "Which licence?", options: ["Host & Link"] }] }, null);
   assert.match(out, /last one — planning starts when this is settled/);
 });
+
+test("what was said about a question stays with that question", () => {
+  // Sorting on the timestamp first put every question at the front — they carry no
+  // asked_at, and an empty string sorts before everything — so a reply you typed
+  // trailed at the bottom, detached, looking like it came from nowhere.
+  const { chatTimeline } = convoHelpers();
+  const order = chatTimeline([
+    { id: "q1", question: "Which repo?", answer: "the other one", answered_at: "2026-08-13T17:10:00Z",
+      thread: [{ role: "you", text: "there should be a repo on metadao/backend", at: "2026-08-13T17:09:19Z" },
+               { role: "research", text: "then pick the separate repo", at: "2026-08-13T17:09:36Z" }] },
+    { id: "q2", question: "Which font?" },
+  ]).map(e => `${e.q.id}:${e.kind}`);
+
+  assert.deepEqual(order, [
+    "q1:asked", "q1:said", "q1:said", "q1:decided", "q2:asked",
+  ]);
+});
+
+test("a settled question collapses to one line but keeps its exchange", () => {
+  const { renderConversation } = convoHelpers();
+  const out = renderConversation({ questions: [
+    { id: "q1", becomes: "D-01", question: "Which repo?", answer: "the separate one",
+      answered_by: "you", answered_at: "2026-08-13T17:10:00Z",
+      thread: [{ role: "you", text: "there should be a repo on metadao/backend", at: "2026-08-13T17:09:19Z" },
+               { role: "research", text: "then pick the separate repo", at: "2026-08-13T17:09:36Z" }] },
+    { id: "q2", becomes: "D-02", question: "Which font?", options: ["Variable"] },
+  ] }, null);
+
+  // Collapsed: the outcome is on the summary line, so the record reads at a glance.
+  assert.match(out, /<details class="csettled">/);
+  assert.match(out, /class="cs-a">the separate one/);
+  assert.match(out, /2 messages/);
+  // But nothing is thrown away — the exchange is inside.
+  assert.match(out, /there should be a repo on metadao\/backend/);
+  // The live question is not collapsed.
+  assert.doesNotMatch(out.split("Which font?")[1] || "", /csettled/);
+  assert.equal((out.match(/<details class="csettled">/g) || []).length, 1);
+});
