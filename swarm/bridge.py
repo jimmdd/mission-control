@@ -30,6 +30,7 @@ from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 
 import process_level
+import gsd_plan_import
 
 from planner import (
     generate_plan, save_plan, init_progress, load_progress,
@@ -3258,6 +3259,20 @@ def route_plan_stage_outcome(task: dict, verdict: dict) -> bool:
         mc_log_activity(task_id, "plan_created",
                         f"Planning wrote {verdict.get('plan_path')} "
                         f"in {verdict.get('duration_s')}s.")
+        # Translate it into the shape the ticket page draws. Without this the page
+        # reads `bridge/plans/<id>.json`, finds nothing, and reports "no plan yet"
+        # about a ticket with ten planned steps sitting on disk.
+        try:
+            files = [Path(p) for p in (verdict.get("plan_files") or [])]
+            if not files and verdict.get("plan_path"):
+                files = [Path(verdict["plan_path"])]
+            imported = gsd_plan_import.write_mc_plan(MC_HOME, task_id, files)
+            if imported:
+                logging.info(f"  Imported GSD plan for the board: {imported}")
+        except Exception as e:
+            # A plan that cannot be drawn is still a plan — never fail the run
+            # over its picture.
+            logging.warning(f"  Could not import the plan for display: {e}")
         return True
 
     if outcome == "questions_raised":

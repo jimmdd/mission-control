@@ -339,7 +339,11 @@ def classify(worktree: str, output: str, returncode: Optional[int],
     plan_path = find_plan(worktree, since=since)
     if plan_path:
         return {"outcome": "plan_written", "plan_path": str(plan_path),
-                "questions": [], "reason": f"plan at {plan_path}"}
+                "questions": [], "reason": f"plan at {plan_path}",
+                # Every plan file in the same directory, not just the first match:
+                # GSD writes one per wave, and a map drawn from one of four waves
+                # is a wrong map rather than a partial one.
+                "plan_files": [str(p) for p in sorted(plan_path.parent.glob("*PLAN.md"))]}
 
     questions = parse_questions(output)
     if questions:
