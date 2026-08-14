@@ -1,7 +1,7 @@
 # Handoff — Mission Control v2, spec-driven execution
 
-Sessions of 2026-08-11/12. Branch `feat/deterministic-verification`, **39 commits, 177 tests
-green, `tsc` clean, nothing pushed anywhere.**
+Sessions of 2026-08-11 → 08-14. Branch `feat/deterministic-verification`, **71 commits, 247 tests
+green, `tsc` clean, nothing pushed anywhere — and the user has asked that it stay that way.**
 
 Read `~/.claude/plans/kind-mixing-pixel.md` for the original plan. This document covers what
 actually happened, which diverged in the ways that matter.
@@ -14,22 +14,28 @@ The thesis is that GSD decomposes work into tasks small enough that a cheaper mo
 them correctly, so the strongest model goes on planning and execution parallelises across
 pools. Phase 0 exists to test that. **It has still never been tested**, because two things had
 to be true first and neither was: verification had to be trustworthy, and GSD had to actually
-run. The gate blocker is now fixed at the root — it was a worktree with no environment, not a
-broken base commit — so the one remaining unknown is whether the `/gsd-new-project` fix makes
-GSD produce a plan. That rerun has not happened.
+run. **Both are now true and both were verified by running them.** GSD produces plans; the gate
+passes on unmodified code. What has never run is the half after planning — execute, verify,
+review — so Phase 0 is still untaken, but for the first time nothing upstream is blocking it.
 
 ## State right now
 
-- Daemon **off**, no agents running, no worktrees, nothing pushed.
-- MC server on `http://127.0.0.1:18900` (restart with `npm start`).
-- Ticket MET-635 = task `34581c3d-9abc-4993-9974-05fe066146b1`, status `in_progress`,
-  step 1 `blocked`, 9/9 questions answered. The font-licence follow-up was answered
-  **Adobe Fonts — switch to a Web Project (use.typekit.net) and remove the committed
-  binaries**, which is the decision the font work needs. Nothing acted on that answer at the
-  time; `process_answered_followups` is what now would, but the daemon is off.
-- `~/GitProjects/metadao/backend-phase0` — clone with **push URL `DISABLED://phase0-no-push`**.
-  Verified: `git push` fails. Delete it when done (ask first).
-- `no_pr: true` in local `swarm-config.json`, so agents are told not to push or open PRs.
+- Daemon **running** (`python3 swarm/bridge.py --daemon --interval 60`), MC server on
+  `http://127.0.0.1:18900`. Agent registry empty; concurrency is memory-gated, currently unlimited.
+- Ticket MET-635 = `34581c3d-9abc-4993-9974-05fe066146b1`, **re-triaged from scratch**, status
+  `planning`, **1 of 6 questions answered**. Its plan and progress were archived on reset.
+- **Triage picked the wrong repo** — `metadao/metadao-frontend-v2`, which has no `coda/new-ui`
+  branch. Question 1 asks about exactly that and is unanswered. Do not read anything downstream
+  of it as sound until that is settled.
+- The font question is settled in fact if not on the ticket: **Dalton Maag "Host & Link"**, which
+  licenses self-hosting. `~/Downloads/HostLink_AktivGroteskVF_Wght`. Serve
+  `WebVariableFonts/Basic/AktivGroteskVF_W_Basic_Wght.woff2` (132 KB, whole 100–900 axis) from
+  `apps/new-ui/static/fonts/`. Subsetting is permitted; a **cross-origin header is required** by
+  §02.02, and the page-impression cap is on the invoice, not in the PDF.
+- Worktrees under `~/GitProjects/metadao/worktrees/`: `planstage-v2` (full phase run),
+  `planstage-quick` (the comparison). Both disposable — ask before deleting.
+- `~/GitProjects/metadao/backend-phase0` — clone with push URL `DISABLED://phase0-no-push`.
+- `no_pr: true` in local `swarm-config.json`.
 
 ## What was built
 
@@ -69,9 +75,13 @@ per role via `{role}_provider`. OpenRouter fallback explicitly disabled — it c
 | Six local clones of one upstream | Repo selection non-deterministic on identical input |
 | **the `gsd:` colon command form** | **GSD had never run through MC on this install** |
 
-## The two live blockers
+## The blockers that were live, and how they went
 
-### 1. GSD does not produce a plan
+### 1. GSD does not produce a plan — **resolved**
+
+Both causes below were real and both are fixed; a run on 2026-08-13 returned
+`plan_written` with six plans and 19 `<task>` blocks. Kept because the diagnosis
+took two sessions and is worth not repeating.
 
 Chain of causes, each verified rather than assumed:
 
@@ -85,7 +95,9 @@ Chain of causes, each verified rather than assumed:
    project — it stops and asks for `/gsd-new-project`. MC only offered that for repos it judged
    *greenfield*, so an established repo with no GSD project had no branch. Fixed via
    `plan_step_text()`, which now tells the agent to check for `.planning/` and initialise first.
-3. **Unverified:** whether step 2's fix works. That rerun has not happened.
+3. Verified 2026-08-13: the rerun produced `.planning/` and plans. A third fault sat behind
+   them — `find_plan` globbed `PLAN.md` while GSD writes `01-01-PLAN.md`, so the first
+   successful run would have been reported as a failure.
 
 Ruled out along the way, so do not re-investigate: skills **are** invocable from
 `claude -p --dangerously-skip-permissions` (tested, returned `SKILL_RAN`), and the target repo
@@ -120,16 +132,139 @@ failures re-probed after 15 minutes so a repaired gate recovers on its own).
 
 ## Next, in order
 
-1. **Re-run step 1** to verify the `/gsd-new-project` fix produces `.planning/` with a
-   `PLAN.md` containing `<task>` blocks. Dispatch into `backend-phase0`; watch for `.planning/`.
-   This is now the only thing between here and Phase 0.
-2. **Call the plan stage.** `swarm/plan_stage.py` and `route_plan_stage_outcome` are built and
-   tested; what is not decided is where the stage runs relative to `_spawn_for_repos`, because
-   that depends on what the rerun shows. Do it with the rerun, not before it.
-3. Then Phase 0 proper, per `docs/phase-0-measurement.md`.
+1. **Give research file access.** It answers from context only and invents
+   explanations for what it cannot see. Everything else about research is now good;
+   this is the gap. It should run in the target worktree with tools, like the plan
+   stage already does.
+2. **The confirm card (design 3d).** Dispatch creates branch, worktree and tmux with
+   no confirmation — on a ticket where triage picked the wrong repo. The design says
+   "confirm → dispatch is the only write" precisely to catch that.
+3. **Nothing advances to phase 2.** GSD plans one phase; MC calls `plan_in_worktree`
+   once and dispatches. A 3-phase roadmap silently never finishes, and the work would
+   look complete at a third done. Related and undecided: MC's step plan and GSD's
+   phase plan are two different decompositions with nothing reconciling them.
+4. **Run the execution half.** `/gsd-execute-phase`, verify, review — never run
+   through MC, ever. Everything this branch fixed is upstream of it.
+5. Then Phase 0 proper, per `docs/phase-0-measurement.md`.
 
-The daemon is off in the current state, so nothing polls at all — turn it on before expecting
-any of the loops below to fire.
+## The design, and what is left of it
+
+`~/Downloads/Mission control ticketing UI.zip` — handoff with a README of specs and
+an HTML reference. Built: **2b, the triage chat**, onto `public/ticket.html`, using
+the dashboard's dark tokens where amber means only "a human is the blocker".
+
+Not built, and each lives somewhere different:
+
+- **3a–3d intake** (describe → draft → scope → questions → confirm) is a new
+  pre-ticket surface, 620px chat frames.
+- **1a attention inbox / Needs you** is the general view — `public/index.html` and
+  `app.js`, not the ticket page.
+- **4a Running / Review** is the ticket page, replacing the plan-map area.
+- The 206px thread rail from 2b is cross-ticket navigation; it belongs on the
+  dashboard.
+
+The user's verdict on the current chat: closer, still not right.
+
+## Session of 2026-08-13/14
+
+**GSD works end to end.** `plan_written` on MET-635: init 5.5 min, plan 38 min, six
+plans, 19 `<task>` blocks. That was the thing that had never happened.
+
+### The measurement that changed everything
+
+Planning cost is `turns × accumulated context`, and output is a rounding error.
+From the transcript, per-turn (rollup events excluded — including them inflated an
+earlier figure to 386M, which was wrong):
+
+| | |
+|---|---:|
+| turns | 1,365 |
+| context re-read | 237 M |
+| avg context per turn | 173 K |
+| output | 101 K |
+
+Context grows 90 K → 228 K per turn as the orchestrator accumulates every file it
+reads. **485 turns were `echo pN` idle polls**, each described by the model as
+"idle", ~200 K apiece: GSD backgrounds its planner and tells the orchestrator to
+"repeat gsd_stall_watch while waiting", and on Claude Code every repeat is a turn.
+
+Two fixes came out of it, both measured:
+
+- **The waiting protocol** — the prompt now says to block inside one shell command
+  and names `echo p1` as the failure, because the model invented it.
+- **`/gsd-quick` is now the default door.** Same ticket, same start state:
+  **155 turns vs 1,365, 7.4 M context vs 237 M, 18.6 min vs 38 — and an identical
+  19-task decomposition.** `/gsd-plan-phase` runs ~20 project-phase gates (threat
+  model, Nyquist artifacts, API-surface regeneration) that one ticket never needed.
+  A ticket can name another door via `plan_mode` in its triage state; that outranks
+  the default, and a typo falls back rather than failing.
+
+**GSD is a thick meta-prompt system, not a thin one.** `plan-phase` is 2,005 lines
+defining ~20 self-run steps and only 6 delegations. MC's own contribution is 25
+lines. We were never the bottleneck — we picked the wrong entry point.
+
+### Planning is a contract, not a Claude feature
+
+`plan_in_worktree` takes a provider. GSD ships as Claude Code skills, so
+`/gsd-plan-phase` resolves nowhere else — but its workflows are markdown, so a
+runtime without the skill is handed the document and told to write the same
+artefacts to the same paths. If the document is missing it stops rather than
+improvising, because a plausible plan that is not GSD's decomposition would corrupt
+Phase 0. The verdict never reads the transcript (`find_plan` looks at disk), so a
+plan written by codex counts exactly as much as one written by claude.
+
+`codex` is installed; **the Gemini CLI is not**, so Gemini is only reachable via the
+API path that predates the keyless move.
+
+### The question layer, rebuilt as one conversation
+
+The card layout put a text box on every question down a list that re-rendered on a
+timer. It is one stream now, with a decision rail beside it. Clicking decides,
+typing talks. Settled questions collapse to a line carrying their outcome.
+
+**Research changed shape twice.** It now settles what it can answer — a question
+research can answer is not a question — recording it as the agent's call with its
+reasoning, takeable back. It only stays open when a person must choose. Weaker
+cases become a `recommends` that lights one pill, labelled "still your call".
+
+**Research cannot read files.** `_answer_thread` is a bare LLM call: no cwd, no
+tools. Asked to check whether a `/brand` route existed it invented a scope
+restriction rather than saying so. It is now told plainly it cannot read files —
+but **giving it real repo access is the highest-value thing left undone.** A cheap
+model that can read beats an expensive one that cannot, on exactly the questions
+research should be best at. Research runs `claude-opus-5`; triage runs
+`claude-sonnet-5`; each reply records which.
+
+### Bugs found by looking, not by testing
+
+Every one of these was found by the user opening the page, not by the suite:
+
+| | |
+|---|---|
+| `find_plan` globbed `PLAN.md`; GSD writes `01-01-PLAN.md` | the first successful run in this project's history would have been filed as a failure |
+| Each planner question rendered twice; two elements shared `id="submit"` | the second card's button was wired to nothing |
+| The poll wiped what you were typing, and listeners restacked every render | ten polls in, ten handlers per keystroke |
+| Draft restore put sent text straight back | a sent message read as though it had failed |
+| `load()` still called `renderQuestions` after it was deleted | page dead on arrival while 230 tests passed |
+| Timestamp-first sort detached replies from their question | a message you typed floated at the bottom, from nowhere |
+| Settled questions still offered clickable option pills | answer something already decided |
+| `option[0]` marked "recommended" | attributed a suggestion to the agent it never made |
+
+There is now a test that drives `load()` against a stubbed DOM — the gap that let
+the dead page through. **The UI is still not covered by anything that exercises real
+interaction** (focus, timers, typing); that is where the next one hides.
+
+### Also fixed
+
+- **Reset now archives the plan.** A kicked-back ticket kept its plan on disk, and
+  the progress file still said `in_progress` with pending steps — enough for the
+  daemon to dispatch agents against a discarded plan for a ticket in the inbox.
+- **Concurrency is memory, not a count.** Three registry entries claimed `running`
+  with no process behind them and held three of four slots; a reaper releases them
+  now, recording `agent_reaped`. Below 90% memory there is no limit at all.
+- **Planning runs out of process**, so one task's planning no longer freezes the
+  whole poll loop for up to an hour.
+- The gate check moved onto the dispatch path, so retries are covered too.
 
 ## Done since (session of 2026-08-12)
 
@@ -214,6 +349,12 @@ envelope + async approvals).
 | | |
 |---|---|
 | Question shape, exits, merging | `swarm/questions.py` |
+| GSD entry points, plan modes | `swarm/gsd_backend.py` → `PLAN_MODES`, `plan_mode()` |
+| Planning stages, providers, waiting protocol | `swarm/plan_stage.py` |
+| Planning out of process | `swarm/plan_stage_runner.py`, `bridge._start_planning_job` |
+| Memory ceiling, agent reaping | `swarm/resources.py`, `bridge.reap_dead_agents` |
+| The conversation UI | `public/ticket.html` (pure renderers above `// ---- BOOTSTRAP ----`) |
+| Design handoff | `~/Downloads/Mission control ticketing UI.zip` |
 | Staged planning + verdicts | `swarm/plan_stage.py`, `bridge.route_plan_stage_outcome` |
 | Worktree env + dep seeding | `swarm/worktree_env.py` |
 | Question threads, delegation, resume | `swarm/bridge.py` → `process_open_questions`, `process_answered_followups` |
