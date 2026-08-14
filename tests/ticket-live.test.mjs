@@ -156,3 +156,28 @@ test("load builds the page without calling anything that no longer exists", asyn
   assert.match(html, /Which licence\?/, "the question reached the page");
   assert.match(html, /id="say"/, "and so did the composer");
 });
+
+// The page replaced all of #root every fifteen seconds whether or not anything had
+// changed, and forced the stream to the bottom on every render — so it moved under
+// whoever was reading it, folded away anything they had opened, and lost their place.
+
+test("a poll that changes nothing does not touch the DOM", () => {
+  assert.match(HTML, /const key = JSON\.stringify\(/);
+  assert.match(HTML, /if \(!force && key === lastRenderKey\) return;/);
+  // Forced loads still render: they follow an action that changed something.
+  const idx = HTML.indexOf("key === lastRenderKey");
+  assert.ok(HTML.slice(idx - 200, idx).includes("force"), "the guard is skipped when forced");
+});
+
+test("the stream follows the conversation only for someone already at the bottom", () => {
+  // Yanking a reader back to the newest message on every poll is how the page ends
+  // up moving under them.
+  assert.match(HTML, /if \(!keptScroll \|\| keptScroll\.atBottom\) stream\.scrollTop = stream\.scrollHeight;/);
+  assert.match(HTML, /else stream\.scrollTop = keptScroll\.top;/);
+  assert.match(HTML, /atBottom: streamEl\.scrollHeight - streamEl\.scrollTop - streamEl\.clientHeight < 40/);
+});
+
+test("a group the reader opened stays open across a render", () => {
+  assert.match(HTML, /details\.csettled\[open\]/);
+  assert.match(HTML, /setAttribute\("open", ""\)/);
+});

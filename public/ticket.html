@@ -1016,6 +1016,8 @@ function wireQuestionActions() {
 // Which question the composer points at. Held outside the render so a poll cannot
 // move it under someone mid-sentence.
 let focusedQuestion = null;
+// What the last render was built from, so an unchanged poll is a no-op.
+let lastRenderKey = null;
 
 /**
  * The composer, the option buttons, and focusing a question from the panel.
@@ -1024,9 +1026,20 @@ let focusedQuestion = null;
  * question outright, while anything typed is a message in the conversation unless
  * you deliberately press Answer.
  */
-function wireConversation(triage) {
+function wireConversation(triage, keptScroll = null, openGroups = []) {
+  // Re-open whatever the reader had expanded; a poll should not fold their place away.
+  for (const id of openGroups) {
+    document.querySelector(`[data-for="${CSS.escape(id)}"]`)?.closest("details.csettled")
+      ?.setAttribute("open", "");
+  }
   const stream = $("#stream");
-  if (stream) stream.scrollTop = stream.scrollHeight;
+  if (stream) {
+    // Follow the conversation only for someone already at the bottom of it.
+    // Yanking a reader back to the newest message every fifteen seconds is how
+    // the page ends up moving under them.
+    if (!keptScroll || keptScroll.atBottom) stream.scrollTop = stream.scrollHeight;
+    else stream.scrollTop = keptScroll.top;
+  }
 
   const say = $("#say");
   const composer = document.querySelector("[data-active]");
@@ -1143,6 +1156,21 @@ async function load({ force = false } = {}) {
     const triage = parseTriage(task);
     const qs = (triage?.questions || []);
 
+    // A poll that changes nothing must not touch the DOM. Replacing #root resets
+    // the stream's scroll, re-collapses every open group and moves the page under
+    // whoever is reading it — fifteen seconds later, again.
+    const key = JSON.stringify([task.status, task.updated_at, triage, planData.progress, focusedQuestion]);
+    if (!force && key === lastRenderKey) return;
+    lastRenderKey = key;
+
+    // What to put back after the swap.
+    const streamEl = $("#stream");
+    const keptScroll = streamEl
+      ? { top: streamEl.scrollTop, atBottom: streamEl.scrollHeight - streamEl.scrollTop - streamEl.clientHeight < 40 }
+      : null;
+    const openGroups = [...document.querySelectorAll("details.csettled[open]")]
+      .map(d => d.querySelector("[data-for]")?.dataset.for).filter(Boolean);
+
     // One conversation, then the plan. What triage found only stands alone before
     // it has asked anything — after that it is in the stream with everything else.
     root.innerHTML = renderTicket(task, triage, activities)
@@ -1150,7 +1178,7 @@ async function load({ force = false } = {}) {
       + renderPlan(planData.plan, planData.progress, triage);
 
     restoreDrafts(drafts);
-    if (qs.length) wireConversation(triage);
+    if (qs.length) wireConversation(triage, keptScroll, openGroups);
     wireGraph(planData.plan, planData.progress);
   } catch (e) {
     root.innerHTML = `<div class="err">Couldn't load this ticket: ${esc(e.message || e)}</div>`;
