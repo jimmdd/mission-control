@@ -453,7 +453,7 @@ test("everything the agent asked and everything said back is one stream", () => 
   assert.match(out, /Adobe forbids self-hosting/, "why it is asked travels with the question");
   assert.match(out, /what changes between them/, "your message is in the same stream");
   assert.match(out, /CORP header/, "and so is the reply");
-  assert.match(out, /Recorded as D-03/, "so is a decision the agent made");
+  assert.match(out, /Recorded as <b>D-03<\/b>/, "so is a decision the agent made");
   assert.match(out, /set aside — not blocking planning/, "and one you set aside");
   // One composer for the whole conversation, not one box per question.
   assert.equal((out.match(/class="composer/g) || []).length, 1);
@@ -666,4 +666,143 @@ test("a settled question stops offering its options", () => {
   assert.equal((out.match(/class="cpills"/g) || []).length, 1, "only the live question offers options");
   assert.doesNotMatch(out, /data-answer="Adobe"/, "the settled one offers nothing");
   assert.match(out, /data-answer="Variable"/);
+});
+
+// ─────────── the thread after triage settles (design 2c) ───────────
+// The same thread keeps going: no new screen and no "submit". The plan arrives as
+// a message, because that is when it arrives, and the decisions it was built from
+// are three lines above it.
+
+function threadHelpers() {
+  const html = readFileSync(new URL("../public/ticket.html", import.meta.url), "utf8");
+  const body = /<script>([\s\S]*)<\/script>/.exec(html)[1].split("// ---- BOOTSTRAP ----")[0];
+  const shim = `
+    const document = { querySelector: () => null, querySelectorAll: () => [], addEventListener: () => {} };
+    const location = { search: "" };
+    class URLSearchParams { get() { return "x"; } }
+  `;
+  return new Function(`${shim}\n${body}\nreturn { renderConversation, renderPlanCard, renderTicket, brief, runStatus, renderRail };`)();
+}
+
+const SETTLED = [
+  { id: "a", becomes: "D-01", question: "Which cursor column?", answer: "created_at",
+    answered_by: "you", answered_at: "2026-08-13T17:12:00Z" },
+  { id: "b", becomes: "D-02", question: "Default page size?", answer: "50",
+    answered_by: "agent", reason: "the list renders 20", answered_at: "2026-08-13T17:10:00Z" },
+];
+const PLAN = {
+  steps: [{ step: 1, title: "Cursor query in src/db.ts" }, { step: 2, title: "Endpoint accepts ?cursor" },
+          { step: 3, title: "Board consumes pages" }, { step: 4, title: "Update board tests" }],
+  parallel_groups: [[1, 2], [3, 4]],
+};
+const PROGRESS = { steps: { 1: { status: "completed" }, 2: { status: "completed" },
+                            3: { status: "in_progress" }, 4: { status: "pending" } } };
+
+test("with the questions settled the thread marks the moment and keeps going", () => {
+  const { renderConversation } = threadHelpers();
+  const out = renderConversation({ questions: SETTLED }, null, { plan: PLAN, progress: PROGRESS });
+  assert.match(out, /TRIAGE SETTLED/, "the rule says where triage ended");
+  assert.match(out, /class="pcard"/, "and the plan lands under it, in the same stream");
+  // Nothing is waiting, so the composer reports rather than asks.
+  assert.match(out, /Nothing is waiting on you/);
+  assert.doesNotMatch(out, /data-send="answer"/);
+});
+
+test("the mark is not drawn before there is anything to mark", () => {
+  const { renderConversation } = threadHelpers();
+  const open = renderConversation({ questions: [{ id: "a", becomes: "D-01", question: "Which repo?" }] }, null);
+  assert.doesNotMatch(open, /TRIAGE SETTLED/, "one open question means triage has not settled");
+  assert.doesNotMatch(open, /class="pcard"/, "and there is no plan to show");
+});
+
+test("the plan card reads its state off progress, not off the ticket status", () => {
+  const { renderPlanCard } = threadHelpers();
+  const out = renderPlanCard(PLAN, PROGRESS, SETTLED);
+  assert.match(out, /4 steps, 2 waves/);
+  assert.match(out, /Step 3 is running/, "what is actually running, not what the status claims");
+  assert.match(out, /class="prow done"[\s\S]*Cursor query/);
+  assert.match(out, /class="prow run"[\s\S]*Board consumes pages/);
+  assert.match(out, /wave 2/, "a step not yet dispatched says which wave it is in");
+  // The decisions it was built from, named — but not claimed to be cited, which is
+  // a statement about a document nobody here has read.
+  assert.match(out, /from D-01 · D-02/);
+  assert.doesNotMatch(out, /cites/);
+});
+
+test("a plan with no steps produces no card at all", () => {
+  const { renderPlanCard } = threadHelpers();
+  assert.equal(renderPlanCard(null, null, SETTLED), "");
+  assert.equal(renderPlanCard({ steps: [] }, null, SETTLED), "");
+});
+
+test("the footer says what is happening, counted rather than asserted", () => {
+  const { runStatus } = threadHelpers();
+  assert.match(runStatus({}, PLAN, PROGRESS), /2 of 4 done, 1 running/);
+  assert.match(runStatus({}, PLAN, { steps: { 1: { status: "blocked" } } }), /1 step stopped/);
+  assert.match(runStatus({}, PLAN, { steps: {} }), /nothing running/);
+  assert.match(runStatus({}, null, null), /planning starts when the questions are settled/);
+});
+
+// ─────────── the brief (design 2b, revised) ───────────
+// A Linear description arrives with its attachment URLs inline — MET-635's are 140
+// characters each — and rendered raw they were four lines of signed query string
+// above the conversation the page exists for.
+
+test("the brief is prose, and the attachments are counted rather than printed", () => {
+  const { brief } = threadHelpers();
+  const b = brief("base-branch: coda/new-ui\ntarget app: `apps/new-ui`\n"
+    + "Apply the [brand guidelines](https://app.paper.design/file/01KYD?x=1) using the "
+    + "attached <https://uploads.linear.app/f029a4b7-dfc2-4af1-900a-ca31b97ff707/b1f34867.zip>.");
+  assert.match(b.lead, /Apply the brand guidelines using the attached/, "the words survive, the urls do not");
+  assert.doesNotMatch(b.lead, /https?:/);
+  assert.equal(b.attachments, 2);
+  // The two lines the meta row repeats verbatim are not repeated in the brief.
+  assert.doesNotMatch(b.lead, /coda\/new-ui/);
+  assert.doesNotMatch(b.lead, /apps\/new-ui/);
+});
+
+test("the brief collapses to one line with the whole thing behind a toggle", () => {
+  const html = readFileSync(new URL("../public/ticket.html", import.meta.url), "utf8");
+  assert.match(html, /\.tk-brief \.lead \{[^}]*white-space: nowrap;/s);
+  const { renderTicket } = threadHelpers();
+  const out = renderTicket({ id: "t1", title: "T", status: "planning", created_at: "2026-08-11T10:00:00Z",
+    updated_at: "2026-08-13T10:00:00Z", description: "A line.\nAnother line." }, { questions: SETTLED }, []);
+  assert.match(out, /▾ description/);
+  assert.match(out, /data-fulldesc hidden/, "the rest is present and closed, not thrown away");
+});
+
+test("a leg the ticket has not reached carries no date", () => {
+  // The activity patterns are loose on purpose — "review" appears in plenty of
+  // messages — so legs ahead of the current one were picking up a stamp and
+  // claiming the ticket had already been there.
+  const { renderTicket } = threadHelpers();
+  const out = renderTicket(
+    { id: "t1", title: "T", status: "planning", created_at: "2026-08-11T10:00:00Z", updated_at: "2026-08-13T10:00:00Z" },
+    null,
+    [{ activity_type: "review", message: "Review found blocking issues", created_at: "2026-08-12T10:00:00Z" }]);
+  const after = out.slice(out.indexOf(">Review<"));
+  assert.doesNotMatch(after, /class="t"/, "Review is ahead of Triage, so it is undated");
+});
+
+test("the count turns green only when nothing is blocking", () => {
+  const { renderTicket } = threadHelpers();
+  const base = { id: "t1", title: "T", status: "planning", created_at: "2026-08-11T10:00:00Z", updated_at: "2026-08-13T10:00:00Z" };
+  assert.match(renderTicket(base, { questions: SETTLED }, []), /class="tk-count set">2 of 2 settled/);
+  assert.match(renderTicket(base, { questions: [...SETTLED, { id: "c", question: "open?" }] }, []),
+    /class="tk-count ">2 of 3 settled/);
+});
+
+test("the rail's segments follow the steps once there is a plan", () => {
+  // Before it they are the questions, because that is the only progress triage has.
+  const { renderRail } = threadHelpers();
+  const task = { id: "t1", title: "T", status: "in_progress", updated_at: "2026-08-13T10:00:00Z", external_id: "MC-146" };
+  const building = renderRail([task], task, { questions: SETTLED }, { plan: PLAN, progress: PROGRESS });
+  assert.match(building, /class="dim">step<\/span>/);
+  assert.match(building, /class="n">2\/4</);
+  assert.match(building, /class="rt on build"/, "past triage the ticket is the agent's, not yours");
+
+  const triaging = renderRail([{ ...task, status: "planning" }], { ...task, status: "planning" },
+    { questions: SETTLED }, {});
+  assert.match(triaging, /class="dim">triage<\/span>/);
+  assert.match(triaging, /class="n">2\/2</);
 });

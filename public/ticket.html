@@ -46,76 +46,152 @@
     font-family: var(--ui); font-size: 13.5px; line-height: 1.55;
     -webkit-font-smoothing: antialiased;
   }
-  .page { max-width: 1180px; margin: 0 auto; padding: 0 26px 90px; }
   a { color: var(--accent); }
   h1, h2 { margin: 0; font-weight: 600; }
-  .crumb { display: flex; justify-content: space-between; align-items: center; margin-bottom: 16px; font-size: 12.5px; }
-  .crumb .brand { font-weight: 700; letter-spacing: .08em; text-transform: uppercase; color: var(--ink-3); font-size: 11px; }
 
-  /* ─────────── ticket ─────────── */
-  /* A top bar with a hairline under it, not a raised card. The chat below has no
-     box around it, and two different container idioms on one page read as two
-     different apps. */
-  .ticket { padding: 18px 0 22px; border-bottom: 1px solid var(--line-soft); }
-  .tk-row1 { display: flex; align-items: center; gap: 12px; margin-bottom: 12px; flex-wrap: wrap; }
-  .tk-id {
-    display: inline-flex; align-items: center; gap: 7px; font-family: var(--mono);
-    font-size: 12px; font-weight: 600; color: var(--ink-2); text-decoration: none;
+  /* ─────────── the shell (design 2b) ─────────── */
+  /* Three columns, full height, one scroller: the ticket rail on the left, the
+     conversation in the middle, the record on the right. Laid out as a grid rather
+     than nested boxes so the two rails run the full height beside a header that
+     belongs only to the middle column — and so every part stays a flat sibling
+     that renders on its own. */
+  #root { height: 100dvh; }
+  .shell {
+    display: grid; height: 100dvh;
+    grid-template-columns: 206px minmax(0, 1fr) 224px;
+    grid-template-rows: auto minmax(0, 1fr);
   }
+  .rail      { grid-column: 1; grid-row: 1 / 3; border-right: 1px solid var(--line-soft); min-height: 0; }
+  .ticket    { grid-column: 2; grid-row: 1; min-width: 0; }
+  .convo     { grid-column: 2; grid-row: 2; min-width: 0; min-height: 0; }
+  .decisions { grid-column: 3; grid-row: 1 / 3; border-left: 1px solid var(--line-soft); min-height: 0; }
+  /* Below the rails' width the page stops being an app shell and becomes a
+     document: one column, ordinary scroll, nothing overlapping. */
+  @media (max-width: 1080px) {
+    #root, .shell { height: auto; display: block; }
+    .rail, .decisions { border: none; }
+    .rail { display: none; }
+  }
+
+  /* ─────────── the ticket rail ─────────── */
+  /* Cross-ticket navigation. It is on the ticket page because the question you are
+     answering here is regularly "what else is waiting on me" — and the answer
+     should not cost a trip back to the board. */
+  .rail { display: flex; flex-direction: column; padding: 20px 0; overflow-y: auto; }
+  .rail .brand {
+    padding: 0 18px 20px; font-family: var(--mono); font-size: 11px; font-weight: 700;
+    letter-spacing: .16em; color: var(--ink); text-decoration: none;
+  }
+  .rgroup {
+    padding: 14px 18px 12px; font-family: var(--mono); font-size: 9.5px;
+    letter-spacing: .14em; color: rgba(255,255,255,.3);
+  }
+  .rgroup:first-of-type { padding-top: 0; }
+  .rlist { display: flex; flex-direction: column; gap: 2px; padding: 0 8px; }
+  .rt { display: block; padding: 10px 11px; border-radius: 6px; text-decoration: none; color: inherit;
+        border-left: 2px solid transparent; }
+  .rt:hover { background: rgba(255,255,255,.03); }
+  .rt.on { background: rgba(255,255,255,.055); border-left-color: var(--cyan); }
+  .rt.on.build { border-left-color: var(--green); }
+  .rt-top { display: flex; gap: 8px; font-family: var(--mono); font-size: 9.5px; color: rgba(224,224,224,.38); margin-bottom: 5px; }
+  .rt.on .rt-top { color: rgba(224,224,224,.42); }
+  .rt-badge { margin-left: auto; }
+  .rt-badge.q { color: var(--amber); }
+  .rt-badge.now { color: var(--cyan); }
+  .rt-badge.ok { color: var(--green); }
+  .rt-title { font-size: 11.5px; line-height: 1.4; color: rgba(224,224,224,.68);
+              display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; }
+  .rt.on .rt-title { color: #f4f4f6; }
+  /* The active ticket carries its own state, because that is the one you are in. */
+  .rt-live { margin-top: 9px; padding-top: 9px; border-top: 1px solid rgba(255,255,255,.07);
+             display: flex; flex-direction: column; gap: 6px; font-family: var(--mono); font-size: 9.5px; color: rgba(224,224,224,.5); }
+  .rt-live .who { display: flex; align-items: center; gap: 7px; }
+  .rt-live .who i { width: 4px; height: 4px; border-radius: 50%; background: var(--green); animation: mcpulse 2s ease-in-out infinite; flex: none; }
+  .rt-live .who .dim { color: rgba(224,224,224,.3); }
+  .rt-seg { display: flex; align-items: center; gap: 7px; }
+  .rt-seg .bars { display: flex; gap: 3px; }
+  .rt-seg .bars i { width: 9px; height: 2px; border-radius: 1px; background: rgba(255,255,255,.12); }
+  .rt-seg .bars i.done { background: var(--green); }
+  .rt-seg .bars i.now  { background: var(--cyan); }
+  .rt-seg .n { margin-left: auto; color: rgba(224,224,224,.4); }
+  .rail .foot { display: block; text-decoration: none; margin-top: auto; padding: 18px 18px 0; font-family: var(--mono); font-size: 10px; color: rgba(224,224,224,.3); }
+
+  /* ─────────── the ticket header ─────────── */
+  .thead { display: flex; align-items: center; gap: 12px; padding: 16px 26px; border-bottom: 1px solid var(--line-soft); }
+  .tk-id { font-family: var(--mono); font-size: 10.5px; color: var(--ink-3); text-decoration: none; flex: none; }
   .tk-id:hover { color: var(--accent); }
-  .state { font-family: var(--mono); font-size: 10px; letter-spacing: .08em; text-transform: uppercase; font-weight: 500; padding: 4px 11px; border-radius: 20px; display: inline-flex; align-items: center; gap: 6px; }
-  .state i { width: 7px; height: 7px; border-radius: 50%; background: currentColor; }
-  .state.s-plan { color: var(--amber); background: rgba(245,158,11,.1); }
-  .state.s-run  { color: var(--cyan);  background: rgba(0,212,255,.1); }
-  .state.s-rev  { color: var(--indigo); background: rgba(129,140,248,.12); }
-  .tk-meta { margin-left: auto; display: flex; gap: 18px; font-size: 12.5px; color: var(--ink-3); flex-wrap: wrap; }
-  .tk-meta b { color: var(--ink-2); font-weight: 500; font-family: var(--mono); }
-  h1.tk-title { font-size: 15px; font-weight: 600; letter-spacing: -.01em; margin: 0 0 6px; line-height: 1.35; }
-  .tk-desc { font-size: 12.5px; line-height: 1.6; color: var(--ink-3); margin: 0; max-width: 74ch;
-             max-height: 4.8em; overflow-y: auto; }
+  h1.tk-title { font-size: 13.5px; font-weight: 600; color: #f4f4f6; line-height: 1.3;
+                overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .tk-live { display: flex; align-items: center; gap: 7px; font-family: var(--mono); font-size: 10px; color: var(--ink-3); flex: none; }
+  .tk-live i { width: 5px; height: 5px; border-radius: 50%; background: var(--green); animation: mcpulse 2s ease-in-out infinite; }
+  .tk-count { margin-left: auto; font-family: var(--mono); font-size: 10.5px; color: var(--ink-3); flex: none; }
+  /* Green once nothing is blocking: the count stops being a tally of what you owe
+     and becomes the fact that you owe nothing. */
+  .tk-count.set { color: var(--green); }
+
+  .tband { padding: 16px 26px 20px; border-bottom: 1px solid var(--line-soft); }
+  /* One line, and it stays one line however long the brief is. The band is the top
+     of every screen this ticket has; a Linear description is not, and four lines of
+     it above the conversation was the loudest thing on a page that exists for the
+     conversation. It opens on ▾ rather than scrolling in place. */
+  .tk-brief { display: flex; align-items: baseline; gap: 12px; max-width: 660px; margin-bottom: 11px; }
+  .tk-brief .lead {
+    font-size: 12.5px; line-height: 1.6; color: rgba(224,224,224,.6);
+    min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  }
+  .tk-brief .more {
+    flex: none; font-family: var(--mono); font-size: 10px; background: none; border: none;
+    padding: 0; color: rgba(224,224,224,.55); cursor: pointer;
+  }
+  .tk-brief .more:hover { color: var(--ink-2); }
+  .tk-brief .files { flex: none; font-family: var(--mono); font-size: 10px; color: rgba(224,224,224,.3); }
+  .tk-brief .ext { flex: none; font-family: var(--mono); font-size: 10px; color: var(--cyan); text-decoration: none; }
+  .tk-desc.rest {
+    font-size: 12.5px; line-height: 1.65; color: rgba(224,224,224,.62); max-width: 74ch;
+    white-space: pre-wrap; margin: -4px 0 12px; max-height: 26vh; overflow-y: auto;
+  }
+  .tk-meta { display: flex; gap: 18px; font-family: var(--mono); font-size: 10px; color: var(--ink-4);
+             margin-bottom: 16px; flex-wrap: wrap; }
+  .tk-meta b { color: rgba(224,224,224,.75); font-weight: 400; }
+  .tk-meta .last { margin-left: auto; }
 
   /* ─────────── progress track ─────────── */
-  .tracker { margin-top: 24px; padding-top: 8px; border-top: 1px solid var(--line-soft); }
-  /* overflow-x:auto clips vertically too, so the pill's headroom must live on the
-     scrolling element itself — negative margin keeps it from pushing the layout down */
-  .track-scroll { overflow-x: auto; overflow-y: hidden; padding: 48px 10px 2px; margin: -6px -10px 0; }
-  .track-inner { min-width: 700px; }
-  .tk-bar { position: relative; height: 6px; border-radius: 3px; background: var(--line); }
-  .tk-fill { position: absolute; left: 0; top: 0; bottom: 0; border-radius: 3px; background: var(--cyan); transition: width .45s cubic-bezier(.4,0,.2,1); }
+  /* A hairline with a ring on the current leg. The floating "now" pill it replaces
+     said the same thing as the cyan label directly under the ring. */
+  .tk-bar { position: relative; height: 3px; border-radius: 2px; background: rgba(255,255,255,.08); }
+  .tk-fill { position: absolute; left: 0; top: 0; height: 3px; border-radius: 2px; background: var(--cyan);
+             transition: width .45s cubic-bezier(.4,0,.2,1); }
   .tk-bar.finished .tk-fill { background: var(--green); }
-  .tk-tick { position: absolute; top: 50%; width: 3px; height: 3px; border-radius: 50%; background: var(--card); transform: translate(-50%,-50%); opacity: .8; }
-  .tk-knob {
-    position: absolute; top: 50%; width: 17px; height: 17px; border-radius: 50%;
-    background: var(--card); border: 3px solid var(--cyan);
-    transform: translate(-50%,-50%); z-index: 3; transition: left .45s cubic-bezier(.4,0,.2,1);
+  .tk-dots { position: absolute; top: 50%; left: 0; right: 0; display: grid; grid-auto-flow: column; grid-auto-columns: 1fr; }
+  .tk-dots i { justify-self: center; width: 4px; height: 4px; border-radius: 50%;
+               background: rgba(255,255,255,.14); transform: translateY(-50%); }
+  .tk-dots i.done { background: rgba(255,255,255,.5); }
+  .tk-dots i.now {
+    width: 9px; height: 9px; background: var(--ground); border: 2px solid var(--cyan);
   }
-  .tk-bar.finished .tk-knob { border-color: var(--green); }
-  .tk-pill {
-    position: absolute; bottom: 21px; left: 50%; transform: translateX(-50%);
-    white-space: nowrap; background: var(--ink); color: var(--ground);
-    font-size: 12px; font-weight: 600; padding: 5px 11px; border-radius: 8px;
-  }
-  .tk-pill .dim { opacity: .6; font-weight: 500; margin-right: 5px; }
-  .tk-pill::after { content: ""; position: absolute; top: 100%; left: 50%; transform: translateX(-50%); border: 5px solid transparent; border-top-color: var(--ink); }
-  .tk-labels { display: grid; grid-auto-flow: column; grid-auto-columns: 1fr; margin-top: 13px; }
-  .tk-labels span { display: flex; flex-direction: column; gap: 1px; align-items: center; text-align: center; }
-  .tk-labels .n { font-size: 12px; color: var(--ink-3); }
-  .tk-labels .done .n { color: var(--ink-2); }
-  .tk-labels .now .n { color: var(--cyan); font-weight: 600; }
-  .tk-labels .t { font-family: var(--mono); font-size: 10px; color: var(--ink-3); opacity: .75; }
-  .tk-labels .now .t { color: var(--cyan); opacity: 1; }
+  .tk-bar.finished + .tk-labels .now .n, .tk-bar.finished .tk-dots i.now { border-color: var(--green); }
+  .tk-labels { display: grid; grid-auto-flow: column; grid-auto-columns: 1fr; margin-top: 12px; text-align: center; }
+  .tk-labels span { display: flex; flex-direction: column; gap: 3px; }
+  .tk-labels .n { font-size: 10.5px; color: rgba(224,224,224,.28); }
+  .tk-labels .done .n { color: rgba(224,224,224,.55); }
+  .tk-labels .now .n { color: var(--cyan); }
+  .tk-labels .t { font-family: var(--mono); font-size: 9.5px; color: rgba(224,224,224,.3); }
+  .tk-labels .now .t { color: rgba(0,212,255,.7); }
 
   /* ─────────── cards ─────────── */
-  .card { padding: 22px 0 0; margin-top: 22px; border-top: 1px solid var(--line-soft); }
-  .card.sunk { background: transparent; }
+  /* The plan map and the pre-triage findings are the middle column's other two
+     views. They scroll in the same well the stream does, so the header and the
+     rails never move. */
+  .pane { grid-column: 2; grid-row: 2; min-width: 0; min-height: 0; overflow: auto; padding: 0 26px 40px; }
+  @media (max-width: 1080px) { .pane { overflow: visible; } }
+  .card { padding: 22px 0 0; border-top: 1px solid var(--line-soft); }
+  .card:first-child { border-top: none; }
   .glab {
     font-family: var(--mono); font-size: 10.5px; font-weight: 400; letter-spacing: .1em;
     text-transform: uppercase; color: var(--ink-4); margin: 0 0 14px;
     display: flex; align-items: center; gap: 8px;
   }
   .glab .gn { margin-left: auto; font-family: var(--mono); font-size: 11px; letter-spacing: 0; font-weight: 500; }
-  .cols { display: grid; grid-template-columns: 1fr 1.9fr; gap: 18px; align-items: start; }
-  @media (max-width: 900px) { .cols { grid-template-columns: 1fr; } }
 
   /* ─────────── plan map (SVG) ─────────── */
   .diagram-wrap { overflow-x: auto; padding: 4px 0 10px; }
@@ -173,22 +249,20 @@
 
 
   /* ─────────── conversation (design 2b) ─────────── */
-  /* Chat column and decision rail. The thread rail from the design is cross-ticket
-     navigation and belongs on the dashboard, not on one ticket's page. */
-  .convo { display: grid; grid-template-columns: 1fr 224px; gap: 26px; align-items: start; margin-top: 22px; }
-  @media (max-width: 900px) { .convo { grid-template-columns: 1fr; } }
+  /* The middle column: the stream scrolls, the composer is pinned under it. Two
+     scrollbars on one page is how a reader loses their place, so the shell holds
+     the height and only .stream moves. */
+  .convo { display: flex; flex-direction: column; min-height: 0; }
+  @media (max-width: 1080px) { .convo { display: block; } }
 
-  .chat { min-width: 0; }
-  .chead {
-    display: flex; align-items: center; gap: 10px; padding-bottom: 16px;
-    border-bottom: 1px solid var(--line-soft); font-size: 12px; color: var(--ink-3);
-  }
-  .chead .live { display: inline-flex; align-items: center; gap: 6px; font-family: var(--mono); font-size: 11px; color: var(--green); }
-  .chead .live i { width: 6px; height: 6px; border-radius: 50%; background: var(--green); animation: mcpulse 2s ease-in-out infinite; }
   @keyframes mcpulse { 0%,100% { opacity: 1; } 50% { opacity: .35; } }
-  .chead .settled { margin-left: auto; font-size: 11.5px; color: var(--ink-3); }
 
-  .stream { max-width: 668px; margin: 0 auto; padding: 26px 0; display: flex; flex-direction: column; gap: 26px; max-height: 58vh; overflow-y: auto; }
+  .stream { flex: 1; min-height: 0; overflow-y: auto; padding: 26px 0; }
+  /* Bottom-aligned, the way a conversation is: a short thread sits against the
+     composer rather than stranded at the top of an empty column. */
+  .stream-in { max-width: 668px; margin: 0 auto; padding: 0 26px; display: flex; flex-direction: column;
+               justify-content: flex-end; gap: 26px; min-height: 100%; }
+  @media (max-width: 1080px) { .stream { max-height: 58vh; } }
   .cmsg { display: grid; grid-template-columns: 24px 1fr; gap: 13px; align-items: start; }
   .cav {
     width: 24px; height: 24px; border-radius: 50%; display: grid; place-items: center;
@@ -209,10 +283,10 @@
   /* A finding is amber because a human is the blocker — the one meaning amber has. */
   .cfind {
     border-left: 2px solid var(--amber); background: var(--amber-bg);
-    border-radius: 0 7px 7px 0; padding: 12px 15px; margin-top: 12px;
+    border-radius: 0 7px 7px 0; padding: 12px 15px; margin-top: 13px;
   }
-  .cfind .ft { font-size: 12.5px; font-weight: 600; color: var(--ink); }
-  .cfind .fb { font-size: 12px; line-height: 1.6; color: var(--ink-2); margin-top: 3px; white-space: normal; }
+  .cfind .ft { font-size: 12.5px; font-weight: 600; color: #f4f4f6; margin-bottom: 5px; }
+  .cfind .fb { font-size: 12px; line-height: 1.6; color: rgba(224,224,224,.6); white-space: normal; }
 
   /* The id the answer will bind. Without it on the question, the receipt below
      says "Recorded as D-02" and nothing on screen ever said which one D-02 was. */
@@ -225,10 +299,11 @@
   .crec { margin-top: 12px; font-size: 12px; color: var(--ink-3); }
   .crec b { color: var(--cyan); font-weight: 500; }
 
-  .cpills { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 14px; }
+  .cpills { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 13px; }
   .cpill {
     font-family: inherit; font-size: 12.5px; padding: 9px 14px; border-radius: 16px;
-    border: 1px solid rgba(255,255,255,.12); background: transparent; color: var(--ink-2); cursor: pointer;
+    border: 1px solid rgba(255,255,255,.12); background: transparent;
+    color: rgba(224,224,224,.72); cursor: pointer;
   }
   .cpill:hover { border-color: rgba(255,255,255,.28); color: var(--ink); }
   .cpill.rec { border-color: rgba(0,212,255,.3); color: var(--cyan); }
@@ -238,196 +313,169 @@
   .cmsg.me { grid-template-columns: 1fr; }
   .cmsg.me .cbody {
     justify-self: end; max-width: 440px; background: rgba(255,255,255,.07);
-    border-radius: 14px 14px 3px 14px; padding: 13px 16px; color: var(--ink);
+    border-radius: 14px 14px 3px 14px; padding: 13px 16px; line-height: 1.65; color: #f0f0f4;
   }
 
-  .creceipt { font-size: 10.5px; color: var(--green); font-family: var(--mono); }
-  .ctool {
-    display: flex; gap: 10px; align-items: center; font-family: var(--mono); font-size: 11px;
-    border: 1px solid var(--line); border-radius: 6px; padding: 8px 11px; color: var(--ink-3);
+  /* A decision is a receipt, not somebody speaking — so it carries no avatar and
+     sits directly above whatever the agent said next. */
+  .cdec { display: flex; flex-direction: column; gap: 4px; }
+  .creceipt {
+    display: flex; align-items: center; gap: 9px; font-family: var(--mono);
+    font-size: 10.5px; color: var(--ink-3);
   }
-  .ctool .ok { color: var(--green); margin-left: auto; }
+  .creceipt .ok { color: var(--green); }
+  .creceipt b { color: rgba(224,224,224,.75); font-weight: 400; }
+  .cdec .cbody { font-size: 12.5px; }
+  .creason { font-size: 12px; line-height: 1.6; color: rgba(224,224,224,.6); border-left: 2px solid rgba(255,255,255,.12); padding-left: 13px; }
   .cwait {
-    display: flex; align-items: center; gap: 9px; border: 1px dashed rgba(255,255,255,.14);
-    border-radius: 7px; padding: 10px 13px; font-size: 12px; color: var(--ink-3); margin-top: 12px;
+    display: flex; align-items: center; gap: 9px; border: 1px solid rgba(255,255,255,.09);
+    border-radius: 7px; padding: 9px 12px; font-family: var(--mono); font-size: 10.5px;
+    color: var(--ink-3); margin-top: 13px;
   }
   .cwait i { width: 6px; height: 6px; border-radius: 50%; background: var(--cyan); animation: mcpulse 1.4s ease-in-out infinite; }
+  .cwait .el { margin-left: auto; color: var(--green); }
+
+  /* ─── the thread after triage settles (design 2c) ─── */
+  /* The same thread keeps going: no new screen and no "submit". A rule marks the
+     moment the questions stopped, so what came after is legible as consequence. */
+  .cmark { display: flex; align-items: center; gap: 12px; }
+  .cmark .ln { flex: 1; height: 1px; background: rgba(255,255,255,.07); }
+  .cmark span:not(.ln) { font-family: var(--mono); font-size: 9.5px; letter-spacing: .13em; color: rgba(224,224,224,.35); }
+
+  /* The plan, in the stream rather than on a page of its own. It arrives as a
+     message because that is when it arrives, and the decisions it was built from
+     are three lines above it. */
+  .pcard { margin-top: 13px; border: 1px solid rgba(255,255,255,.1); border-radius: 9px; padding: 15px 17px; }
+  .ph { display: flex; align-items: center; gap: 10px; margin-bottom: 13px; }
+  .ph .pf { font-family: var(--mono); font-size: 11px; color: var(--cyan); }
+  .ph .pc { font-family: var(--mono); font-size: 10px; color: rgba(224,224,224,.35); }
+  .ph .popen {
+    margin-left: auto; font-family: var(--mono); font-size: 10px; background: none;
+    border: none; padding: 0; color: rgba(224,224,224,.5); cursor: pointer;
+  }
+  .ph .popen:hover { color: var(--ink-2); }
+  .psteps { display: flex; flex-direction: column; gap: 9px; font-size: 11px; }
+  .prow { display: flex; gap: 11px; align-items: baseline; }
+  .prow .pm { flex: none; color: rgba(224,224,224,.28); }
+  .prow .pt { color: rgba(224,224,224,.4); }
+  .prow .pn { margin-left: auto; font-family: var(--mono); font-size: 10px; color: rgba(224,224,224,.25); }
+  .prow.done .pm { color: var(--green); }
+  .prow.done .pt { color: rgba(224,224,224,.55); }
+  .prow.done .pn { color: rgba(224,224,224,.3); }
+  .prow.run .pm { color: var(--cyan); }
+  .prow.run .pt { color: #f4f4f6; }
+  .prow.run .pn { color: rgba(224,224,224,.3); }
+  .prow.blocked .pm, .prow.blocked .pn { color: var(--red); }
+  .prow.blocked .pt { color: rgba(224,224,224,.55); }
 
   /* A settled question is the record, not the conversation. One line, openable. */
   .csettled { border-left: 2px solid var(--green); padding-left: 11px; }
   .csettled > summary {
     list-style: none; cursor: pointer; display: grid;
-    grid-template-columns: auto 1fr auto; gap: 3px 10px; align-items: baseline;
+    grid-template-columns: auto 1fr auto; gap: 4px 10px; align-items: baseline;
   }
   .csettled > summary::-webkit-details-marker { display: none; }
   .csettled > summary:hover .cs-q { color: var(--ink); }
-  .cs-tag { font-family: var(--mono); font-size: 10.5px; color: var(--green); }
-  .cs-q { font-size: 12px; line-height: 1.45; color: var(--ink-3); }
-  .cs-a { font-size: 11px; color: var(--green); font-family: var(--mono); white-space: nowrap; }
-  .cs-n { grid-column: 2; font-size: 10.5px; color: var(--ink-4); }
+  .cs-tag { font-family: var(--mono); font-size: 10px; color: var(--green); }
+  .cs-q { font-size: 11.5px; line-height: 1.5; color: rgba(224,224,224,.6);
+          overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  /* The outcome on a collapsed line is an identifier, not the answer in full — that
+     is inside. Uncapped it ran off the column and got sliced mid-word by the edge. */
+  .cs-a { font-family: var(--mono); font-size: 10px; color: var(--green);
+          white-space: nowrap; max-width: 26ch; overflow: hidden; text-overflow: ellipsis; }
+  .cs-n { grid-column: 2; font-family: var(--mono); font-size: 9.5px; color: var(--ink-4); }
   .csettled[open] > summary { margin-bottom: 16px; }
+  .csettled[open] > summary .cs-q { white-space: normal; }
   .cs-body { display: flex; flex-direction: column; gap: 20px; }
 
   /* ─── composer ─── */
-  .composer { max-width: 668px; margin: 0 auto; padding-top: 16px; border-top: 1px solid var(--line-soft); }
-  .cactive { font-size: 11.5px; color: var(--ink-4); margin-bottom: 10px; }
-  .cactive b { font-family: var(--mono); color: var(--cyan); font-weight: 500; }
-  .crow { display: flex; gap: 9px; align-items: center; }
-  .crow input {
-    flex: 1; min-width: 0; font-family: inherit; font-size: 13.5px; color: var(--ink);
-    background: transparent; border: 1px solid rgba(255,255,255,.12); border-radius: 12px; padding: 12px 15px;
+  /* The exits are pills beside the box rather than a sentence under it: "decide for
+     me" and "ask me later" are answers to the question above, and they belong where
+     the other answers are. */
+  .composer { padding: 0 0 20px; flex: none; }
+  /* Named `cin`, not `composer-in`: the test that there is exactly one composer
+     counts `class="composer` prefixes, and a child sharing that prefix is a second
+     one as far as a string match is concerned. */
+  .cin { max-width: 668px; margin: 0 auto; padding: 0 26px; }
+  .cactive { font-family: var(--mono); font-size: 10px; letter-spacing: .05em; color: var(--ink-4); margin-bottom: 11px; }
+  .cactive b { color: var(--cyan); font-weight: 400; }
+  .cexits { display: flex; flex-wrap: wrap; gap: 8px; margin-bottom: 11px; }
+  .cexits .cpill { font-size: 12px; padding: 8px 13px; }
+  .crow {
+    display: flex; align-items: center; gap: 12px;
+    border: 1px solid rgba(255,255,255,.13); border-radius: 12px; padding: 8px 10px 8px 16px;
   }
-  .crow input::placeholder { color: var(--ink-4); }
-  .crow input:focus { outline: none; border-color: rgba(0,212,255,.4); }
+  .crow:focus-within { border-color: rgba(0,212,255,.4); }
+  .crow input {
+    flex: 1; min-width: 0; font-family: inherit; font-size: 13px; color: var(--ink);
+    background: transparent; border: none; padding: 6px 0;
+  }
+  .crow input::placeholder { color: rgba(224,224,224,.32); }
+  .crow input:focus { outline: none; }
   .csend {
-    width: 30px; height: 30px; border-radius: 8px; border: none; background: var(--cyan);
-    color: #04121a; font-size: 15px; cursor: pointer; flex: none;
+    width: 26px; height: 26px; border-radius: 8px; border: none; background: rgba(0,212,255,.9);
+    color: #031a20; font-size: 12px; cursor: pointer; flex: none; display: grid; place-items: center;
   }
   .csend:hover { filter: brightness(1.12); }
+  /* Typed text is a message by default. Binding it as the decision is the deliberate
+     press, so it reads as a command beside the box rather than a second submit. */
   .cbtn {
-    font-family: inherit; font-size: 12px; padding: 9px 13px; border-radius: 8px;
-    border: 1px solid rgba(255,255,255,.14); background: transparent; color: var(--ink-2); cursor: pointer;
+    font-family: var(--mono); font-size: 10px; letter-spacing: .05em; padding: 5px 8px;
+    border-radius: 6px; border: 1px solid transparent; background: none; color: var(--ink-4); cursor: pointer; flex: none;
   }
-  .cbtn:hover { border-color: var(--cyan); color: var(--cyan); }
-  .cfoot { margin-top: 10px; font-size: 11.5px; color: var(--ink-4); }
-  .cexits { display: flex; align-items: center; gap: 8px; margin-top: 11px; font-size: 11.5px; color: var(--ink-4); }
+  .cbtn:hover { color: var(--cyan); border-color: rgba(0,212,255,.3); }
+  .cfoot { margin-top: 10px; font-family: var(--mono); font-size: 10px; color: rgba(224,224,224,.28); }
 
   /* ─── decision rail ─── */
-  .decisions { position: sticky; top: 20px; }
-  .drail-h { font-family: var(--mono); font-size: 10.5px; letter-spacing: .1em; text-transform: uppercase; color: var(--ink-4); margin-bottom: 14px; }
+  .decisions { padding: 22px 18px; display: flex; flex-direction: column; gap: 20px; overflow-y: auto; }
+  .dsec > h2, .drail-h {
+    display: flex; align-items: baseline; gap: 8px; font-family: var(--mono); font-size: 9.5px;
+    font-weight: 400; letter-spacing: .14em; text-transform: uppercase;
+    color: rgba(255,255,255,.38); margin: 0 0 13px;
+  }
+  .drail-h .gn { margin-left: auto; letter-spacing: 0; color: var(--ink-3); font-size: 10px; }
+  .dsec + .dsec { border-top: 1px solid var(--line-soft); padding-top: 18px; }
   .drow2 {
     display: block; width: 100%; text-align: left; font-family: inherit; cursor: pointer;
     background: none; border: none; border-left: 2px solid rgba(255,255,255,.12);
-    padding: 2px 0 2px 11px; margin-bottom: 15px; color: inherit;
+    padding: 0 0 0 11px; margin-bottom: 12px; color: inherit;
   }
+  .drow2:last-of-type { margin-bottom: 0; }
   .drow2.set { border-left-color: var(--green); }
   .drow2.on  { border-left-color: var(--cyan); }
   .drow2.agent { border-left-color: var(--amber); }
-  .drow2 .dtag { font-family: var(--mono); font-size: 10.5px; color: var(--ink-3); display: block; }
-  .drow2.set .dtag { color: var(--green); }
-  .drow2.on .dtag { color: var(--cyan); }
-  .drow2.agent .dtag { color: var(--amber); }
-  .drow2 .dq2 { font-size: 11.5px; line-height: 1.4; color: var(--ink-2); display: block; margin-top: 3px;
+  .drow2 .dtag {
+    display: flex; gap: 7px; font-family: var(--mono); font-size: 10px;
+    color: rgba(224,224,224,.4); margin-bottom: 4px;
+  }
+  .drow2 .dtag b { font-weight: 400; color: rgba(224,224,224,.4); }
+  .drow2.set .dtag b { color: var(--green); }
+  .drow2.on .dtag b { color: var(--cyan); }
+  .drow2.agent .dtag b { color: var(--amber); }
+  .drow2 .dq2 { font-size: 11.5px; line-height: 1.5; color: rgba(224,224,224,.6); display: block;
                 overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-  .drow2 .dv { font-size: 11px; color: var(--ink-4); display: block; margin-top: 2px; }
-  .dsum { margin-top: 18px; padding-top: 14px; border-top: 1px solid var(--line-soft); font-size: 11px; line-height: 1.6; color: var(--ink-4); }
-  .dsum b { color: var(--amber); font-weight: 500; }
+  .drow2.set .dq2 { color: rgba(224,224,224,.78); }
+  .drow2.on .dq2 { color: rgba(224,224,224,.6); }
+  .drow2:not(.set):not(.on):not(.agent) .dq2 { color: rgba(224,224,224,.45); }
+  /* Recalled knowledge: what this project already learned that bears on the ticket.
+     Only rendered when the store actually returns something. */
+  .dmem { font-size: 11px; line-height: 1.55; color: rgba(224,224,224,.55); }
+  .dmem .src { margin-top: 8px; font-family: var(--mono); font-size: 9.5px; color: rgba(224,224,224,.3); }
+  .drail-h .gn.set { color: var(--green); }
+  .dnote { margin-top: 13px; font-size: 11px; line-height: 1.55; color: rgba(224,224,224,.4); }
+  .dlist2 { display: flex; flex-direction: column; gap: 9px; }
+  .drow3 { display: flex; gap: 8px; align-items: baseline; font-size: 10.5px; color: rgba(224,224,224,.6); text-decoration: none; }
+  a.drow3:hover .nm { color: var(--ink); }
+  .drow3 .ic { color: var(--cyan); flex: none; }
+  .drow3 .nm { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .drow3 .dot { width: 5px; height: 5px; border-radius: 50%; background: rgba(255,255,255,.2); flex: none; align-self: center; }
+  .drow3 .dot.live { background: var(--green); animation: mcpulse 2.3s ease-in-out infinite; }
+  .pmap { border: 1px solid var(--line); border-radius: 9px; padding: 12px 14px; }
+  .dsum { margin-top: auto; padding-top: 18px; font-size: 10px; line-height: 1.6; color: rgba(224,224,224,.3); }
+  .dsum b { color: var(--amber); font-weight: 400; }
+  .dsum code { font-family: var(--mono); }
 
-  /* ─────────── questions ─────────── */
-  .qbox { border-bottom: 1px solid var(--line-soft); padding: 16px 0; }
-  .qbox:first-of-type { padding-top: 0; }
-  .qbox:last-of-type { border-bottom: none; padding-bottom: 0; }
-  .qhead { display: flex; gap: 9px; align-items: baseline; margin-bottom: 11px; }
-  .qnum { font-family: var(--mono); font-size: 11px; color: var(--ink-3); flex: 0 0 auto; }
-  .qtext { font-size: 14.5px; letter-spacing: -.012em; line-height: 1.42; }
-  .qfrom { font-family: var(--mono); font-size: 10.5px; color: var(--ink-3); border: 1px solid var(--line); border-radius: 4px; padding: 0 5px; flex: 0 0 auto; }
-  .choices { display: flex; flex-direction: column; gap: 7px; margin-left: 26px; }
-  .choice {
-    display: flex; gap: 9px; align-items: flex-start; padding: 10px 12px;
-    border: 1px solid var(--line); border-radius: 9px; cursor: pointer;
-    background: var(--card); font-size: 13.5px; transition: border-color .12s, background .12s;
-  }
-  .choice:hover { border-color: var(--accent-line); }
-  .choice.on { border-color: var(--accent); background: var(--accent-bg); }
-  .choice input { margin-top: 3px; accent-color: var(--accent); flex: 0 0 auto; }
-  .qadd {
-    margin: 8px 0 0 26px; width: calc(100% - 26px); min-height: 54px; resize: vertical;
-    font-family: inherit; font-size: 13.5px; color: var(--ink);
-    background: var(--card); border: 1px solid var(--line); border-radius: 9px; padding: 10px 12px;
-  }
-  .qadd:focus { outline: none; border-color: var(--accent); }
-  /* Why it is being asked. A question whose consequence is invisible gets answered
-     carelessly, or not at all. */
-  .qwhy { font-size: 13px; color: var(--ink-2); margin: -4px 0 11px 26px; max-width: 68ch; }
-  /* What the answer binds. An answer that binds nothing is a comment. */
-  .dchip {
-    margin-left: auto; font-family: var(--mono); font-size: 10px; font-weight: 700;
-    letter-spacing: .06em; padding: 2px 7px; border-radius: 5px; flex: 0 0 auto;
-    background: var(--sunk); color: var(--ink-3); border: 1px solid var(--line); white-space: nowrap;
-  }
-  .dchip.disc { background: var(--amber-bg); color: var(--amber); border-color: transparent; }
-
-  /* The exits. "Answer or the ticket stalls" is a false choice. */
-  .qouts { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; margin: 11px 0 0 26px; }
-  .qouts .lead { font-size: 12.5px; color: var(--ink-3); }
-  .qout {
-    font-family: inherit; font-size: 12.5px; font-weight: 500; padding: 6px 12px;
-    border-radius: 20px; border: 1px solid var(--line); background: var(--card);
-    color: var(--ink-2); cursor: pointer;
-  }
-  .qout:hover:not(:disabled) { border-color: var(--accent); color: var(--accent); background: var(--accent-bg); }
-  .qout:disabled { opacity: .5; cursor: progress; }
-
-  /* The conversation. The person who can answer is usually not the person who can
-     look it up, so the question has to be answerable in both directions. */
-  .qthread {
-    margin: 12px 0 0 26px; padding: 13px 15px; background: var(--sunk);
-    border-radius: 11px; display: flex; flex-direction: column; gap: 11px;
-  }
-  .qmsg { display: grid; grid-template-columns: auto 1fr; gap: 10px; align-items: start; }
-  .qwho {
-    font-family: var(--mono); font-size: 9.5px; letter-spacing: .06em; text-transform: uppercase;
-    color: var(--ink-3); background: var(--card); border: 1px solid var(--line);
-    padding: 3px 7px; border-radius: 5px; white-space: nowrap; margin-top: 1px;
-  }
-  .qmsg.me .qwho { background: var(--accent-bg); border-color: transparent; color: var(--accent); }
-  .qbody { font-size: 13.5px; color: var(--ink-2); line-height: 1.55; white-space: pre-wrap; }
-  .qpending {
-    display: flex; align-items: center; gap: 9px; padding: 9px 12px; border-radius: 9px;
-    background: var(--card); border: 1px dashed var(--line); font-size: 12.5px; color: var(--ink-3);
-  }
-  .qpending .st { margin-left: auto; font-family: var(--mono); font-size: 11px; color: var(--accent); }
-  .qask { display: flex; gap: 8px; align-items: center; }
-  .qask input {
-    flex: 1; min-width: 0; font-family: inherit; font-size: 13.5px; color: var(--ink);
-    background: var(--card); border: 1px solid var(--line); border-radius: 9px; padding: 9px 12px;
-  }
-  .qask input:focus { outline: none; border-color: var(--accent); }
-
-  .qdone { margin-left: 26px; padding: 10px 12px; border-radius: 9px; background: var(--green-bg); font-size: 13.5px; color: var(--ink-2); }
-  .qdone .fby { font-size: 11px; color: var(--ink-3); display: block; margin-top: 4px; }
-  /* A delegated pick reads as delegated, not decided — and can be taken back. */
-  .qdone.byagent { background: var(--amber-bg); border: 1px solid var(--amber-line); display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
-  .qdone .pickmark { font-size: 14px; font-weight: 600; color: var(--ink); }
-  .qdone .bychip {
-    font-family: var(--mono); font-size: 10px; font-weight: 700; letter-spacing: .06em;
-    text-transform: uppercase; color: var(--amber); background: var(--card);
-    border: 1px solid var(--amber-line); padding: 3px 8px; border-radius: 5px;
-  }
-  .qdone .undo { margin-left: auto; }
-  .qreason { margin: 8px 0 0 26px; font-size: 12.5px; color: var(--ink-2); line-height: 1.55; max-width: 68ch; }
-  .qreason b { color: var(--ink); }
-  .qset { margin: 10px 0 0 26px; font-size: 12.5px; color: var(--ink-3); display: flex; align-items: center; gap: 10px; }
-  .qbox.deferred .qtext { color: var(--ink-3); }
-
-  .footbar { display: flex; gap: 10px; align-items: center; flex-wrap: wrap; padding-top: 16px; margin-top: 4px; border-top: 1px solid var(--line-soft); }
-  .btn {
-    font-family: inherit; font-size: 13px; font-weight: 600; cursor: pointer;
-    border-radius: 9px; padding: 9px 16px; border: 1px solid var(--line); background: var(--card); color: var(--ink);
-  }
-  .btn.primary { background: var(--accent); border-color: var(--accent); color: #fff; }
-  .btn:disabled { opacity: .45; cursor: not-allowed; }
-  .why { font-size: 12.5px; color: var(--ink-3); }
-
-  /* ─────────── settled decisions ─────────── */
-  .qdone-wrap { margin-top: 20px; }
-  details.settled { background: var(--sunk); border: 1px solid var(--line); border-radius: 14px; }
-  details.settled > summary { list-style: none; cursor: pointer; padding: 15px 20px; display: flex; gap: 10px; align-items: baseline; flex-wrap: wrap; }
-  details.settled > summary::-webkit-details-marker { display: none; }
-  details.settled > summary::before { content: "▸"; color: var(--ink-3); }
-  details.settled[open] > summary::before { content: "▾"; }
-  details.settled .sct { font-size: 14px; font-weight: 600; }
-  .dlist { padding: 0 20px 16px; }
-  .drow { padding: 11px 0; border-top: 1px solid var(--line-soft); display: flex; gap: 11px; }
-  .dtag { font-family: var(--mono); font-size: 10.5px; font-weight: 700; color: var(--green); background: var(--green-bg); border-radius: 4px; padding: 1px 6px; height: fit-content; flex: 0 0 auto; }
-  .dq { font-size: 13px; color: var(--ink-3); }
-  .da { font-size: 13.5px; color: var(--ink); margin-top: 2px; }
-
-  /* Follow-ups are the one thing blocking progress, so they lead and they are loud. */
-  .card.fu { border-color: var(--amber-line); background: var(--amber-bg); }
-  .glab.hot { color: var(--amber); }
-  .fu-why { font-size: 13px; color: var(--ink-2); margin: 0 0 14px; max-width: 70ch; }
-  .card.fu .choice { background: var(--card); }
+  /* ─────────── what triage found, before it has asked anything ─────────── */
   .fitem { padding: 11px 0; border-bottom: 1px solid var(--line-soft); }
   .fitem:last-child { border-bottom: none; padding-bottom: 0; }
   .fitem:first-child { padding-top: 0; }
@@ -438,13 +486,7 @@
   </style>
 </head>
 <body>
-  <div class="page">
-    <div class="crumb">
-      <span class="brand">Mission Control</span>
-      <a href="/">← All tasks</a>
-    </div>
-    <div id="root"><p class="empty">Loading…</p></div>
-  </div>
+  <div id="root"><p class="empty" style="padding:26px">Loading…</p></div>
 
 <script>
 const $ = (s, el = document) => el.querySelector(s);
@@ -452,6 +494,8 @@ const esc = s => String(s ?? "").replace(/[&<>"']/g, c =>
   ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
 const taskId = new URLSearchParams(location.search).get("id") || "";
 let selectedStep = null;
+/** The agent's mark in the stream. One identity, not one per internal stage. */
+const AVATAR = "mc";
 
 const LEGS = [
   { label: "Intake",  statuses: ["inbox"] },
@@ -506,58 +550,191 @@ const shortTime = iso => {
     : d.toLocaleDateString([], { month: "short", day: "numeric" });
 };
 
-function renderTicket(task, triage, activities) {
+/** How long ago, in the units the design uses: "12m", "3h", "2d". */
+function since(iso) {
+  if (!iso) return "";
+  const ms = Date.now() - new Date(iso).getTime();
+  if (!isFinite(ms) || ms < 0) return "";
+  const m = Math.round(ms / 60000);
+  if (m < 60) return `${Math.max(1, m)}m`;
+  const h = Math.round(m / 60);
+  return h < 48 ? `${h}h` : `${Math.round(h / 24)}d`;
+}
+
+/**
+ * The brief, as prose rather than as its source.
+ *
+ * A Linear description arrives with the attachment URLs inline, and MET-635's are
+ * 140 characters each: rendered raw they were the loudest thing on the page, four
+ * lines of signed S3 query string above the conversation the page exists for. They
+ * are not nothing, though — an attachment is a thing triage was holding — so they
+ * are counted rather than dropped, and the label of a markdown link survives as the
+ * words somebody wrote.
+ *
+ * The two lines the meta row repeats verbatim (base branch, target app) come out.
+ */
+function brief(description) {
+  const lines = (description || "").split("\n")
+    .filter(l => l.trim() && !/^\s*(base[- ]?branch|target app)\s*:/i.test(l));
+  const raw = lines.join("\n");
+  const attachments = (raw.match(/https?:\/\/\S+/g) || []).length;
+  const prose = raw
+    .replace(/\[([^\]]*)\]\([^)]*\)/g, "$1")   // markdown link → the words in it
+    .replace(/<https?:\/\/[^>]*>/g, "")        // an angle-bracketed bare url
+    .replace(/https?:\/\/\S+/g, "")            // anything still a url
+    .replace(/\(\s*\)/g, "")
+    .split("\n").map(l => l.replace(/[ \t]{2,}/g, " ").trim()).filter(Boolean);
+  const full = prose.join("\n");
+  // The lead is one line's worth; the band clips it and ▾ opens the whole thing.
+  return { lead: prose.join(" "), full, attachments };
+}
+
+/**
+ * The header, per design 2b: one line of identity, then the brief and the track.
+ *
+ * The status pill went. It named the leg the tracker was already pointing at, in a
+ * second vocabulary ("planning" against "Triage"), and two names for one state on
+ * one line is how a page stops being read.
+ */
+function renderTicket(task, triage, activities, extra = {}) {
   const legIndex = Math.max(0, LEGS.findIndex(l => l.statuses.includes(task.status)));
   const finished = legIndex >= LEGS.length - 1;
-  // Knob sits at the centre of the current leg's slice.
+  // The fill stops at the centre of the current leg's slice, where its dot is.
   const pct = ((legIndex + 0.5) / LEGS.length) * 100;
-  const stateClass = legIndex >= 4 ? "s-rev" : legIndex >= 3 ? "s-run" : "s-plan";
 
   const repos = [...new Set(((triage && triage.triage_repos) || []).map(r => `${r.project}/${r.repo}`))];
   const base = pick(/^\s*base[- ]?branch:\s*(\S+)\s*$/im, task.description);
   const app = pick(/^\s*target app:\s*`?([^`\s(]+)/im, task.description);
 
-  const desc = (task.description || "").split("\n")
-    .filter(l => l.trim() && !/^\s*(base[- ]?branch|target app)\s*:/i.test(l)).slice(0, 2).join(" ");
+  const { lead, full, attachments } = brief(task.description);
 
-  const ticks = LEGS.map((_, i) => i === 0 ? "" :
-    `<div class="tk-tick" style="left:${(i / LEGS.length) * 100}%"></div>`).join("");
   const times = legTimes(task, activities);
+  const dots = LEGS.map((_, i) =>
+    `<i class="${i < legIndex ? "done" : i === legIndex ? "now" : ""}"></i>`).join("");
   const labels = LEGS.map((l, i) => {
-    const stamp = shortTime(times[l.label.toLowerCase()]);
-    return `<span class="${i < legIndex ? "done" : i === legIndex ? "now" : ""}">
+    const here = i === legIndex;
+    // A leg the ticket has not reached carries no date. The activity patterns are
+    // loose on purpose — "review" appears in plenty of messages — so a leg ahead of
+    // the current one was picking up a stamp and claiming the ticket had been there.
+    const stamp = here ? `now · ${since(times[l.label.toLowerCase()] || task.updated_at)}`
+                       : i < legIndex ? shortTime(times[l.label.toLowerCase()]) : "";
+    return `<span class="${i < legIndex ? "done" : here ? "now" : ""}">
       <span class="n">${esc(l.label)}</span>
       ${stamp ? `<span class="t">${esc(stamp)}</span>` : ""}</span>`;
   }).join("");
 
+  const qs = (triage && triage.questions) || [];
+  const settled = qs.filter(q => q.answer).length;
+
   return `
     <div class="ticket">
-      <div class="tk-row1">
-        ${task.external_url
-          ? `<a class="tk-id" href="${esc(task.external_url)}" target="_blank" rel="noopener">${esc(task.external_id || task.id.slice(0, 8))} ↗</a>`
-          : `<span class="tk-id">${esc(task.external_id || task.id.slice(0, 8))}</span>`}
-        <span class="state ${stateClass}"><i></i>${esc((task.status || "").replace("_", " "))}</span>
+      <div class="thead">
+        <span class="tk-id">${esc(task.external_id || task.id.slice(0, 8))}</span>
+        <h1 class="tk-title">${esc(task.title)}</h1>
+        ${extra.agent ? `<span class="tk-live"><i></i>${esc(extra.agent)}</span>` : ""}
+        <span class="tk-count ${qs.length && settled === qs.length ? "set" : ""}">${
+          qs.length ? `${settled} of ${qs.length} settled` : ""}</span>
+      </div>
+      <div class="tband">
+        <div class="tk-brief">
+          <div class="lead">${esc(lead)}</div>
+          ${full ? `<button class="more" data-more="1" aria-expanded="false">▾ description</button>` : ""}
+          ${attachments ? `<span class="files">${attachments} file${attachments > 1 ? "s" : ""}</span>` : ""}
+          ${task.external_url
+            ? `<a class="ext" href="${esc(task.external_url)}" target="_blank" rel="noopener">${esc(task.external_id || "source")} ↗</a>` : ""}
+        </div>
+        ${full ? `<p class="tk-desc rest" data-fulldesc hidden>${esc(full)}</p>` : ""}
         <div class="tk-meta">
           ${repos.length ? `<span>repo <b>${esc(repos.join(", "))}</b></span>` : ""}
-          ${base ? `<span>branch <b>${esc(base)}</b></span>` : ""}
+          ${base ? `<span>base <b>${esc(base)}</b></span>` : ""}
           ${app ? `<span>app <b>${esc(app)}</b></span>` : ""}
+          <span class="last">updated <b>${esc(since(task.updated_at) || "—")} ago</b></span>
         </div>
-      </div>
-      <h1 class="tk-title">${esc(task.title)}</h1>
-      <p class="tk-desc">${esc(desc)}</p>
-      <div class="tracker">
-        <div class="track-scroll"><div class="track-inner">
-          <div class="tk-bar ${finished ? "finished" : ""}">
-            <div class="tk-fill" style="width:${pct}%"></div>
-            ${ticks}
-            <div class="tk-knob" style="left:${pct}%">
-              <div class="tk-pill"><span class="dim">now</span>${esc(LEGS[legIndex].label)}</div>
-            </div>
-          </div>
-          <div class="tk-labels">${labels}</div>
-        </div></div>
+        <div class="tk-bar ${finished ? "finished" : ""}">
+          <div class="tk-fill" style="width:${pct}%"></div>
+          <div class="tk-dots">${dots}</div>
+        </div>
+        <div class="tk-labels">${labels}</div>
       </div>
     </div>`;
+}
+
+/**
+ * The ticket rail — what else is waiting on you, without a trip back to the board.
+ *
+ * Grouped by the same legs the tracker uses, so a ticket sits under the same word
+ * in both places. The badge is the count of questions blocking that ticket, because
+ * that is the only reason one of these rows is your problem rather than an agent's.
+ */
+function railGroups(tasks) {
+  const groups = LEGS.slice(0, 5).map(l => ({ label: l.label, statuses: l.statuses, tasks: [] }));
+  for (const t of tasks || []) {
+    const g = groups.find(x => x.statuses.includes(t.status));
+    if (g) g.tasks.push(t);
+  }
+  return groups.filter(g => g.tasks.length);
+}
+
+function openCount(task) {
+  const st = parseTriage(task);
+  return blockingQuestions(st && st.questions).length;
+}
+
+function renderRail(tasks, current, triage, planData = {}) {
+  const qs = (triage && triage.questions) || [];
+  const settled = qs.filter(q => q.answer).length;
+  const groups = railGroups(tasks && tasks.length ? tasks : (current ? [current] : []));
+
+  // Once there is a plan the segments are the steps, because that is what is
+  // moving. Before it, they are the questions — the only progress triage has.
+  const steps = (planData.plan && planData.plan.steps) || [];
+  const stepState = n => ((planData.progress && planData.progress.steps) || {})[String(n)] || {};
+  const stepsDone = steps.filter(s => stepState(s.step).status === "completed").length;
+  const track = steps.length
+    ? { word: "step", n: stepsDone, total: steps.length,
+        cls: steps.map(s => {
+          const st = stepState(s.step).status;
+          return st === "completed" ? "done" : st === "in_progress" ? "now" : "";
+        }) }
+    : qs.length
+      ? { word: "triage", n: settled, total: qs.length,
+          cls: qs.map((q, i) => q.answer ? "done" : (i === settled ? "now" : "")) }
+      : null;
+
+  const rows = groups.map(g => {
+    // Past triage the ticket is the agent's, not yours: green rather than cyan.
+    const building = !["Intake", "Triage"].includes(g.label);
+    const list = g.tasks
+      // The one you are on always shows, however long the group is.
+      .sort((a, b) => (a.id === current?.id ? -1 : b.id === current?.id ? 1 : 0))
+      .slice(0, 5).map(t => {
+        const on = t.id === current?.id;
+        const open = openCount(t);
+        const badge = on
+          ? `<span class="rt-badge ${building ? "ok" : "now"}">${esc(building ? g.label.toLowerCase() : "now")}</span>`
+          : open ? `<span class="rt-badge q">${open} q</span>`
+          : `<span class="rt-badge ok">${esc((t.status || "").replace("_", " "))}</span>`;
+        const bars = on && track
+          ? `<div class="rt-seg"><span class="dim">${esc(track.word)}</span>
+               <span class="bars">${track.cls.map(c => `<i class="${c}"></i>`).join("")}</span>
+               <span class="n">${track.n}/${track.total}</span></div>`
+          : "";
+        const live = on
+          ? `<div class="rt-live">${bars}<div class="who"><span class="dim">updated ${esc(since(t.updated_at) || "just now")} ago</span></div></div>`
+          : "";
+        return `<a class="rt ${on ? (building ? "on build" : "on") : ""}" href="/ticket?id=${encodeURIComponent(t.id)}">
+          <div class="rt-top">${esc(t.external_id || t.id.slice(0, 8))}${badge}</div>
+          <div class="rt-title">${esc(t.title || "")}</div>${live}</a>`;
+      }).join("");
+    return `<div class="rgroup">${esc(g.label.toUpperCase())} · ${g.tasks.length}</div>
+      <div class="rlist">${list}</div>`;
+  }).join("");
+
+  return `<nav class="rail">
+    <a class="brand" href="/">MISSION CONTROL</a>
+    ${rows || `<div class="rgroup">NO OTHER TICKETS</div>`}
+    <a class="foot" href="/">← all tasks</a>
+  </nav>`;
 }
 
 /* ─────────── the plan, as a map ─────────── */
@@ -814,10 +991,11 @@ function chatTimeline(questions) {
  * settled rather than somebody speaking.
  */
 function renderChatEvent(ev) {
-  // One avatar for the agent, and the role spelled out beside it where it means
-  // something. The split between triage, research and planner is our plumbing;
-  // from the reader's side it is all the agent, and "TR"/"RS" were abbreviations
-  // that needed a decoder ring.
+  // One avatar for the agent, and the role spelled out beside it only where it
+  // means something. The split between triage, research and planner is our
+  // plumbing; from the reader's side it is all the agent, so triage — the default
+  // voice on this page — says nothing, and planner and research say who they are
+  // because "the plan stopped" and "this was looked up" are different claims.
   const role = { planner: "planner", triage: "triage", research: "research" }[ev.role] || "agent";
   const tag = ev.q.becomes ? esc(ev.q.becomes) : "";
 
@@ -840,10 +1018,11 @@ function renderChatEvent(ev) {
     const rec = ev.q.recommended
       ? `<div class="crec">research suggests <b>${esc(ev.q.recommended)}</b> — still your call</div>` : "";
     const owed = (ev.q.thread || []).length && ev.q.thread[ev.q.thread.length - 1].role === "you";
-    const waiting = owed ? `<div class="cwait"><i></i>Working out an answer — read-only check</div>` : "";
+    const waiting = owed
+      ? `<div class="cwait"><i></i>working it out<span class="el">read-only</span></div>` : "";
     return `<div class="cmsg" data-for="${esc(ev.q.id)}">
-      <span class="cav">◆</span>
-      <div><span class="crole">${esc(role)}</span>
+      <span class="cav">${esc(AVATAR)}</span>
+      <div>${ev.role === "planner" ? `<span class="crole">${esc(role)}</span>` : ""}
       <div class="cq">${esc(ev.q.question)}</div>
       ${tag ? `<span class="cbecomes">becomes ${tag}</span>` : ""}${why}
       ${settled ? "" : `${rec}<div class="cpills">${pills}${escapePill}</div>${waiting}`}</div></div>`;
@@ -856,24 +1035,105 @@ function renderChatEvent(ev) {
     // Which model said it, so an answer can be weighed rather than just read.
     const by = ev.model ? ` · ${esc(ev.model)}` : "";
     return `<div class="cmsg" data-for="${esc(ev.q.id)}">
-      <span class="cav">◆</span>
+      <span class="cav">${esc(AVATAR)}</span>
       <div><span class="crole">${esc(role)}${by}</span><div class="cbody">${esc(ev.text)}</div></div></div>`;
   }
 
   if (ev.kind === "deferred") {
-    return `<div class="cmsg" data-for="${esc(ev.q.id)}"><span class="cav you">—</span>
-      <div class="cbody"><span class="creceipt">◦ ${tag} set aside — not blocking planning</span>
-      <button class="cbtn" data-act="undefer" data-q="${esc(ev.q.id)}" style="margin-left:10px">Bring it back</button></div></div>`;
+    return `<div class="cdec" data-for="${esc(ev.q.id)}">
+      <div class="creceipt"><span>◦</span>${tag} set aside — not blocking planning
+      <button class="cbtn" data-act="undefer" data-q="${esc(ev.q.id)}">bring it back</button></div></div>`;
   }
 
+  // A decision is a receipt: it records something settled rather than somebody
+  // speaking, so it carries no avatar and sits inline where the answer landed.
   const byAgent = ev.role === "agent";
-  const reason = ev.q.reason ? `<div class="fb" style="margin-top:6px">${esc(ev.q.reason)}</div>` : "";
+  // Amber on this page means one thing — a human is the blocker — so the reasoning
+  // behind a settled decision is not amber. It is the record explaining itself.
+  const reason = ev.q.reason ? `<div class="creason">${esc(ev.q.reason)}</div>` : "";
   const undo = byAgent
-    ? `<button class="cbtn" data-act="reopen" data-q="${esc(ev.q.id)}" style="margin-left:10px">Change it</button>` : "";
-  return `<div class="cmsg" data-for="${esc(ev.q.id)}"><span class="cav${byAgent ? "" : " you"}">${byAgent ? "◆" : "✓"}</span>
-    <div><div class="creceipt">✓ Recorded as ${tag} — the plan has to cite it</div>
-    <div class="cbody" style="margin-top:4px">${esc(ev.q.answer)}${byAgent ? " · chosen for you" : ""}${undo}</div>
-    ${reason}</div></div>`;
+    ? `<button class="cbtn" data-act="reopen" data-q="${esc(ev.q.id)}">change it</button>` : "";
+  return `<div class="cdec" data-for="${esc(ev.q.id)}">
+    <div class="creceipt"><span class="ok">✓</span>Recorded as <b>${tag}</b> — the plan has to cite it${undo}</div>
+    <div class="cbody">${esc(ev.q.answer)}${byAgent ? " · chosen for you" : ""}</div>
+    ${reason}</div>`;
+}
+
+/**
+ * The moment triage stopped asking (design 2c).
+ *
+ * The same thread keeps going rather than handing off to a new screen, so the
+ * transition needs a mark or the plan arrives looking like another answer.
+ */
+function renderSettledMark(questions) {
+  const stamps = (questions || []).map(q => q.answered_at || q.deferred_at || "").filter(Boolean).sort();
+  const at = stamps.length ? shortTime(stamps[stamps.length - 1]) : "";
+  return `<div class="cmark"><span class="ln"></span>
+    <span>TRIAGE SETTLED${at ? ` · ${esc(at)}` : ""}</span><span class="ln"></span></div>`;
+}
+
+/**
+ * The plan, as a message in the same thread.
+ *
+ * It was a separate view, below the conversation and below the fold, which put the
+ * decomposition on the far side of a scroll from the decisions it was built out of.
+ * The design's answer is that the plan is something the agent hands you at a moment
+ * in the conversation — so it arrives as one, compact, with the full map behind
+ * "open ▸" for when the shape of the thing is the question.
+ *
+ * "from D-01 · D-02" is deliberately not "cites": what is true is that those
+ * decisions were settled and passed to the planner. Whether the plan text cites
+ * them is a claim about a document nobody here has read.
+ */
+function renderPlanCard(plan, progress, questions, open = false) {
+  const steps = (plan && plan.steps) || [];
+  if (!steps.length) return "";
+  const waves = (plan.parallel_groups && plan.parallel_groups.length) || steps.length;
+  const st = n => (progress && progress.steps && progress.steps[String(n)]) || {};
+  const waveOf = n => {
+    const groups = plan.parallel_groups || [];
+    const i = groups.findIndex(g => g.includes(n));
+    return i < 0 ? 0 : i + 1;
+  };
+
+  const done = steps.filter(s => st(s.step).status === "completed").length;
+  const running = steps.find(s => st(s.step).status === "in_progress");
+  const lead = running
+    ? `The plan is in — ${steps.length} steps, ${waves} ${waves === 1 ? "wave" : "waves"}. Step ${running.step} is running.`
+    : done === steps.length
+      ? `All ${steps.length} steps are done.`
+      : done
+        ? `The plan is in — ${steps.length} steps, ${waves} ${waves === 1 ? "wave" : "waves"}. ${done} done, nothing running.`
+        : `The plan is in — ${steps.length} steps, ${waves} ${waves === 1 ? "wave" : "waves"}. Nothing dispatched yet.`;
+
+  const cites = (questions || []).filter(q => q.answer).map(q => q.becomes).filter(Boolean);
+
+  const rows = steps.map(s => {
+    const p = st(s.step);
+    const state = p.status === "completed" ? "done"
+      : p.status === "in_progress" ? "run"
+      : (p.status === "blocked" || p.status === "failed") ? "blocked" : "";
+    const mark = state === "done" ? "✓" : state === "run" ? "▸" : state === "blocked" ? "!" : "○";
+    const note = state === "done" ? (p.agent_profile || "done")
+      : state === "run" ? "running"
+      : state === "blocked" ? esc(p.status)
+      : waves > 1 ? `wave ${waveOf(s.step)}` : "pending";
+    return `<div class="prow ${state}">
+      <span class="pm">${mark}</span><span class="pt">${esc(s.title)}</span><span class="pn">${note}</span></div>`;
+  }).join("");
+
+  return `<div class="cmsg" data-plan>
+    <span class="cav">${esc(AVATAR)}</span>
+    <div><div class="cbody">${esc(lead)}</div>
+      <div class="pcard">
+        <div class="ph">
+          <span class="pf">PLAN</span>
+          ${cites.length ? `<span class="pc">from ${esc(cites.join(" · "))}</span>` : ""}
+          <button class="popen" data-planopen aria-expanded="${open}">${open ? "close ▾" : "open ▸"}</button>
+        </div>
+        <div class="psteps">${rows}</div>
+      </div>
+    </div></div>`;
 }
 
 /** The question the composer is currently pointed at. */
@@ -891,32 +1151,44 @@ function blockingQuestions(questions) {
   return (questions || []).filter(q => !q.answer && !q.deferred);
 }
 
-function renderComposer(active, openCount) {
+function renderComposer(active, openCount, side = {}) {
   if (!active) {
-    return `<div class="composer">
+    // Design 2c: with nothing blocking, the composer stops asking for an answer and
+    // starts reporting. The one action that is still yours is taking a decision
+    // back, so that is the one pill — and it is real, not a label.
+    const last = [...(side.questions || [])].reverse().find(q => q.answer);
+    return `<div class="composer"><div class="cin">
       <div class="cactive">Nothing is waiting on you.</div>
-      <div class="crow"><input type="text" id="say" placeholder="Say something to the agent…" disabled>
+      ${last ? `<div class="cexits">
+        <button class="cpill esc" data-focus="${esc(last.id)}">Change a decision</button>
+      </div>` : ""}
+      <div class="crow"><input type="text" id="say" placeholder="Nothing to answer — reopen a decision to say more" disabled>
         <button class="csend" data-send="ask" disabled>↑</button></div>
-      <div class="cfoot">Planning can proceed.</div>
-    </div>`;
+      <div class="cfoot">${esc(side.status || "planning can proceed")}</div>
+    </div></div>`;
   }
-  // No restatement of the question: it is directly above, at full size. This line
+  // The exits are pills, in the row the design puts above the box: "decide for me"
+  // and "decide later" are answers to the question directly above, and they read as
+  // answers when they sit where the other answers are. The sentence they replace
+  // ("Not sure? …") asked a question of its own.
+  //
+  // No restatement of the question either: it is above, at full size. This line
   // says only what the answer binds and what is still to come.
-  return `<div class="composer" data-active="${esc(active.id)}">
+  return `<div class="composer" data-active="${esc(active.id)}"><div class="cin">
     <div class="cactive">Your answer becomes <b>${esc(active.becomes || "a decision")}</b></div>
-    <div class="crow">
-      <input type="text" id="say" placeholder="Answer in your own words, or ask about it…">
-      <button class="cbtn" data-send="answer">Answer</button>
-      <button class="csend" data-send="ask" title="Send as a message">↑</button>
+    <div class="cexits">
+      <button class="cpill esc" data-act="delegate" data-q="${esc(active.id)}">Decide for me</button>
+      <button class="cpill esc" data-act="defer" data-q="${esc(active.id)}">Decide later</button>
     </div>
-    <div class="cexits"><span>Not sure?</span>
-      <button class="cbtn" data-act="delegate" data-q="${esc(active.id)}">Decide for me</button>
-      <button class="cbtn" data-act="defer" data-q="${esc(active.id)}">Decide later</button>
+    <div class="crow">
+      <input type="text" id="say" placeholder="Reply to ${esc(AVATAR)}…">
+      <button class="cbtn" data-send="answer" title="Bind what you typed as the decision">/decide</button>
+      <button class="csend" data-send="ask" title="Send as a message">↑</button>
     </div>
     <div class="cfoot">${openCount > 0
       ? `${openCount} more after this · planning starts when the last is settled`
       : "last one — planning starts when this is settled"}</div>
-  </div>`;
+  </div></div>`;
 }
 
 /**
@@ -937,7 +1209,8 @@ function questionLabel(q) {
   return text.length > 58 ? text.slice(0, 58).replace(/\s\S*$/, "") + "…" : text;
 }
 
-function renderDecisions(questions, activeId) {
+function renderDecisions(questions, activeId, side = {}) {
+  const recalled = side.recalled || null;
   const rows = (questions || []).map(q => {
     let state = "open", label = "open";
     if (q.answer) { state = "set"; label = "settled"; }
@@ -945,24 +1218,57 @@ function renderDecisions(questions, activeId) {
     else if (q.delegate_requested) { state = "agent"; label = "agent deciding"; }
     else if (q.id === activeId) { state = "on"; label = "discussing"; }
     return `<button class="drow2 ${state}" data-focus="${esc(q.id)}" title="${esc(q.question)}">
-      <span class="dtag">${esc(q.becomes || "—")} · ${esc(label)}</span>
+      <span class="dtag"><b>${esc(q.becomes || "—")}</b>${esc(label)}</span>
       <span class="dq2">${esc(questionLabel(q))}</span>
     </button>`;
   }).join("");
   const settled = (questions || []).filter(q => q.answer).length;
   const blocking = blockingQuestions(questions).length;
+  // What this project already learned that bears on the ticket. Only rendered when
+  // the knowledge store actually returns something — an empty "RECALLED" heading
+  // reads as "nothing was remembered", which is a different claim from "we did not
+  // ask", and only one of them is true when the store is unreachable.
+  const memory = recalled
+    ? `<div class="dsec"><h2>Recalled</h2>
+        <div class="dmem">“${esc(recalled.text)}”
+        <div class="src">${esc(recalled.category || "note")}${recalled.domain ? ` · ${esc(recalled.domain)}` : ""}</div></div></div>`
+    : "";
+
+  // Design 2c's two extra sections. Both are real endpoints, and both render only
+  // when they have something — an empty "DELIVERABLES" heading claims the run
+  // produced nothing, which is a different statement from "nothing is recorded".
+  const files = (side.deliverables || []).slice(0, 6);
+  const deliverables = files.length
+    ? `<div class="dsec"><h2>Deliverables</h2><div class="dlist2">${files.map(d =>
+        `<div class="drow3"><span class="ic">▤</span><span class="nm" title="${esc(d.path || "")}">${esc(d.title || d.path || d.deliverable_type)}</span></div>`).join("")}</div></div>`
+    : "";
+  const kids = side.children || [];
+  const subtasks = kids.length
+    ? `<div class="dsec"><h2>Subtask${kids.length > 1 ? "s" : ""}</h2><div class="dlist2">${kids.slice(0, 5).map(c =>
+        `<a class="drow3" href="/ticket?id=${encodeURIComponent(c.id)}">
+           <span class="dot ${c.status === "in_progress" ? "live" : ""}"></span>
+           <span class="nm">${esc(c.external_id || c.id.slice(0, 6))} · ${esc(c.title || "")}</span></a>`).join("")}</div>
+       <div class="dnote">merges back before review</div></div>`
+    : "";
+
+  const allSettled = (questions || []).length > 0 && !blocking;
   return `<aside class="decisions">
-    <div class="drail-h">Decisions ${settled}/${(questions || []).length}</div>
-    ${rows || `<p class="empty">No questions yet.</p>`}
+    <div class="dsec">
+      <div class="drail-h">Decisions<span class="gn ${allSettled ? "set" : ""}">${settled}/${(questions || []).length}</span></div>
+      ${rows || `<p class="empty">No questions yet.</p>`}
+      ${allSettled ? `<div class="dnote">Reopen one and it goes back to the agent as an open question.</div>` : ""}
+    </div>
+    ${memory}
+    ${deliverables}
+    ${subtasks}
     <div class="dsum">${blocking ? `<b>${blocking}</b> blocking planning<br>` : ""}
       Everything settled here lands in <code>.planning/</code> as the phase brief.</div>
   </aside>`;
 }
 
-function renderConversation(triage, activeId) {
+function renderConversation(triage, activeId, side = {}) {
   const qs = triage?.questions || [];
   const active = activeQuestion(qs, activeId);
-  const settled = qs.filter(q => q.answer).length;
   // Everything settled, then the one question being answered. Nothing further:
   // dumping all six at once is a form, not a conversation, and it forced the
   // composer to restate which one you were on — the same question twice, once
@@ -992,15 +1298,30 @@ function renderConversation(triage, activeId) {
       ${said ? `<span class="cs-n">${said} message${said > 1 ? "s" : ""}</span>` : ""}
     </summary><div class="cs-body">${inner}</div></details>`;
   }).join("") || `<p class="empty">Triage hasn't asked anything yet.</p>`;
+
+  // Design 2c: when the last question settles the thread keeps going in place. The
+  // rule marks where triage ended and the plan lands underneath it as a message.
+  const settledMark = (!blockingQuestions(qs).length && qs.some(q => q.answer || q.deferred))
+    ? renderSettledMark(qs) : "";
+  // Between the last answer and the plan landing there is a real wait — planning
+  // took 18 minutes on the run this was built against. The thread says so rather
+  // than ending on a rule with nothing under it.
+  const planCard = renderPlanCard(side.plan, side.progress, qs, side.planOpen)
+    || (settledMark ? `<div class="cmsg"><span class="cav">${esc(AVATAR)}</span>
+        <div><div class="cbody">That is everything. Writing the plan next — it lands here.</div>
+        <div class="cwait"><i></i>planning<span class="el">no plan on disk yet</span></div></div></div>` : "");
+  const map = (side.planOpen && side.plan)
+    ? `<div class="pmap">${planMap(side.plan, side.progress, triage)}</div>` : "";
+
+  // Two flat siblings, not a box inside a box: the shell places the stream in the
+  // middle column and the record in the right rail, and each runs its own height.
+  // "n of m settled" moved onto the ticket header, where the design has it — it is
+  // a fact about the ticket, and it was being stated twice.
   return `<div class="convo">
-    <div class="chat">
-      <div class="chead"><span class="live"><i></i>discuss</span>
-        <span class="settled">${settled} of ${qs.length} settled</span></div>
-      <div class="stream" id="stream">${stream}</div>
-      ${renderComposer(active, later)}
+      <div class="stream" id="stream"><div class="stream-in">${stream}${settledMark}${planCard}${map}</div></div>
+      ${renderComposer(active, later, { ...side, questions: qs })}
     </div>
-    ${renderDecisions(qs, active?.id)}
-  </div>`;
+    ${renderDecisions(qs, active?.id, side)}`;
 }
 
 /**
@@ -1046,6 +1367,62 @@ function wireQuestionActions() {
 // Which question the composer points at. Held outside the render so a poll cannot
 // move it under someone mid-sentence.
 let focusedQuestion = null;
+// Whether the plan card has the full map open under it.
+let planOpen = false;
+
+/**
+ * What the footer says when nothing is waiting on you.
+ *
+ * Read off progress rather than status, because "in_progress" on the ticket and a
+ * step actually running are different claims and only one of them is checkable.
+ */
+function runStatus(task, plan, progress, questions = []) {
+  const steps = (plan && plan.steps) || [];
+  const st = n => (progress && progress.steps && progress.steps[String(n)]) || {};
+  if (!steps.length) {
+    // Saying "planning starts when the questions are settled" under a thread where
+    // they are all settled is the page disagreeing with itself.
+    return (questions.length && !blockingQuestions(questions).length)
+      ? "everything is settled · the planner runs next"
+      : "planning starts when the questions are settled";
+  }
+  const running = steps.filter(s => st(s.step).status === "in_progress").length;
+  const done = steps.filter(s => st(s.step).status === "completed").length;
+  const stuck = steps.filter(s => ["blocked", "failed"].includes(st(s.step).status)).length;
+  if (stuck) return `nothing needs you yet · ${stuck} step${stuck > 1 ? "s" : ""} stopped`;
+  if (running) return `nothing needs you · ${done} of ${steps.length} done, ${running} running`;
+  if (done === steps.length) return `every step is done · next stop is review`;
+  return `nothing needs you · ${done} of ${steps.length} done, nothing running`;
+}
+
+/**
+ * What is running on this ticket right now, for the header's live chip.
+ *
+ * Taken from the step that is actually in progress rather than from the registry:
+ * `agent_profile` is the runtime that ran it, which is the thing a reader wants
+ * when they are deciding how much to trust what just came back. Nothing running,
+ * nothing claimed.
+ */
+function liveAgent(task, progress) {
+  const steps = Object.values((progress && progress.steps) || {});
+  const running = steps.find(s => s.status === "in_progress");
+  if (running) return running.agent_profile || "working";
+  return task.status === "planning" ? "triage" : "";
+}
+
+/** The description toggle. */
+function wireHeader() {
+  const more = document.querySelector("[data-more]");
+  const full = document.querySelector("[data-fulldesc]");
+  if (more && full) {
+    more.addEventListener("click", () => {
+      const open = !full.hidden;
+      full.hidden = open;
+      more.setAttribute("aria-expanded", String(!open));
+      more.textContent = open ? "▾ description" : "▴ description";
+    });
+  }
+}
 // What the last render was built from, so an unchanged poll is a no-op.
 let lastRenderKey = null;
 
@@ -1095,6 +1472,10 @@ function wireConversation(triage, keptScroll = null, openGroups = []) {
 
   document.querySelectorAll("[data-focus]").forEach(btn =>
     btn.addEventListener("click", () => { focusedQuestion = btn.dataset.focus; load({ force: true }); }));
+
+  // The plan card is a summary; the map is the shape. One switch between them.
+  document.querySelectorAll("[data-planopen]").forEach(btn =>
+    btn.addEventListener("click", () => { planOpen = !planOpen; load({ force: true }); }));
 }
 
 /** Record one answer as the decision it binds. */
@@ -1168,6 +1549,39 @@ function restoreDrafts(drafts) {
   }
 }
 
+/**
+ * The two things the rails need, fetched once rather than on every poll.
+ *
+ * Recall shells out to Python and depends on a store that may not be configured,
+ * so it is allowed to fail quietly: the rail simply has no RECALLED section. The
+ * ticket list is cheap but changes slowly, and re-reading it every fifteen seconds
+ * to redraw the same rail is work nobody asked for.
+ */
+let sideData = { tasks: [], children: [], deliverables: [], recalled: null, loaded: false };
+
+async function loadSideData(task) {
+  if (sideData.loaded) return;
+  sideData.loaded = true;
+  getJson("/api/tasks").then(rows => {
+    sideData.tasks = Array.isArray(rows) ? rows : (rows?.tasks || []);
+    load({ force: true });
+  }).catch(() => {});
+  // The rail's other two sections, per design 2c. Both are allowed to be empty and
+  // neither renders a heading when it is.
+  getJson(`/api/tasks/${encodeURIComponent(taskId)}/children`).then(rows => {
+    if (Array.isArray(rows) && rows.length) { sideData.children = rows; load({ force: true }); }
+  }).catch(() => {});
+  getJson(`/api/tasks/${encodeURIComponent(taskId)}/deliverables`).then(rows => {
+    if (Array.isArray(rows) && rows.length) { sideData.deliverables = rows; load({ force: true }); }
+  }).catch(() => {});
+  const q = (task.title || "").slice(0, 200);
+  if (!q) return;
+  getJson(`/api/knowledge/recall?query=${encodeURIComponent(q)}&limit=1`).then(res => {
+    const hit = (res?.results || [])[0];
+    if (hit?.text) { sideData.recalled = hit; load({ force: true }); }
+  }).catch(() => {});
+}
+
 async function load({ force = false } = {}) {
   const root = $("#root");
   if (!taskId) {
@@ -1189,7 +1603,9 @@ async function load({ force = false } = {}) {
     // A poll that changes nothing must not touch the DOM. Replacing #root resets
     // the stream's scroll, re-collapses every open group and moves the page under
     // whoever is reading it — fifteen seconds later, again.
-    const key = JSON.stringify([task.status, task.updated_at, triage, planData.progress, focusedQuestion]);
+    const key = JSON.stringify([task.status, task.updated_at, triage, planData.plan, planData.progress,
+                                focusedQuestion, planOpen, sideData.tasks.length, !!sideData.recalled,
+                                sideData.children.length, sideData.deliverables.length]);
     if (!force && key === lastRenderKey) return;
     lastRenderKey = key;
 
@@ -1201,15 +1617,34 @@ async function load({ force = false } = {}) {
     const openGroups = [...document.querySelectorAll("details.csettled[open]")]
       .map(d => d.querySelector("[data-for]")?.dataset.for).filter(Boolean);
 
-    // One conversation, then the plan. What triage found only stands alone before
-    // it has asked anything — after that it is in the stream with everything else.
-    root.innerHTML = renderTicket(task, triage, activities)
-      + (qs.length ? renderConversation(triage, focusedQuestion) : renderFound(triage))
-      + renderPlan(planData.plan, planData.progress, triage);
+    // Design 2c: one thread, start to finish. The plan is not another view of the
+    // ticket reached by a switch — it is something the agent hands you at a point
+    // in the conversation, so it lands in the stream where that happened, with the
+    // full map behind "open ▸" for when the shape of the thing is the question.
+    const side = {
+      recalled: sideData.recalled,
+      children: sideData.children,
+      deliverables: sideData.deliverables,
+      plan: planData.plan,
+      progress: planData.progress,
+      planOpen,
+      status: runStatus(task, planData.plan, planData.progress, qs),
+    };
+
+    root.innerHTML = `<div class="shell">`
+      + renderRail(sideData.tasks, task, triage, planData)
+      + renderTicket(task, triage, activities, { agent: liveAgent(task, planData.progress) })
+      + (qs.length
+          ? renderConversation(triage, focusedQuestion, side)
+          : `<div class="pane">${renderFound(triage)}${renderPlan(planData.plan, planData.progress, triage)}</div>`
+            + renderDecisions(qs, null, side))
+      + `</div>`;
 
     restoreDrafts(drafts);
     if (qs.length) wireConversation(triage, keptScroll, openGroups);
+    wireHeader();
     wireGraph(planData.plan, planData.progress);
+    loadSideData(task);
   } catch (e) {
     root.innerHTML = `<div class="err">Couldn't load this ticket: ${esc(e.message || e)}</div>`;
   }
