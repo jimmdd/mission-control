@@ -346,3 +346,71 @@ gsd_brief.write(sys.argv[1], {"title": "T"}, [{"becomes": "D-01", "question": "q
 
   rmSync(dir, { recursive: true, force: true });
 });
+
+// GSD resolves the project root through `git rev-parse --git-common-dir`, so in a
+// linked worktree it can write `.planning/` to the *main* checkout and share it
+// across worktrees. Its own words, from the run that caught this:
+//
+//   "GSD's worktree-safety deliberately resolves the project root to the main
+//    checkout, so planning artifacts are shared across worktrees. --cwd doesn't
+//    override it."
+//
+// But it does not always do that — MET-635's plan landed inside the worktree, the
+// demo ticket's in the checkout above it, same command. Placement is a runtime
+// judgement, so looking in one place is wrong half the time: MC reported
+// `prerequisite_missing` on a run that had just written a complete GSD project.
+
+function gitRepoWithWorktree() {
+  const dir = mkdtempSync(join(tmpdir(), "mc-roots-"));
+  const repo = join(dir, "repo"), wt = join(dir, "wt");
+  const git = (args, cwd) => execFileSync("git", args, { cwd, stdio: "ignore" });
+  execFileSync("git", ["init", "-q", repo], { stdio: "ignore" });
+  git(["config", "user.email", "t@t"], repo);
+  git(["config", "user.name", "t"], repo);
+  writeFileSync(join(repo, "a.txt"), "hi");
+  git(["add", "-A"], repo);
+  git(["commit", "-qm", "init"], repo);
+  git(["worktree", "add", "-q", wt, "-b", "wt"], repo);
+  return { dir, repo, wt };
+}
+
+function roots(cwd) {
+  return JSON.parse(execFileSync("python3", ["-c", `
+import json, sys
+sys.path.insert(0, ${JSON.stringify(SWARM)})
+import gsd_backend as g
+print(json.dumps({"roots": [str(r) for r in g.planning_roots(sys.argv[1])],
+                  "initialised": g.project_initialised(sys.argv[1])}))
+`, cwd], { encoding: "utf8", stdio: ["ignore", "pipe", "ignore"] }));
+}
+
+test("a worktree looks in its own tree and in the checkout above it", () => {
+  const { dir, repo, wt } = gitRepoWithWorktree();
+  const r = roots(wt);
+  assert.equal(r.roots.length, 2, "the worktree and the main checkout");
+  assert.ok(r.roots[0].endsWith("wt"), "its own tree first — the more specific answer");
+  assert.ok(r.roots[1].endsWith("repo"));
+  assert.equal(r.initialised, false, "nothing planned yet");
+  rmSync(dir, { recursive: true, force: true });
+});
+
+test("a project GSD wrote to the main checkout is found from the worktree", () => {
+  // This is the exact shape that reported prerequisite_missing on a good run.
+  const { dir, repo, wt } = gitRepoWithWorktree();
+  mkdirSync(join(repo, ".planning"), { recursive: true });
+  assert.equal(roots(wt).initialised, true);
+  rmSync(dir, { recursive: true, force: true });
+});
+
+test("a project inside the worktree is still found", () => {
+  const { dir, wt } = gitRepoWithWorktree();
+  mkdirSync(join(wt, ".planning"), { recursive: true });
+  assert.equal(roots(wt).initialised, true);
+  rmSync(dir, { recursive: true, force: true });
+});
+
+test("a plain checkout does not report a second root", () => {
+  const { dir, repo } = gitRepoWithWorktree();
+  assert.equal(roots(repo).roots.length, 1, "the common dir is its own .git — no duplicate");
+  rmSync(dir, { recursive: true, force: true });
+});

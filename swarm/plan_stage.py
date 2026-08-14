@@ -249,8 +249,13 @@ def find_plan(worktree: str, since: Optional[float] = None) -> Optional[Path]:
     `plan_written` whatever this run did, and because a plan outranks a question, a
     `<mc-questions>` block the planner emitted is discarded with it.
     """
-    root = Path(worktree) / gsd_backend.planning_dir_name()
-    if not root.is_dir():
+    # Both places GSD might have written, for the reason in `planning_roots`: it
+    # resolves the project root through the git *common* dir, so in a worktree the
+    # plan can land in the main checkout instead. Looking in one place reported
+    # "no plan" on a run that had written a complete project.
+    roots = [r / gsd_backend.planning_dir_name() for r in gsd_backend.planning_roots(worktree)]
+    roots = [r for r in roots if r.is_dir()]
+    if not roots:
         return None
     # `*PLAN.md`, not `PLAN.md`. GSD names a phase's plans `01-01-PLAN.md`, one per
     # wave — the exact-name glob found nothing on a run that had just written two
@@ -258,14 +263,15 @@ def find_plan(worktree: str, since: Optional[float] = None) -> Optional[Path]:
     # Newest first: a repo with several planned phases should report the plan this
     # run produced, not whichever sorts first by name.
     candidates = []
-    for path in root.rglob("*PLAN.md"):
-        try:
-            mtime = path.stat().st_mtime
-        except OSError:
-            continue
-        if since is not None and mtime < since:
-            continue
-        candidates.append((mtime, path))
+    for root in roots:
+        for path in root.rglob("*PLAN.md"):
+            try:
+                mtime = path.stat().st_mtime
+            except OSError:
+                continue
+            if since is not None and mtime < since:
+                continue
+            candidates.append((mtime, path))
 
     for _, path in sorted(candidates, reverse=True):
         try:

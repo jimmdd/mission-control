@@ -111,9 +111,47 @@ def plan_command(greenfield: bool = False, mode: str = "", brief: str = "") -> s
     return command
 
 
+def planning_roots(cwd: str) -> list:
+    """Every directory GSD might have put `.planning/` in, for this checkout.
+
+    GSD resolves the project root through `git rev-parse --git-common-dir`, so in a
+    linked worktree it writes to the *main* checkout and shares one `.planning/`
+    across worktrees. Its own words, from the run that caught this:
+
+        "GSD's worktree-safety deliberately resolves the project root to the main
+        checkout, so planning artifacts are shared across worktrees. `--cwd`
+        doesn't override it."
+
+    But it does not always do that — MET-635's plan landed inside the worktree, the
+    demo ticket's in the main checkout, same command. So the placement is a runtime
+    judgement rather than a rule, and looking in only one place is wrong half the
+    time. MC reported `prerequisite_missing` on a run that had just written a
+    complete GSD project, because it checked the worktree and GSD had used the
+    checkout above it.
+
+    Worktree first: when both exist, this run's own tree is the more specific
+    answer.
+    """
+    roots = [Path(cwd)]
+    try:
+        out = subprocess.run(["git", "rev-parse", "--git-common-dir"], cwd=cwd,
+                             capture_output=True, text=True, timeout=10)
+        if out.returncode == 0:
+            common = Path(out.stdout.strip())
+            if not common.is_absolute():
+                common = Path(cwd) / common
+            # `<main checkout>/.git` → the checkout is its parent.
+            main = common.parent.resolve()
+            if main != Path(cwd).resolve():
+                roots.append(main)
+    except (OSError, subprocess.SubprocessError):
+        pass
+    return roots
+
+
 def project_initialised(cwd: str) -> bool:
     """Does this repo already have a GSD project to plan a phase into?"""
-    return (Path(cwd) / planning_dir_name()).is_dir()
+    return any((r / planning_dir_name()).is_dir() for r in planning_roots(cwd))
 
 
 def init_command() -> str:
