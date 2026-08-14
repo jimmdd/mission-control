@@ -95,6 +95,20 @@ def _clean(text: str) -> str:
     return re.sub(r"[ \t]{2,}", " ", out).strip()
 
 
+# MC syncs the settled Q&A back into the ticket description, so by the time a brief
+# is written the description already contains every question and answer. Rendered
+# as-is it produced a 7.4 KB file stating all six twice — once as Q&A prose and once
+# as locked requirements. Both copies agreed, so it was waste rather than
+# contradiction, but it halves the value of the "locked" framing to state the same
+# decision twice in two voices. Found by reading the file a real run produced.
+_QA_SECTION = re.compile(r"\n#+\s*Triage Q&A\b.*", re.S | re.I)
+
+
+def _background(description: str) -> str:
+    """The ticket's own words, without the Q&A the Requirements section restates."""
+    return _clean(_QA_SECTION.sub("", description or "")).strip()
+
+
 def render(task: Dict, questions: Optional[List[Dict]] = None) -> str:
     """The brief GSD's PRD express path turns into a locked CONTEXT.md.
 
@@ -117,7 +131,7 @@ def render(task: Dict, questions: Optional[List[Dict]] = None) -> str:
         "",
     ]
 
-    description = _clean(task.get("description") or "")
+    description = _background(task.get("description") or "")
     if description:
         lines += ["## Background", "", description, ""]
 

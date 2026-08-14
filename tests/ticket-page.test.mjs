@@ -906,3 +906,132 @@ test("confirm is a deliberate write, and it is the only one", () => {
   // A failed confirm must put the button back rather than stranding it disabled.
   assert.match(fn.slice(0, 1200), /btn\.disabled = false/);
 });
+
+// ─────────── talking to the ticket, not to a question (2c mid-run) ───────────
+// Every message used to be scoped to a question, so the box went dead the moment
+// the last one settled — exactly when "how was this implemented" and "change this"
+// become the things you want to say. The channel already existed: the dashboard
+// drawer posts to /api/tasks/:id/activities with a type chosen by ticket status,
+// and bridge.py:4561 turns unacknowledged manual_feedback into a relaunch.
+
+test("the composer stays live once the questions are settled", () => {
+  const { renderConversation } = threadHelpers();
+  const out = renderConversation({ questions: SETTLED, confirmed: true }, null,
+    { taskStatus: "in_progress", status: "nothing needs you" });
+  assert.doesNotMatch(out, /id="say"[^>]*disabled/, "the box is not dead");
+  assert.match(out, /data-send="note"/);
+  assert.match(out, /Ask about this ticket, or say what to change/);
+});
+
+test("a note goes down the channel the ticket's status implies", () => {
+  // Same mapping as the drawer (app.js). Diverging would mean a note typed here
+  // and one typed there reach the agent differently.
+  const { renderConversation } = threadHelpers();
+  const at = s => renderConversation({ questions: SETTLED, confirmed: true }, null, { taskStatus: s });
+  assert.match(at("review"), /data-note="manual_feedback"/);
+  assert.match(at("testing"), /data-note="manual_feedback"/);
+  assert.match(at("planning"), /data-note="planning_answer"/);
+  assert.match(at("in_progress"), /data-note="updated"/);
+  // And it says which way it travels, because "change this" at review relaunches
+  // an agent while a planning note only lands in the next planner pass.
+  assert.match(at("review"), /change requests reach the agent/);
+});
+
+test("the exchange shows what people said, not the bridge narrating itself", () => {
+  const { renderConversation } = threadHelpers();
+  const activities = [
+    { activity_type: "manual_feedback", message: "why is the header duplicated?", created_at: "3" },
+    { activity_type: "agent_reply", agent_id: "a1", message: "It reuses SiteHeader twice.", created_at: "4" },
+    { activity_type: "updated", message: "All questions answered — dispatching for 1 repo(s)", created_at: "1" },
+    { activity_type: "status_changed", message: "Task triaged as ready", created_at: "2" },
+  ];
+  const out = renderConversation({ questions: SETTLED, confirmed: true }, null,
+    { activities, taskStatus: "review" });
+
+  assert.match(out, /why is the header duplicated\?/);
+  assert.match(out, /It reuses SiteHeader twice\./);
+  assert.doesNotMatch(out, /dispatching for 1 repo/, "the bridge narrating itself is not conversation");
+  assert.doesNotMatch(out, /Task triaged as ready/);
+  // Yours reads as yours; an agent's carries its avatar.
+  assert.match(out, /class="cmsg me"><div class="cbody">why is the header/);
+});
+
+test("the exchange reads in the order it happened", () => {
+  const { renderConversation } = threadHelpers();
+  const out = renderConversation({ questions: SETTLED, confirmed: true }, null, {
+    activities: [
+      { activity_type: "manual_feedback", message: "SECOND", created_at: "2026-08-14T02:00:00Z" },
+      { activity_type: "manual_feedback", message: "FIRST", created_at: "2026-08-14T01:00:00Z" },
+    ], taskStatus: "review" });
+  assert.ok(out.indexOf("FIRST") < out.indexOf("SECOND"));
+});
+
+test("a note is posted, not silently dropped, and clears the box only on success", () => {
+  const html = readFileSync(new URL("../public/ticket.html", import.meta.url), "utf8");
+  assert.match(html, /async function postNote\(/);
+  const fn = html.slice(html.indexOf("async function postNote("), html.indexOf("async function postNote(") + 900);
+  assert.match(fn, /\/activities/);
+  assert.match(fn, /activity_type: kind \|\| "updated"/);
+  // The throw precedes the clear, so a failed send never eats what was typed.
+  assert.ok(fn.indexOf("throw new Error") < fn.indexOf("say.value = \"\""));
+});
+
+// ─────────── the rail is the thread list for the whole board ───────────
+
+test("every ticket appears in the rail, whatever its status", () => {
+  // It built groups from LEGS alone and dropped anything matching none, so
+  // on_hold / testing / pending_dispatch tickets simply were not there — while the
+  // nav counted them. A parked ticket vanishing is the worst case: it is parked
+  // precisely because someone has to come back to it.
+  const { renderRail } = threadHelpers();
+  const tasks = [
+    { id: "a", status: "planning", title: "In triage", external_id: "T-1" },
+    { id: "b", status: "on_hold", title: "Parked one", external_id: "T-2" },
+    { id: "c", status: "testing", title: "Being tested", external_id: "T-3" },
+    { id: "d", status: "in_progress", title: "Building", external_id: "T-4" },
+  ];
+  const out = renderRail(tasks, tasks[0], null, {});
+  for (const t of tasks) {
+    assert.match(out, new RegExp(t.external_id), `${t.status} ticket is missing from the rail`);
+  }
+  assert.match(out, /ON HOLD · 1/, "an unnamed status still gets a heading, using its own name");
+});
+
+test("a parked ticket does not borrow the colour that means an agent has it", () => {
+  const { renderRail } = threadHelpers();
+  const parked = { id: "b", status: "on_hold", title: "Parked", external_id: "T-2" };
+  const out = renderRail([parked], parked, null, {});
+  assert.doesNotMatch(out, /class="rt on build"/, "on_hold is not building");
+});
+
+test("every ticket is a thread, including one triage had no questions about", () => {
+  // These used to get a different page — findings and a plan, no stream and no
+  // composer — so the tickets triage was most confident about were the ones you
+  // could say least about.
+  const { renderConversation } = threadHelpers();
+  const out = renderConversation({ questions: [], triage_reasoning: "Single file, clear scope." },
+    null, { taskStatus: "planning" });
+  assert.match(out, /class="stream"/);
+  assert.match(out, /id="say"/, "there is somewhere to type");
+  assert.match(out, /Single file, clear scope\./, "and what triage found is in the stream");
+});
+
+test("triage having no questions reads differently from triage not having run", () => {
+  // Opposite facts: one means nobody need do anything, the other means nothing has
+  // happened yet. The no-questions case is also the one that dispatches unconfirmed.
+  const { renderConversation } = threadHelpers();
+  const ran = renderConversation({ questions: [] }, null, {});
+  assert.match(ran, /had no questions/);
+  assert.match(ran, /nothing here for you to confirm/);
+
+  const never = renderConversation(null, null, {});
+  assert.match(never, /triage hasn't run/);
+
+  // A ready ticket persists no triage_state at all, so the only trace that it was
+  // assessed and waved through is the activity marker. Without reading it the page
+  // reports "triage hasn't run" about a ticket triage read and dispatched.
+  const readyNoState = renderConversation(null, null, {
+    activities: [{ activity_type: "status_changed", message: "Task triaged as ready (implementation) — assigning to agents" }] });
+  assert.match(readyNoState, /had no questions/);
+  assert.match(readyNoState, /reasoning was not recorded/);
+});

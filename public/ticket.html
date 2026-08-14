@@ -216,7 +216,10 @@
   /* The plan map and the pre-triage findings are the middle column's other two
      views. They scroll in the same well the stream does, so the header and the
      rails never move. */
-  .pane { grid-column: 2; grid-row: 2; min-width: 0; min-height: 0; overflow: auto; padding: 0 26px 40px; }
+  /* Row 3, the same row .convo occupies — row 2 is the ticket header. When the nav
+     was added the grid gained a row and this was left behind, so the findings and
+     the plan rendered on top of the header. */
+  .pane { grid-column: 2; grid-row: 3; min-width: 0; min-height: 0; overflow: auto; padding: 20px 26px 40px; }
   @media (max-width: 1080px) { .pane { overflow: visible; } }
   .card { padding: 22px 0 0; border-top: 1px solid var(--line-soft); }
   .card:first-child { border-top: none; }
@@ -701,13 +704,34 @@ function renderTicket(task, triage, activities, extra = {}) {
  * in both places. The badge is the count of questions blocking that ticket, because
  * that is the only reason one of these rows is your problem rather than an agent's.
  */
+/**
+ * Every ticket, grouped by leg. The rail is the thread list for the whole board.
+ *
+ * It used to build groups from LEGS alone and drop anything that matched none —
+ * so `on_hold`, `testing` and `pending_dispatch` tickets simply were not there,
+ * while the nav counted them. A parked ticket disappearing from the list is the
+ * worst case: it is parked precisely because someone needs to come back to it.
+ *
+ * Done is kept, last and collapsed to a few, so the list stays a work queue rather
+ * than an archive.
+ */
 function railGroups(tasks) {
-  const groups = LEGS.slice(0, 5).map(l => ({ label: l.label, statuses: l.statuses, tasks: [] }));
+  const groups = LEGS.map(l => ({ label: l.label, statuses: l.statuses, tasks: [] }));
+  const other = { label: "Other", statuses: [], tasks: [] };
   for (const t of tasks || []) {
     const g = groups.find(x => x.statuses.includes(t.status));
-    if (g) g.tasks.push(t);
+    (g || other).tasks.push(t);
   }
-  return groups.filter(g => g.tasks.length);
+  // Anything the legs do not name still has to show, under the status it actually
+  // has rather than under a heading that would be a guess.
+  const extra = [];
+  for (const t of other.tasks) {
+    const label = (t.status || "unknown").replace(/_/g, " ");
+    let g = extra.find(x => x.label === label);
+    if (!g) extra.push(g = { label, statuses: [t.status], tasks: [] });
+    g.tasks.push(t);
+  }
+  return [...groups, ...extra].filter(g => g.tasks.length);
 }
 
 function openCount(task) {
@@ -775,7 +799,9 @@ function renderRail(tasks, current, triage, planData = {}) {
 
   const rows = groups.map(g => {
     // Past triage the ticket is the agent's, not yours: green rather than cyan.
-    const building = !["Intake", "Triage"].includes(g.label);
+    // A parked or unknown state is neither — it is not moving, so it gets neither
+    // colour rather than borrowing the one that means "an agent has this".
+    const building = ["Plan", "Build", "Review", "Done"].includes(g.label);
     const list = g.tasks
       // The one you are on always shows, however long the group is.
       .sort((a, b) => (a.id === current?.id ? -1 : b.id === current?.id ? 1 : 0))
@@ -980,15 +1006,36 @@ function renderPlan(plan, progress, triage) {
 
 /* ─────────── findings and questions ─────────── */
 
-function renderFound(triage) {
+/**
+ * The ticket before it has any questions.
+ *
+ * "Nothing yet — triage hasn't run" was the only empty state, so a ticket triage
+ * had read and passed as ready looked identical to one it had never seen. Those
+ * are opposite facts: the first means nobody needs to do anything, the second
+ * means nothing has happened yet. Triage having no questions is also the case that
+ * dispatches without a confirmation, so it is exactly the one worth naming.
+ */
+function renderFound(triage, activities) {
   const items = [];
-  if (triage?.triage_reasoning) items.push({ kind: "Blocking", text: triage.triage_reasoning });
+  if (triage?.triage_reasoning) items.push({ kind: "Read", text: triage.triage_reasoning });
   (triage?.questions || []).filter(q => q.answer && q.answered_by === "agent")
     .forEach(q => items.push({ kind: "Worked out", text: `${q.question}\n→ ${q.answer}` }));
-  return `<div class="card sunk">
-    <div class="glab">What we found</div>
-    ${items.length ? items.map(i => `<div class="fitem"><span class="fk">${esc(i.kind)}</span><div class="ftx">${esc(i.text)}</div></div>`).join("")
-      : `<p class="empty">Nothing yet — triage hasn't run.</p>`}
+
+  // A ticket triage passes as ready persists no triage_state at all —
+  // `post_planning_questions` only runs on the not-ready branch — so "did triage
+  // run" cannot be read from the state. The activity log still carries the marker,
+  // and it is the only trace that the ticket was assessed and waved through.
+  const triagedActivity = (activities || []).some(a =>
+    /triaged as ready/i.test(a.message || ""));
+  const ranWithNoQuestions = triagedActivity || (!!triage && !(triage.questions || []).length);
+  const empty = ranWithNoQuestions
+    ? `<p class="empty">Triage read this and had no questions, so it goes straight to planning —
+       there is nothing here for you to confirm. Its reasoning was not recorded.</p>`
+    : `<p class="empty">Nothing yet — triage hasn't run.</p>`;
+
+  return `<div class="card">
+    <div class="glab">What triage found</div>
+    ${items.length ? items.map(i => `<div class="fitem"><span class="fk">${esc(i.kind)}</span><div class="ftx">${esc(i.text)}</div></div>`).join("") : empty}
   </div>`;
 }
 
@@ -1207,6 +1254,68 @@ function renderPlanCard(plan, progress, questions, open = false) {
     </div></div>`;
 }
 
+/**
+ * Talking to the ticket, not to a question.
+ *
+ * Every message used to be scoped to a question, so once the last one settled the
+ * box went dead — exactly when "how was this implemented" and "actually, change
+ * this" start being the things you want to say. The channel for that already
+ * existed: the dashboard drawer posts to `/api/tasks/:id/activities` with a type
+ * chosen by ticket status, and `bridge.py:4561` collects unacknowledged
+ * `manual_feedback` and feeds it into a relaunch. Nothing new was needed — the
+ * ticket page simply never wired to it.
+ *
+ * The type mapping is the drawer's, verbatim (`app.js:1839`). Diverging would mean
+ * a note typed here and a note typed there reach the agent differently.
+ */
+function noteType(status) {
+  if (status === "planning") return "planning_answer";
+  if (status === "review" || status === "testing" || status === "in_review") return "manual_feedback";
+  return "updated";
+}
+
+/** What the bridge writes itself. Echoing it back as conversation is noise. */
+const BRIDGE_MARKERS = [
+  "Bridge needs clarification", "Bridge picked up", "Completed by bridge",
+  "Bridge agent completed", "Bridge agent acknowledged", "Needs clarification before work",
+  "Change request received", "Self-answered", "All questions answered",
+  "Triage could not identify target repos", "posted a repo-selection follow-up",
+  "Could not identify target repos even after", "Repo not found on disk",
+  "Multi-repo task detected", "Decided on your behalf", "Settled without asking",
+  "dispatching for", "Task triaged as ready", "Agent spawn failed", "Checkpoint",
+];
+const isBridgeGenerated = m => BRIDGE_MARKERS.some(x => (m || "").includes(x));
+
+/**
+ * The ticket-level exchange, from the activity log.
+ *
+ * Only what a person said and what came back — the log is mostly the bridge
+ * narrating itself, and a conversation that replays "dispatching for 1 repo(s)"
+ * is a log viewer, not a conversation.
+ */
+const NOTE_TYPES = ["manual_feedback", "planning_answer", "updated", "linear_comment", "agent_reply"];
+
+function ticketNotes(activities) {
+  return (activities || [])
+    .filter(a => NOTE_TYPES.includes(a.activity_type) && (a.message || "").trim())
+    .filter(a => !isBridgeGenerated(a.message))
+    .sort((a, b) => (a.created_at || "").localeCompare(b.created_at || ""));
+}
+
+function renderNotes(activities) {
+  const notes = ticketNotes(activities);
+  if (!notes.length) return "";
+  return notes.map(a => {
+    // An agent reply carries an author; a note you typed does not.
+    const mine = !a.agent_id;
+    if (mine) {
+      return `<div class="cmsg me"><div class="cbody">${esc(a.message)}</div></div>`;
+    }
+    return `<div class="cmsg"><span class="cav">${esc(AVATAR)}</span>
+      <div><span class="crole">agent</span><div class="cbody">${esc(a.message)}</div></div></div>`;
+  }).join("");
+}
+
 /** The question the composer is currently pointed at. */
 function activeQuestion(questions, wantedId) {
   const open = blockingQuestions(questions);
@@ -1244,16 +1353,24 @@ function renderComposer(active, openCount, side = {}) {
         <div class="cfoot">confirming creates the branch and worktree · nothing is written before it</div>
       </div></div>`;
     }
-    // Design 2c: confirmed and running. The composer stops asking for an answer and
-    // starts reporting. The one action still yours is taking a decision back.
-    return `<div class="composer"><div class="cin">
+    // Design 2c: confirmed and running. Nothing is waiting on you, but the box
+    // stays live — this is exactly when "how was this done" and "change this" come
+    // up. Typed text becomes a ticket note, which the bridge picks up as a change
+    // request at review and as an answer during planning.
+    const kind = noteType(side.taskStatus);
+    const hint = kind === "manual_feedback"
+      ? "asks and change requests reach the agent on its next pass"
+      : "notes reach the planner on its next pass";
+    return `<div class="composer" data-note="${esc(kind)}"><div class="cin">
       <div class="cactive">Nothing is waiting on you.</div>
       ${last ? `<div class="cexits">
         <button class="cpill esc" data-focus="${esc(last.id)}">Change a decision</button>
       </div>` : ""}
-      <div class="crow"><input type="text" id="say" placeholder="Nothing to answer — reopen a decision to say more" disabled>
-        <button class="csend" data-send="ask" disabled>↑</button></div>
-      <div class="cfoot">${esc(side.status || "planning can proceed")}</div>
+      <div class="crow">
+        <input type="text" id="say" placeholder="Ask about this ticket, or say what to change…">
+        <button class="csend" data-send="note" title="Send to the agent">↑</button>
+      </div>
+      <div class="cfoot">${esc(side.status || "planning can proceed")} · ${hint}</div>
     </div></div>`;
   }
   // The exits are pills, in the row the design puts above the box: "decide for me"
@@ -1387,7 +1504,7 @@ function renderConversation(triage, activeId, side = {}) {
       <span class="cs-a">${outcome}</span>
       ${said ? `<span class="cs-n">${said} message${said > 1 ? "s" : ""}</span>` : ""}
     </summary><div class="cs-body">${inner}</div></details>`;
-  }).join("") || `<p class="empty">Triage hasn't asked anything yet.</p>`;
+  }).join("") || renderFound(triage, side.activities);
 
   // Design 2c: when the last question settles the thread keeps going in place. The
   // rule marks where triage ended and the plan lands underneath it as a message.
@@ -1417,7 +1534,7 @@ function renderConversation(triage, activeId, side = {}) {
   // "n of m settled" moved onto the ticket header, where the design has it — it is
   // a fact about the ticket, and it was being stated twice.
   return `<div class="convo">
-      <div class="stream" id="stream"><div class="stream-in">${stream}${settledMark}${planCard}${map}</div></div>
+      <div class="stream" id="stream"><div class="stream-in">${stream}${settledMark}${planCard}${map}${renderNotes(side.activities)}</div></div>
       ${renderComposer(active, later, { ...side, questions: qs, needsConfirm })}
     </div>
     ${renderDecisions(qs, active?.id, { ...side, needsConfirm })}`;
@@ -1551,9 +1668,14 @@ function wireConversation(triage, keptScroll = null, openGroups = []) {
   const composer = document.querySelector("[data-active]");
   const activeId = composer?.dataset.active || null;
 
+  const noteKind = document.querySelector("[data-note]")?.dataset.note || "";
+
   const send = async (mode) => {
     const text = (say?.value || "").trim();
-    if (!text || !activeId) { say?.focus(); return; }
+    if (!text) { say?.focus(); return; }
+    // No question in focus means the message is about the ticket, not about a
+    // question — the drawer's channel, so both surfaces reach the agent alike.
+    if (mode === "note" || !activeId) { await postNote(text, noteKind, say); return; }
     if (mode === "answer") { await recordAnswer(triage, activeId, text); return; }
     await postQuestionAction(activeId, "ask", { text }, () => { if (say) say.value = ""; });
   };
@@ -1580,6 +1702,30 @@ function wireConversation(triage, keptScroll = null, openGroups = []) {
   // The plan card is a summary; the map is the shape. One switch between them.
   document.querySelectorAll("[data-planopen]").forEach(btn =>
     btn.addEventListener("click", () => { planOpen = !planOpen; load({ force: true }); }));
+}
+
+/**
+ * A message about the ticket rather than about a question.
+ *
+ * Posted as an activity, which is the channel the bridge already reads: at review
+ * an unacknowledged `manual_feedback` becomes a change request and relaunches the
+ * agent (`bridge.py:4561`); during planning a `planning_answer` is folded into the
+ * planner's context. Same endpoint and same type mapping as the dashboard drawer,
+ * so a note typed here and one typed there are indistinguishable downstream.
+ */
+async function postNote(text, kind, say) {
+  try {
+    const res = await fetch(`/api/tasks/${encodeURIComponent(taskId)}/activities`, {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ activity_type: kind || "updated", message: text }),
+    });
+    if (!res.ok) throw new Error(`send failed (${res.status})`);
+    if (say) say.value = "";
+    load({ force: true });
+  } catch (e) {
+    const note = document.querySelector(".cfoot");
+    if (note) note.textContent = String(e.message || e);
+  }
 }
 
 /**
@@ -1736,7 +1882,11 @@ async function load({ force = false } = {}) {
     // whoever is reading it — fifteen seconds later, again.
     const key = JSON.stringify([task.status, task.updated_at, triage, planData.plan, planData.progress,
                                 focusedQuestion, planOpen, sideData.tasks.length, !!sideData.recalled,
-                                sideData.children.length, sideData.deliverables.length]);
+                                sideData.children.length, sideData.deliverables.length,
+                                // A note posted by you or a reply written by an agent
+                                // changes nothing else on the ticket, so without this
+                                // the poll would decide the page was unchanged.
+                                ticketNotes(activities).length]);
     if (!force && key === lastRenderKey) return;
     lastRenderKey = key;
 
@@ -1760,20 +1910,25 @@ async function load({ force = false } = {}) {
       progress: planData.progress,
       planOpen,
       status: runStatus(task, planData.plan, planData.progress, qs),
+      // The ticket-level conversation, and the status that decides which channel a
+      // new message goes down.
+      activities,
+      taskStatus: task.status,
     };
 
     root.innerHTML = `<div class="shell">`
       + renderNav(sideData.tasks.length ? sideData.tasks : [task], task)
       + renderRail(sideData.tasks, task, triage, planData)
       + renderTicket(task, triage, activities, { agent: liveAgent(task, planData.progress) })
-      + (qs.length
-          ? renderConversation(triage, focusedQuestion, side)
-          : `<div class="pane">${renderFound(triage)}${renderPlan(planData.plan, planData.progress, triage)}</div>`
-            + renderDecisions(qs, null, side))
+      // One surface, always. A ticket with no questions used to get a different
+      // page — findings and a plan, no stream and no composer — so the tickets
+      // triage was most confident about were the ones you could say least about.
+      // Every ticket is a thread now; what differs is what is in it.
+      + renderConversation(triage, focusedQuestion, side)
       + `</div>`;
 
     restoreDrafts(drafts);
-    if (qs.length) wireConversation(triage, keptScroll, openGroups);
+    wireConversation(triage, keptScroll, openGroups);
     wireHeader();
     wireGraph(planData.plan, planData.progress);
     loadSideData(task);
