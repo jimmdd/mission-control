@@ -29,6 +29,8 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 
+import process_level
+
 from planner import (
     generate_plan, save_plan, init_progress, load_progress,
     update_step_progress, get_next_steps, build_step_prompt,
@@ -4516,6 +4518,19 @@ def process_task(task: dict):
         mc_log_activity(task_id, "updated", "Triage could not identify target repos. Manual intervention needed.")
         return
 
+    # Record the assessment even when there is nothing to ask about.
+    #
+    # `post_planning_questions` is the only writer of triage state and it runs only
+    # on the not-ready branch, so a ticket triage passed as ready kept nothing: no
+    # reasoning, no repos, no trace of the judgement. That judgement is the one
+    # that skips human review, which makes it the one most worth keeping — and its
+    # absence had three visible costs. The page could not tell "triage read this
+    # and had no questions" from "triage never ran", opposite facts. The repos it
+    # chose were thrown away, so `identify_repos` re-ran on every poll, once a
+    # minute for the length of planning. And there was nowhere for `confirmed` to
+    # be written, so the gate could not be satisfied.
+    post_planning_questions(task_id, [], triage_result=triage)
+
     # Route through planner for implementation tasks, direct for investigations
     task_type = task.get("task_type", "implementation")
     use_planner = os.environ.get("ENABLE_PLANNER", "1") == "1"
@@ -4989,6 +5004,76 @@ def process_answered_followups():
                 logging.warning(f"Resume failed for {task['id'][:8]}: {e}")
 
 
+def _repo_is_pushable_at(path: str) -> bool:
+    """Can a push from this checkout leave the machine? Also the test seam."""
+    try:
+        out = subprocess.run(["git", "remote", "get-url", "--push", "origin"],
+                             cwd=str(path), capture_output=True, text=True, timeout=10)
+        url = out.stdout.strip()
+        if out.returncode != 0 or not url:
+            return False
+        if url.startswith("DISABLED://"):
+            return False
+        # A remote that is a path on this disk cannot carry a mistake off it.
+        if url.startswith("file://") or url.startswith("/") or url.startswith("~"):
+            return False
+        return True
+    except (OSError, subprocess.SubprocessError):
+        return True
+
+
+def _repo_is_pushable(repos: list) -> bool:
+    """Can a mistake on this ticket leave the machine?
+
+    Not a risk on its own, but it is the difference between a mistake that stays
+    here and one that does not — so it is the last condition `simple` requires.
+    Unknown counts as pushable: the safe default is the one that keeps the gate.
+    """
+    for r in repos or []:
+        path = find_repo_path(r.get("project", ""), r.get("repo", ""))
+        if not path:
+            return True                       # cannot tell — assume it can
+        if _repo_is_pushable_at(str(path)):
+            return True
+    return False
+
+
+def _assess_process_level(task: dict, state: Optional[dict]) -> dict:
+    """The ticket's process level before planning, from signals MC already has.
+
+    `stage="plan"`: this gate runs before a plan exists, so there is no verify
+    command to probe and no file list to read. Planning writes `.planning/` and
+    nothing else — the gate that matters for those unknowns is the one before
+    code is written, not the one before an agent may think.
+    """
+    state = state or {}
+    repos = state.get("triage_repos") or []
+    return process_level.assess(
+        questions=state.get("questions") or [],
+        repos=repos,
+        gate_runnable=None,
+        paths=[],
+        pushable=_repo_is_pushable(repos),
+        # Triage records its reasoning on the ready path now; its absence means
+        # triage either never ran or did not consider this ready.
+        triage_ready=bool(state.get("triage_reasoning")),
+        stage="plan",
+    )
+
+
+def _record_process_level(task_id: str, state: Optional[dict], level: dict) -> None:
+    """Put the assessment on the ticket, so the gate can be argued with."""
+    try:
+        current = (state or {}).get("assessed_level")
+        if current == level["level"]:
+            return
+        mc_request("PUT", f"/api/tasks/{task_id}/triage-state",
+                   {**(state or {}), "assessed_level": level["level"],
+                    "assessed_why": level["why"]})
+    except Exception as e:
+        logging.warning(f"  Could not record process level for {task_id[:8]}: {e}")
+
+
 def _ensure_confirmable(task_id: str, state: Optional[dict]) -> None:
     """Give a question-less ticket somewhere for `confirmed` to be written.
 
@@ -5101,10 +5186,22 @@ def process_planning_tasks():
         # there is nowhere for `confirmed` to be written and the gate can never be
         # satisfied.
         if not (state or {}).get("confirmed"):
-            if not state or not state.get("questions"):
-                _ensure_confirmable(task_id, state)
-            logging.info(f"  {task_id[:8]} not confirmed — waiting for human confirmation")
-            continue
+            # How much process this ticket needs, from what is already known — no
+            # extra model call, and the reasons travel with the verdict so the
+            # call is reviewable rather than another silent judgement.
+            level = _assess_process_level(task, state)
+            if not process_level.requires_confirmation(level["level"], (state or {}).get("process_level", "")):
+                logging.info(f"  {task_id[:8]} assessed {level['level']} — proceeding without confirmation "
+                             f"({'; '.join(level['why'])})")
+                mc_log_activity(task_id, "updated",
+                                f"Proceeding without confirmation — assessed **{level['level']}**: "
+                                + "; ".join(level["why"]))
+            else:
+                if not state or not state.get("questions"):
+                    _ensure_confirmable(task_id, state)
+                _record_process_level(task_id, state, level)
+                logging.info(f"  {task_id[:8]} not confirmed ({level['level']}) — waiting for human confirmation")
+                continue
 
         logging.info(f"Answers confirmed for: {title} ({task_id[:8]}) — proceeding to spawn agents")
 

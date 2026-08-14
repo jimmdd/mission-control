@@ -75,3 +75,27 @@ test("the human is told what the ticket is waiting for", () => {
   // "updated" would be one more line in a log nobody reads.
   assert.match(fn, /"new_triage_question"/);
 });
+
+test("triage records its assessment even when it has nothing to ask", () => {
+  // `post_planning_questions` is the only writer of triage state and it ran only
+  // on the not-ready branch, so a ticket triage passed as ready kept nothing: no
+  // reasoning, no repos, no trace of the judgement that skipped human review.
+  // Three visible costs followed — the page could not tell "triage read this and
+  // had no questions" from "triage never ran"; the repos it chose were discarded
+  // so identify_repos re-ran once a minute; and there was nowhere for `confirmed`
+  // to be written, so the gate could not be satisfied.
+  const at = BRIDGE.indexOf('repos = triage.get("repos", repos)');
+  assert.ok(at > -1, "the ready path is still where it was");
+  const ready = BRIDGE.slice(at, at + 2200);
+  assert.match(ready, /post_planning_questions\(task_id, \[\], triage_result=triage\)/,
+    "the ready path must persist its assessment");
+});
+
+test("an empty question list does not post a 'needs clarification' activity", () => {
+  // Otherwise recording the assessment would tell the user work is blocked on them
+  // when triage's whole finding was that nothing is.
+  const fn = body("post_planning_questions");
+  const gate = fn.slice(0, fn.indexOf("now = datetime"));
+  assert.match(gate, /display_qs = \[q for q in questions if not q\.get\("answer"\)\]/);
+  assert.match(gate, /if display_qs:/, "the activity is posted only when there is something to show");
+});

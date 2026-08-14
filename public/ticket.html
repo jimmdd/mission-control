@@ -470,6 +470,10 @@
   .cin { max-width: 668px; margin: 0 auto; padding: 0 26px; }
   .cactive { font-family: var(--mono); font-size: 10px; letter-spacing: .05em; color: var(--ink-4); margin-bottom: 11px; }
   .cactive b { color: var(--cyan); font-weight: 400; }
+  /* Why the gate is being shown. A verdict you cannot see is one you cannot
+     disagree with, which is the failure mode this whole gate replaces. */
+  .cwhy { font-family: var(--mono); font-size: 10px; line-height: 1.6; color: var(--ink-4); margin-bottom: 11px; }
+  .cwhy b { color: var(--ink-3); font-weight: 400; text-transform: uppercase; letter-spacing: .06em; }
   .cexits { display: flex; flex-wrap: wrap; gap: 8px; margin-bottom: 11px; }
   .cexits .cpill { font-size: 12px; padding: 8px 13px; }
   .crow {
@@ -1454,8 +1458,15 @@ function renderComposer(active, openCount, side = {}) {
     // This is design 3d's rule arriving where the work actually happens: confirm is
     // the one write, and it is deliberate.
     if (side.needsConfirm) {
+      // Why it is being asked at all. A gate with no stated reason is the same
+      // unreviewable judgement as no gate — you cannot disagree with a verdict
+      // you cannot see.
+      const why = (side.assessedWhy || []).length
+        ? `<div class="cwhy"><b>${esc(side.assessedLevel || "normal")}</b> — ${esc(side.assessedWhy.join(" · "))}</div>`
+        : "";
       return `<div class="composer"><div class="cin">
         <div class="cactive">Every question is settled. Nothing has been dispatched yet.</div>
+        ${why}
         <div class="cexits">
           <button class="cpill rec" data-act="confirm">Confirm and start planning</button>
           ${last ? `<button class="cpill esc" data-focus="${esc(last.id)}">Change a decision</button>` : ""}
@@ -1649,7 +1660,11 @@ function renderConversation(triage, activeId, side = {}) {
   // a fact about the ticket, and it was being stated twice.
   return `<div class="convo">
       <div class="stream" id="stream"><div class="stream-in">${stream}${settledMark}${planCard}${map}${renderNotes(side.activities)}</div></div>
-      ${renderComposer(active, later, { ...side, questions: qs, needsConfirm })}
+      ${renderComposer(active, later, { ...side, questions: qs, needsConfirm,
+          // Read off the triage state here rather than only in load(), so the
+          // renderer is complete on its own and testable without the page.
+          assessedLevel: triage?.assessed_level || side.assessedLevel || "",
+          assessedWhy: triage?.assessed_why || side.assessedWhy || [] })}
     </div>
     ${renderDecisions(qs, active?.id, { ...side, needsConfirm })}`;
 }
@@ -2072,6 +2087,10 @@ async function load({ force = false } = {}) {
       progress: planData.progress,
       planOpen,
       status: runStatus(task, planData.plan, planData.progress, qs),
+      // How much process the bridge assessed this ticket needs, and why. Shown at
+      // the gate so the call can be argued with rather than merely obeyed.
+      assessedLevel: triage?.assessed_level || "",
+      assessedWhy: triage?.assessed_why || [],
       // The ticket-level conversation, and the status that decides which channel a
       // new message goes down.
       activities,

@@ -1171,3 +1171,25 @@ test("the rail's activity reads newest first", () => {
   const rail = out.split('<aside class="decisions">')[1];
   assert.ok(rail.indexOf("NEWEST") < rail.indexOf("OLDEST"));
 });
+
+test("the gate says why it is stopping you", () => {
+  // A verdict you cannot see is one you cannot disagree with — which is the exact
+  // failure this gate replaces, not a property it should inherit.
+  const { renderConversation } = threadHelpers();
+  const out = renderConversation({
+    questions: SETTLED,
+    assessed_level: "careful",
+    assessed_why: ["spans 2 repos", "no verify command that runs on the base commit"],
+  }, null, {});
+  assert.match(out, /data-act="confirm"/);
+  assert.match(out, /class="cwhy"/);
+  assert.match(out, /careful/);
+  assert.match(out, /spans 2 repos · no verify command/);
+});
+
+test("no assessment recorded means no invented explanation", () => {
+  const { renderConversation } = threadHelpers();
+  const out = renderConversation({ questions: SETTLED }, null, {});
+  assert.match(out, /data-act="confirm"/, "the gate still holds");
+  assert.doesNotMatch(out, /class="cwhy"/, "but it does not make up a reason");
+});
