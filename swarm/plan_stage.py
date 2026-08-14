@@ -140,6 +140,35 @@ def workflow_instruction(provider: str, command: str) -> str:
             f"workflow specifies.")
 
 
+def waiting_protocol() -> str:
+    """Never poll a background subagent by returning to the model.
+
+    GSD backgrounds its planner and tells the orchestrator to "repeat gsd_stall_watch
+    while waiting/active". On Claude Code every repeat is a turn, and every turn
+    re-reads the whole context. On MET-635 that came to 485 turns of `echo pN`,
+    each described by the model as "idle", at roughly 200K tokens apiece — about
+    36% of the run's turns and 97M tokens, spent waiting.
+
+    A shell loop that sleeps costs one turn no matter how long it waits. GSD ships
+    the sleep already, inside its own helper; it just is not reliably reached.
+    """
+    return (
+        "WAITING ON A BACKGROUND SUBAGENT — this matters more than it looks:\n"
+        "Wait inside a single shell command that blocks, never by running a command,\n"
+        "returning, and running another. One blocking call costs one turn however\n"
+        "long it takes; polling costs a turn and a full context re-read every time\n"
+        "round, and that is the single largest cost in a planning run.\n"
+        "\n"
+        "Use the workflow's own stall-detection helper if it defines one, since it\n"
+        "already sleeps between checks. Otherwise block like this:\n"
+        "\n"
+        "  for i in $(seq 1 120); do <check> && break; sleep 15; done\n"
+        "\n"
+        "Do not emit placeholder commands such as `echo p1`, `echo p2` to pass the\n"
+        "time. If you have nothing to do but wait, wait inside one command.\n"
+    )
+
+
 def _ticket_section(task: Dict) -> List[str]:
     parts = [f"TICKET: {task.get('title', '')}"]
     if task.get("description"):
@@ -197,6 +226,7 @@ def build_prompt(task: Dict, context: str = "", provider: str = "") -> str:
         parts.append(context)
     parts.append(gsd_backend.plan_step_text(provider or _planning_provider()))
     parts.append(question_protocol())
+    parts.append(waiting_protocol())
     parts.append(
         "When the plan is written, say so and stop. Do not begin executing it."
     )

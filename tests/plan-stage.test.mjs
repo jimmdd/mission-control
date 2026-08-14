@@ -702,3 +702,21 @@ print(json.dumps({"outcome": v["outcome"], "calls": seen}))
     assert.equal(r.outcome, "plan_written");
   } finally { rmSync(dir, { recursive: true, force: true }); }
 });
+
+test("the planner is told to block while waiting, not to poll", () => {
+  // GSD backgrounds its planner and says "repeat gsd_stall_watch while waiting".
+  // On Claude Code each repeat is a turn with a full context re-read: 485 turns of
+  // `echo pN` on MET-635, ~36% of the run, ~97M tokens spent idling.
+  const r = python(`
+import json, plan_stage
+print(json.dumps({"plan": plan_stage.build_prompt({"title": "t"}, provider="claude"),
+                  "init": plan_stage.build_init_prompt({"title": "t"}, provider="claude")}))
+`);
+  assert.match(r.plan, /single shell command that blocks/);
+  assert.match(r.plan, /one blocking call costs one turn/i);
+  // Naming the actual failure, because the model invented it once already.
+  assert.match(r.plan, /echo p1/);
+  assert.match(r.plan, /stall-detection helper if it defines one/);
+  // Setup does not spawn background subagents, so it does not need the rule.
+  assert.doesNotMatch(r.init, /single shell command that blocks/);
+});
