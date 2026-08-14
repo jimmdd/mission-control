@@ -50,6 +50,9 @@ def main(argv=None) -> int:
             job["worktree"], job["task"],
             context=job.get("context", ""), model=job.get("model", ""),
             mode=job.get("mode", ""),
+            # The settled decisions, so the stage can write them into the worktree
+            # as a file GSD treats as locked rather than as prose in a prompt.
+            questions=job.get("questions") or [],
         )
     except Exception as e:                      # noqa: BLE001 — the verdict must land
         logging.exception("planning job failed")

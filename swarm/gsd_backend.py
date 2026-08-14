@@ -54,10 +54,24 @@ def ensure_supported_backend() -> str:
 # 1,209 orchestrator turns. Most tickets are not a project phase, and GSD ships
 # lighter doors for them. Measured per ticket rather than assumed.
 PLAN_MODES = {
-    "phase": "/gsd-plan-phase --prd",   # full: multi-phase work
+    # `--prd` used to be passed here with no filepath, which is a no-op that reads
+    # as a feature. plan-phase.md:71 only sets PRD_PARAM when the flag is followed
+    # by a non-flag token — `--prd` alone matches nothing, so the express path
+    # never fired and the run fell through to step 4, "Load CONTEXT.md", whose
+    # empty branch calls `AskUserQuestion`. That tool does not exist under
+    # `claude -p` (verified: 163 tools offered on the MET-635 run, not one of them
+    # it), so the gate did not stall — the agent chose for itself, silently. The
+    # path is supplied at call time now, and only when there is a file behind it.
+    "phase": "/gsd-plan-phase",         # full: multi-phase work
     "quick": "/gsd-quick --validate",   # GSD guarantees, optional agents skipped
     "mvp": "/gsd-mvp-phase",            # vertical slice, then plan-phase
 }
+
+# Nothing may put GSD into a discussion. Its discussion is AskUserQuestion, there
+# is no such tool in our runtime, and the failure is silent — the workflow's own
+# fallback ("--text") only turns it into a numbered list printed to a transcript
+# nobody is reading. Questions are asked through the ticket or not at all.
+FORBIDDEN_FLAGS = ("--discuss",)
 # Quick by default: measured against the full path on MET-635 it produced the same
 # 19-task decomposition in 155 turns instead of 1,365, and 7.4M context tokens
 # instead of 237M. The full phase workflow is for work that genuinely spans phases,
@@ -79,11 +93,22 @@ def plan_mode(requested: str = "") -> str:
     return DEFAULT_PLAN_MODE
 
 
-def plan_command(greenfield: bool = False, mode: str = "") -> str:
+def plan_command(greenfield: bool = False, mode: str = "", brief: str = "") -> str:
+    """The door, plus the brief when there is one and the door reads one.
+
+    Only `plan-phase` has a PRD express path. `quick` names its context file after
+    an id it generates mid-run (`quick.md:311`), so there is no path to hand it
+    ahead of time — and it needs none: its single `AskUserQuestion` fires only when
+    the description is empty, and we always supply one.
+    """
     ensure_supported_backend()
     if greenfield:
         return "/gsd-new-project --auto"
-    return PLAN_MODES[plan_mode(mode)]
+    command = PLAN_MODES[plan_mode(mode)]
+    if brief and command.startswith("/gsd-plan-phase"):
+        command = f"{command} --prd {brief}"
+    assert not any(f in command for f in FORBIDDEN_FLAGS), f"GSD cannot discuss headlessly: {command}"
+    return command
 
 
 def project_initialised(cwd: str) -> bool:
@@ -120,7 +145,7 @@ def workflow_path(command: str) -> Optional[str]:
     return None
 
 
-def plan_step_text(provider: str = "", mode: str = "") -> str:
+def plan_step_text(provider: str = "", mode: str = "", brief: str = "") -> str:
     """The Plan step, written so the agent handles an uninitialised project itself.
 
     The worktree does not exist when the prompt is built, so the sequence cannot be
@@ -130,13 +155,23 @@ def plan_step_text(provider: str = "", mode: str = "") -> str:
     mission description will build the thing instead of relaying that question.
     """
     ensure_supported_backend()
-    return (
+    text = (
         f"First check whether this repo has a GSD project: `ls -d {planning_dir_name()} 2>/dev/null`.\n"
         f"- If it is MISSING, run `{init_command()}` first. `{plan_command()}` cannot plan into a\n"
         f"  repo with no {planning_dir_name()}/ — it will stop and ask for this, and you must not\n"
         f"  skip ahead to writing code when that happens.\n"
-        f"- Then run `{plan_command(mode=mode)}`."
+        f"- Then run `{plan_command(mode=mode, brief=brief)}`."
     )
+    if brief:
+        # Said plainly as well as passed as a flag. The decisions are already in
+        # this prompt as prose; the file is what makes them binding, and an agent
+        # that reads it will not re-litigate what it says.
+        text += (
+            f"\n\n`{brief}` holds the decisions already settled with the human on this\n"
+            "ticket. They are locked: build to them, do not re-open them, and do not ask\n"
+            "about anything they already answer."
+        )
+    return text
 
 
 def plan_sequence(cwd: str) -> list:

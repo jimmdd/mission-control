@@ -3112,6 +3112,19 @@ def _pid_alive(pid) -> bool:
         return False
 
 
+def _task_questions(task_id: str) -> list:
+    """This ticket's questions, or an empty list if they cannot be read.
+
+    Planning must not fail because the triage state was unreadable — the brief is
+    an improvement on prose in a prompt, not a precondition for planning at all.
+    """
+    try:
+        state = mc_request("GET", f"/api/tasks/{task_id}/triage-state")
+        return (state or {}).get("questions") or []
+    except Exception:
+        return []
+
+
 def _start_planning_job(task: dict, worktree: Path, job: Path):
     """Launch planning as its own process and return immediately.
 
@@ -3128,6 +3141,11 @@ def _start_planning_job(task: dict, worktree: Path, job: Path):
         # A ticket may name the GSD door it wants; the default suits most, and the
         # ones that genuinely span phases can say so.
         "mode": _ticket_plan_mode(task_id),
+        # The decisions themselves, not just their prose rendering in `context`.
+        # The stage writes them into the worktree as a brief, which is the only way
+        # GSD treats them as locked — its own discussion cannot run here, because
+        # `AskUserQuestion` does not exist under `claude -p`.
+        "questions": _task_questions(task_id),
         "state": "running",
     }
     try:

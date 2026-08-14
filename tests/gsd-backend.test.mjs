@@ -182,3 +182,132 @@ print(json.dumps({
   // A typo on a ticket must not stop it being planned.
   assert.match(r.typo, /gsd-quick/);
 });
+
+// ─────────── GSD cannot ask a question here, so it must not be asked to ───────────
+// Verified from a real run rather than reasoned about: the MET-635 plan transcript
+// records the 163 tools that session was offered and `AskUserQuestion` is not among
+// them — Claude Code withholds it under `-p`. Across all three plan-stage
+// transcripts there is not one tool_use block naming it; the sixty textual mentions
+// are the workflow markdown being read.
+//
+// A missing tool named in a prompt fails exactly the way the colon commands did:
+// silently. The agent drops the step and proceeds from surrounding prose — so a
+// discussion gate becomes the agent deciding alone, with no record that anything
+// was ever asked. GSD's documented fallback (`--text`) only turns the tool call
+// into a numbered list and a request to type a choice, and under `-p` there is
+// nobody to type it.
+
+function planCommands() {
+  const out = execFileSync("python3", ["-c", `
+import json, sys
+sys.path.insert(0, ${JSON.stringify(SWARM)})
+import gsd_backend as g
+print(json.dumps({
+    "modes": {m: g.plan_command(mode=m) for m in g.PLAN_MODES},
+    "phase_with_brief": g.plan_command(mode="phase", brief="/w/MC-BRIEF.md"),
+    "quick_with_brief": g.plan_command(mode="quick", brief="/w/MC-BRIEF.md"),
+    "step_text": g.plan_step_text("claude", "phase", "/w/MC-BRIEF.md"),
+    "step_text_bare": g.plan_step_text("claude", "phase"),
+}))
+`], { encoding: "utf8", stdio: ["ignore", "pipe", "ignore"] });
+  return JSON.parse(out);
+}
+
+test("no door may put GSD into a discussion it cannot have", () => {
+  const c = planCommands();
+  for (const [mode, cmd] of Object.entries(c.modes)) {
+    assert.doesNotMatch(cmd, /--discuss/, `${mode} would open a discussion with no way to ask: ${cmd}`);
+  }
+  assert.doesNotMatch(c.phase_with_brief, /--discuss/);
+});
+
+test("--prd is never passed without a path behind it", () => {
+  // plan-phase.md:71 only sets PRD_PARAM when --prd is followed by a non-flag
+  // token, so a bare `--prd` matched nothing and the express path never fired.
+  // The run then fell through to step 4, whose empty branch calls AskUserQuestion.
+  const c = planCommands();
+  for (const [mode, cmd] of Object.entries(c.modes)) {
+    assert.doesNotMatch(cmd, /--prd(\s|$)(?!\S)/, `${mode} passes a valueless --prd: ${cmd}`);
+    assert.doesNotMatch(cmd, /--prd$/, `${mode} ends on a bare --prd: ${cmd}`);
+  }
+  assert.match(c.phase_with_brief, /--prd \/w\/MC-BRIEF\.md/, "with a brief, the path is supplied");
+});
+
+test("only the door with a PRD express path is given the brief", () => {
+  // quick names its context file after an id it generates mid-run, so there is no
+  // path to hand it in advance — and it needs none: its one AskUserQuestion fires
+  // only on an empty description, and we always supply one.
+  const c = planCommands();
+  assert.doesNotMatch(c.quick_with_brief, /--prd/);
+  assert.match(c.quick_with_brief, /^\/gsd-quick/);
+});
+
+test("the plan step says the decisions are locked, and only when they exist", () => {
+  const c = planCommands();
+  assert.match(c.step_text, /MC-BRIEF\.md/);
+  assert.match(c.step_text, /locked/i);
+  assert.doesNotMatch(c.step_text_bare, /MC-BRIEF/, "no brief, no claim that one exists");
+});
+
+// The brief is what makes an answer binding rather than advisory. GSD's PRD express
+// path turns every requirement in it into a locked decision in CONTEXT.md and
+// bypasses the gate that would otherwise ask about the missing context.
+
+function brief(task, questions) {
+  return execFileSync("python3", ["-c", `
+import json, sys
+sys.path.insert(0, ${JSON.stringify(SWARM)})
+import gsd_brief
+task, qs = json.loads(sys.argv[1]), json.loads(sys.argv[2])
+print(gsd_brief.render(task, qs))
+`, JSON.stringify(task), JSON.stringify(questions)],
+    { encoding: "utf8", stdio: ["ignore", "pipe", "ignore"] });
+}
+
+test("every settled decision becomes a requirement the planner must honour", () => {
+  const out = brief(
+    { title: "Paginate /api/tasks", description: "See [the design](https://x.example/a?sig=abc)." },
+    [{ becomes: "D-01", question: "Cursor column?", answer: "created_at", why: "picks the index" },
+     { becomes: "D-02", question: "Page size?", answer: "50", answered_by: "agent", reason: "list renders 20" }]);
+
+  assert.match(out, /## Requirements/);
+  assert.match(out, /\*\*D-01\*\* — Cursor column\?/);
+  assert.match(out, /Decision: created_at/);
+  // A delegated pick reads as delegated here too, so the planner is not told a
+  // human weighed something an agent decided.
+  assert.match(out, /chosen by the agent on the user's behalf/);
+  assert.match(out, /locked/i);
+  // The description's attachment URLs are noise in a decision record; the words
+  // somebody wrote are not.
+  assert.match(out, /See the design\./);
+  assert.doesNotMatch(out, /https?:/);
+});
+
+test("a deferred question is stated as out of scope, not dropped", () => {
+  // "We decided not to decide this yet" is a constraint on the plan. Omitting it
+  // invites the planner to build the thing the deferral was avoiding.
+  const out = brief({ title: "T" }, [{ becomes: "D-03", question: "Rate limit?", deferred: true }]);
+  assert.match(out, /## Out of scope/);
+  assert.match(out, /\*\*D-03\*\*/);
+  assert.match(out, /Do not build anything that depends on it/);
+});
+
+test("a ticket with no questions still produces a parseable brief", () => {
+  // A PRD with an empty Requirements section is indistinguishable from one the
+  // express path failed to read.
+  const out = brief({ title: "T", description: "Just do the thing." }, []);
+  assert.match(out, /## Requirements/);
+  assert.match(out, /- \S/, "the section has at least one bullet");
+});
+
+test("the brief is only reported when it actually reached disk", async () => {
+  // --prd pointing at a file that is not there sends the express path looking for
+  // one, and the gate it exists to skip fires anyway.
+  const out = execFileSync("python3", ["-c", `
+import sys
+sys.path.insert(0, ${JSON.stringify(SWARM)})
+import gsd_brief
+print(gsd_brief.write("/definitely/not/a/worktree", {"title": "T"}, []))
+`], { encoding: "utf8", stdio: ["ignore", "pipe", "ignore"] });
+  assert.match(out.trim(), /^None$/);
+});
