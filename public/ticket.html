@@ -854,9 +854,10 @@ function renderComposer(active, openCount) {
       <div class="cfoot">Planning can proceed.</div>
     </div>`;
   }
-  const left = openCount - 1;
+  // No restatement of the question: it is directly above, at full size. This line
+  // says only what the answer binds and what is still to come.
   return `<div class="composer" data-active="${esc(active.id)}">
-    <div class="cactive">Answering <b>${esc(active.becomes || "")}</b> · ${esc(active.question)}</div>
+    <div class="cactive">Your answer becomes <b>${esc(active.becomes || "a decision")}</b></div>
     <div class="crow">
       <input type="text" id="say" placeholder="Answer in your own words, or ask about it…">
       <button class="cbtn" data-send="answer">Answer</button>
@@ -866,7 +867,9 @@ function renderComposer(active, openCount) {
       <button class="cbtn" data-act="delegate" data-q="${esc(active.id)}">Decide for me</button>
       <button class="cbtn" data-act="defer" data-q="${esc(active.id)}">Decide later</button>
     </div>
-    <div class="cfoot">planning starts when the last question is settled${left > 0 ? ` · ${left} left after this` : ""}</div>
+    <div class="cfoot">${openCount > 0
+      ? `${openCount} more after this · planning starts when the last is settled`
+      : "last one — planning starts when this is settled"}</div>
   </div>`;
 }
 
@@ -901,14 +904,23 @@ function renderConversation(triage, activeId) {
   const qs = triage?.questions || [];
   const active = activeQuestion(qs, activeId);
   const settled = qs.filter(q => q.answer).length;
-  const stream = chatTimeline(qs).map(renderChatEvent).join("")
+  // Everything settled, then the one question being answered. Nothing further:
+  // dumping all six at once is a form, not a conversation, and it forced the
+  // composer to restate which one you were on — the same question twice, once
+  // full size and once as a grey line by the box.
+  const upTo = [];
+  for (const ev of chatTimeline(qs)) {
+    if (ev.q.answer || ev.q.deferred || ev.q.id === active?.id) upTo.push(ev);
+  }
+  const later = blockingQuestions(qs).filter(q => q.id !== active?.id).length;
+  const stream = upTo.map(renderChatEvent).join("")
     || `<p class="empty">Triage hasn't asked anything yet.</p>`;
   return `<div class="convo">
     <div class="chat">
       <div class="chead"><span class="live"><i></i>discuss</span>
         <span class="settled">${settled} of ${qs.length} settled</span></div>
       <div class="stream" id="stream">${stream}</div>
-      ${renderComposer(active, blockingQuestions(qs).length)}
+      ${renderComposer(active, later)}
     </div>
     ${renderDecisions(qs, active?.id)}
   </div>`;

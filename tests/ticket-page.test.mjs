@@ -526,3 +526,35 @@ test("a pill is only highlighted when the agent actually recommended it", () => 
       recommended: "Adobe" }] }, null);
   assert.match(withRec, /class="cpill rec" data-answer="Adobe"/, "and it lands on the one named");
 });
+
+test("the stream asks one question, not all of them at once", () => {
+  // Six questions stacked with their options is a form, not a conversation — and it
+  // forced the composer to restate which one you were on, so the same question
+  // appeared twice: full size in the stream and as a grey line by the box.
+  const { renderConversation } = convoHelpers();
+  const qs = [
+    { id: "a", becomes: "D-01", question: "Which licence?", answer: "Host & Link", answered_by: "you" },
+    { id: "b", becomes: "D-02", question: "Variable or static?", options: ["Variable"] },
+    { id: "c", becomes: "D-03", question: "Rate limit?", options: ["Yes"] },
+    { id: "d", becomes: "D-04", question: "Feature flag?", options: ["No"] },
+  ];
+  const out = renderConversation({ questions: qs }, null);
+
+  assert.match(out, /Which licence\?/, "settled ones stay — they are the record");
+  assert.match(out, /Variable or static\?/, "the one being answered is shown");
+  assert.doesNotMatch(out, /Rate limit\?[\s\S]*data-answer/, "later ones are not asked yet");
+  assert.doesNotMatch(out, /Feature flag\?[\s\S]*data-answer/);
+
+  // The composer says what the answer binds and what is left, not the question again.
+  assert.match(out, /Your answer becomes <b>D-02<\/b>/);
+  assert.match(out, /2 more after this/);
+  assert.equal((out.match(/Variable or static\?/g) || []).length, 2,
+    "once in the stream, once in the decision rail — never twice in the chat column");
+});
+
+test("the last question says so", () => {
+  const { renderConversation } = convoHelpers();
+  const out = renderConversation({ questions: [
+    { id: "a", becomes: "D-01", question: "Which licence?", options: ["Host & Link"] }] }, null);
+  assert.match(out, /last one — planning starts when this is settled/);
+});
