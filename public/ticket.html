@@ -364,6 +364,23 @@
   .creceipt b { color: rgba(224,224,224,.75); font-weight: 400; }
   .cdec .cbody { font-size: 12.5px; }
   .creason { font-size: 12px; line-height: 1.6; color: rgba(224,224,224,.6); border-left: 2px solid rgba(255,255,255,.12); padding-left: 13px; }
+
+  /* The thread's system half. An event is not somebody speaking, so it is a line
+     rather than a message — no avatar, no bubble. Trouble is amber, which on this
+     page means a human is the blocker, and that is what a failure makes you. */
+  .cevent {
+    display: flex; gap: 9px; align-items: baseline; font-family: var(--mono);
+    font-size: 10.5px; line-height: 1.5; color: var(--ink-4);
+  }
+  .cevent .mk { flex: none; color: rgba(224,224,224,.28); }
+  .cevent.bad { color: var(--amber); }
+  .cevent.bad .mk { color: var(--amber); }
+  /* Fifty repetitions of "heartbeat: running" is not a conversation, but silence
+     is not honest either — the run becomes one line saying how many there were. */
+  .cnoise {
+    font-family: var(--mono); font-size: 10px; color: rgba(224,224,224,.22);
+    padding-left: 19px;
+  }
   .cwait {
     display: flex; align-items: center; gap: 9px; border: 1px solid rgba(255,255,255,.09);
     border-radius: 7px; padding: 9px 12px; font-family: var(--mono); font-size: 10.5px;
@@ -529,7 +546,10 @@
 const $ = (s, el = document) => el.querySelector(s);
 const esc = s => String(s ?? "").replace(/[&<>"']/g, c =>
   ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
-const taskId = new URLSearchParams(location.search).get("id") || "";
+// Which ticket the page is showing. Not a constant: the rail switches between
+// tickets in place, so a full document load — refetching the page, the rail and
+// every ticket in it just to change one column — is work nobody asked for.
+let taskId = new URLSearchParams(location.search).get("id") || "";
 let selectedStep = null;
 /** The agent's mark in the stream. One identity, not one per internal stage. */
 const AVATAR = "mc";
@@ -1289,31 +1309,84 @@ const isBridgeGenerated = m => BRIDGE_MARKERS.some(x => (m || "").includes(x));
 /**
  * The ticket-level exchange, from the activity log.
  *
- * Only what a person said and what came back — the log is mostly the bridge
- * narrating itself, and a conversation that replays "dispatching for 1 repo(s)"
- * is a log viewer, not a conversation.
+ * Attribution has to be positive, never inferred from a missing field. The first
+ * version treated "no agent_id" as "the human said this", and MC writes plenty of
+ * agent-less activities — so 37 entries on MET-635, almost all identical
+ * heartbeats, rendered as right-aligned messages from the user. A note the page
+ * sends now says so in its metadata; nothing else is ever attributed to a person.
+ *
+ * `updated` cannot be used as the signal either: it is both the drawer's type for
+ * a human note on an in-progress ticket and MC's catch-all for narrating itself.
  */
-const NOTE_TYPES = ["manual_feedback", "planning_answer", "updated", "linear_comment", "agent_reply"];
+const HUMAN_TYPES = ["manual_feedback", "planning_answer", "linear_comment"];
+const HUMAN_MARK = '"source":"human"';
+
+/** Routine chatter. True every 60 seconds, worth reading approximately never. */
+const NOISE = /^Agent heartbeat|^Lease |lease (claimed|released)|^Prompt sent|^Liveness/i;
+/** Things that went wrong. These are never collapsed, whatever else is.
+ *  No `attempt \d` here: a heartbeat says "(attempt 1/3)" on every beat, so it
+ *  matched every one of them as a failure. The real failures say so in words. */
+const TROUBLE = /fail|error|refus|escalat|timed out|stopped|blocked|could not|cannot|giving up/i;
+/** Events worth a line in the thread even though nobody said them. */
+const MILESTONE_TYPES = ["step_dispatched", "step_completed", "step_escalated", "step_retry",
+  "plan_created", "checkpoint_raised", "checkpoint_resolved", "spawned", "status_changed", "needs_human"];
+
+function classifyActivity(a) {
+  const msg = a.message || "";
+  const meta = typeof a.metadata === "string" ? a.metadata : JSON.stringify(a.metadata || "");
+  if (!msg.trim()) return null;
+  if ((meta || "").includes(HUMAN_MARK)) return "human";
+  if (HUMAN_TYPES.includes(a.activity_type) && !isBridgeGenerated(msg)) return "human";
+  if (a.activity_type === "agent_reply") return "agent";
+  // Noise is tested first: a heartbeat is routine even when its wording overlaps
+  // whatever a failure would say. Nothing that repeats every 60 seconds is news.
+  if (NOISE.test(msg) || a.activity_type === "liveness") return "noise";
+  if (TROUBLE.test(msg)) return "trouble";
+  if (MILESTONE_TYPES.includes(a.activity_type)) return "event";
+  return "noise";
+}
 
 function ticketNotes(activities) {
   return (activities || [])
-    .filter(a => NOTE_TYPES.includes(a.activity_type) && (a.message || "").trim())
-    .filter(a => !isBridgeGenerated(a.message))
-    .sort((a, b) => (a.created_at || "").localeCompare(b.created_at || ""));
+    .map(a => ({ a, kind: classifyActivity(a) }))
+    .filter(x => x.kind)
+    .sort((x, y) => (x.a.created_at || "").localeCompare(y.a.created_at || ""));
 }
 
+/**
+ * The thread's system half: milestones and trouble in full, routine chatter
+ * collapsed to a count. Fifty repetitions of "heartbeat: running (attempt 1/3)"
+ * is not a conversation, but neither is silence — the run of them becomes one
+ * line saying how many there were.
+ */
 function renderNotes(activities) {
-  const notes = ticketNotes(activities);
-  if (!notes.length) return "";
-  return notes.map(a => {
-    // An agent reply carries an author; a note you typed does not.
-    const mine = !a.agent_id;
-    if (mine) {
-      return `<div class="cmsg me"><div class="cbody">${esc(a.message)}</div></div>`;
+  const rows = ticketNotes(activities);
+  if (!rows.length) return "";
+  const out = [];
+  let run = 0;
+
+  const flush = () => {
+    if (!run) return;
+    out.push(`<div class="cnoise">${run} routine update${run > 1 ? "s" : ""}</div>`);
+    run = 0;
+  };
+
+  for (const { a, kind } of rows) {
+    if (kind === "noise") { run++; continue; }
+    flush();
+    if (kind === "human") {
+      out.push(`<div class="cmsg me"><div class="cbody">${esc(a.message)}</div></div>`);
+    } else if (kind === "agent") {
+      out.push(`<div class="cmsg"><span class="cav">${esc(AVATAR)}</span>
+        <div><span class="crole">agent</span><div class="cbody">${esc(a.message)}</div></div></div>`);
+    } else {
+      // An event is not somebody speaking, so it reads as a line, not a message.
+      out.push(`<div class="cevent ${kind === "trouble" ? "bad" : ""}">
+        <span class="mk">${kind === "trouble" ? "!" : "·"}</span>${esc(clip(a.message, 160))}</div>`);
     }
-    return `<div class="cmsg"><span class="cav">${esc(AVATAR)}</span>
-      <div><span class="crole">agent</span><div class="cbody">${esc(a.message)}</div></div></div>`;
-  }).join("");
+  }
+  flush();
+  return out.join("");
 }
 
 /** The question the composer is currently pointed at. */
@@ -1566,6 +1639,47 @@ async function postQuestionAction(qid, action, payload = {}, onOk = null) {
  * The exits, delegated once. "Decide for me" and "Decide later" settle a question
  * without answering it; reopen takes an answer or a deferral back.
  */
+/**
+ * Switching tickets without reloading the document.
+ *
+ * The rail's rows stay real links — middle-click, ⌘-click and "copy link address"
+ * keep working, and landing on the URL directly still works. A plain left click is
+ * intercepted instead: swapping one column does not justify refetching the page,
+ * the rail, and every ticket in it.
+ *
+ * Delegated once at the document, because the rail is replaced on every render.
+ */
+function wireRailNavigation() {
+  document.addEventListener("click", (ev) => {
+    // Anything the browser should handle itself, it still does.
+    if (ev.defaultPrevented || ev.button !== 0 || ev.metaKey || ev.ctrlKey || ev.shiftKey || ev.altKey) return;
+    const link = ev.target.closest("a.rt");
+    if (!link) return;
+    ev.preventDefault();
+    const next = new URL(link.href, location.href).searchParams.get("id");
+    if (next && next !== taskId) goToTicket(next, true);
+  });
+  // Back and forward move between tickets, because they are separate URLs.
+  window.addEventListener("popstate", () => {
+    const id = new URLSearchParams(location.search).get("id") || "";
+    if (id && id !== taskId) goToTicket(id, false);
+  });
+}
+
+/** Point the page at another ticket, clearing everything scoped to the old one. */
+function goToTicket(id, push) {
+  taskId = id;
+  // All of this belongs to the ticket you were on. Carried over, the new ticket
+  // opens focused on a question that is not on it, or showing its plan map open.
+  focusedQuestion = null;
+  selectedStep = null;
+  planOpen = false;
+  lastRenderKey = null;
+  sideData = { ...sideData, children: [], deliverables: [], recalled: null, loaded: false };
+  if (push) history.pushState({ id }, "", `/ticket?id=${encodeURIComponent(id)}`);
+  load({ force: true });
+}
+
 function wireQuestionActions() {
   document.addEventListener("click", async (ev) => {
     const btn = ev.target.closest("[data-act][data-q]");
@@ -1717,7 +1831,14 @@ async function postNote(text, kind, say) {
   try {
     const res = await fetch(`/api/tasks/${encodeURIComponent(taskId)}/activities`, {
       method: "POST", headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ activity_type: kind || "updated", message: text }),
+      // Marked as a person's, positively. Without it a note on an in-progress
+      // ticket is an `updated` activity, which is also what MC narrates itself
+      // with — indistinguishable, and the reader is told the bridge is talking.
+      body: JSON.stringify({
+        activity_type: kind || "updated",
+        message: text,
+        metadata: JSON.stringify({ source: "human", via: "ticket-page" }),
+      }),
     });
     if (!res.ok) throw new Error(`send failed (${res.status})`);
     if (say) say.value = "";
@@ -1962,6 +2083,7 @@ function wireGraph(plan, progress) {
 // ---- BOOTSTRAP ---- everything above is pure and testable; nothing below is.
 // Delegated once, not per render: the question list is replaced on every poll.
 wireQuestionActions();
+wireRailNavigation();
 load();
 // The bridge changes this ticket out of band, so re-read it periodically. Not
 // forced: a poll that lands mid-sentence skips rather than discarding it.

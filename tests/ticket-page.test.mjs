@@ -951,7 +951,8 @@ test("the exchange shows what people said, not the bridge narrating itself", () 
   assert.match(out, /why is the header duplicated\?/);
   assert.match(out, /It reuses SiteHeader twice\./);
   assert.doesNotMatch(out, /dispatching for 1 repo/, "the bridge narrating itself is not conversation");
-  assert.doesNotMatch(out, /Task triaged as ready/);
+  // A milestone still earns a line, but as an event — never as somebody speaking.
+  assert.doesNotMatch(out, /class="cmsg me"><div class="cbody">Task triaged/);
   // Yours reads as yours; an agent's carries its avatar.
   assert.match(out, /class="cmsg me"><div class="cbody">why is the header/);
 });
@@ -1034,4 +1035,70 @@ test("triage having no questions reads differently from triage not having run", 
     activities: [{ activity_type: "status_changed", message: "Task triaged as ready (implementation) — assigning to agents" }] });
   assert.match(readyNoState, /had no questions/);
   assert.match(readyNoState, /reasoning was not recorded/);
+});
+
+// ─────────── attribution and noise in the ticket thread ───────────
+// The first version treated "no agent_id" as "the human said this". MC writes
+// plenty of agent-less activities, so 37 entries on MET-635 — almost all identical
+// heartbeats — rendered as right-aligned messages from the user.
+
+test("nothing is attributed to a person unless a person is on it", () => {
+  const { renderConversation } = threadHelpers();
+  const out = renderConversation({ questions: SETTLED, confirmed: true }, null, {
+    taskStatus: "in_progress",
+    activities: [
+      { activity_type: "updated", message: "Agent heartbeat: task x running (attempt 1/3)." },
+      { activity_type: "updated", message: "Some bridge narration nobody typed." },
+      { activity_type: "manual_feedback", message: "please use UTC" },
+      { activity_type: "updated", message: "typed on the ticket page",
+        metadata: JSON.stringify({ source: "human", via: "ticket-page" }) },
+    ] });
+  // Exactly the two a person actually wrote.
+  assert.equal((out.match(/class="cmsg me"/g) || []).length, 2);
+  assert.match(out, /please use UTC/);
+  assert.match(out, /typed on the ticket page/);
+  assert.doesNotMatch(out, /class="cmsg me"><div class="cbody">Agent heartbeat/);
+});
+
+test("routine chatter collapses to a count instead of repeating", () => {
+  const { renderConversation } = threadHelpers();
+  const beats = Array.from({ length: 12 }, (_, i) => ({
+    activity_type: "updated", message: "Agent heartbeat: task x running (attempt 1/3).",
+    created_at: `2026-08-14T10:${String(i).padStart(2, "0")}:00Z` }));
+  const out = renderConversation({ questions: SETTLED, confirmed: true }, null,
+    { taskStatus: "in_progress", activities: beats });
+  assert.match(out, /12 routine updates/);
+  assert.equal((out.match(/Agent heartbeat/g) || []).length, 0, "the beats themselves are not printed");
+});
+
+test("trouble is never collapsed, whatever else is", () => {
+  // A failure buried in "37 routine updates" is a failure nobody sees.
+  const { renderConversation } = threadHelpers();
+  const out = renderConversation({ questions: SETTLED, confirmed: true }, null, {
+    taskStatus: "in_progress",
+    activities: [
+      { activity_type: "updated", message: "Agent heartbeat: running.", created_at: "1" },
+      { activity_type: "updated", message: "Agent spawn failed for repo/x (attempt 2).", created_at: "2" },
+      { activity_type: "updated", message: "Agent heartbeat: running.", created_at: "3" },
+    ] });
+  assert.match(out, /class="cevent bad"/);
+  assert.match(out, /Agent spawn failed/);
+  // And the runs either side of it stay separate rather than merging across it.
+  assert.equal((out.match(/routine update/g) || []).length, 2);
+});
+
+test("a milestone reads as an event, not as somebody speaking", () => {
+  const { renderConversation } = threadHelpers();
+  const out = renderConversation({ questions: SETTLED, confirmed: true }, null, {
+    taskStatus: "in_progress",
+    activities: [{ activity_type: "step_completed", message: "Step 2 completed", created_at: "1" }] });
+  assert.match(out, /class="cevent /);
+  assert.match(out, /Step 2 completed/);
+  assert.doesNotMatch(out, /class="cmsg me"/);
+});
+
+test("a note the page sends marks itself as a person's", () => {
+  const html = readFileSync(new URL("../public/ticket.html", import.meta.url), "utf8");
+  const fn = html.slice(html.indexOf("async function postNote("), html.indexOf("async function postNote(") + 1100);
+  assert.match(fn, /source: "human"/);
 });

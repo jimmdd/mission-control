@@ -80,9 +80,13 @@ test("the poll is unforced and deliberate actions are forced", () => {
 
 test("the click handler is delegated once, not attached per render", () => {
   // wireConversation runs on every render; a document listener added there would
-  // stack a new copy each time, and every click would fire N handlers.
+  // stack a new copy each time, and every click would fire N handlers. Two now:
+  // question actions and rail navigation, both wired at bootstrap and never again.
   const delegated = (HTML.match(/document\.addEventListener\("click"/g) || []).length;
-  assert.equal(delegated, 1);
+  assert.equal(delegated, 2);
+  const boot = HTML.split("// ---- BOOTSTRAP ----")[1];
+  assert.match(boot, /wireQuestionActions\(\);/);
+  assert.match(boot, /wireRailNavigation\(\);/);
 });
 
 test("every question action goes through one poster", () => {
@@ -180,4 +184,37 @@ test("the stream follows the conversation only for someone already at the bottom
 test("a group the reader opened stays open across a render", () => {
   assert.match(HTML, /details\.csettled\[open\]/);
   assert.match(HTML, /setAttribute\("open", ""\)/);
+});
+
+// Switching tickets in the rail reloaded the whole document — refetching the page,
+// the rail, and every ticket in it, to change one column.
+
+test("the rail switches tickets in place, without a document load", () => {
+  assert.match(HTML, /function wireRailNavigation\(/);
+  assert.match(HTML, /history\.pushState/);
+  assert.match(HTML, /addEventListener\("popstate"/, "back and forward still move between tickets");
+  // Delegated once at the document, like the other handler — the rail is replaced
+  // on every render, so per-render listeners would stack.
+  assert.equal((HTML.match(/document\.addEventListener\("click"/g) || []).length, 2);
+});
+
+test("a click the browser should own is left to the browser", () => {
+  // Middle-click, ⌘-click and "open in new tab" have to keep working, or the rail
+  // stops behaving like links and people notice immediately.
+  const idx = HTML.indexOf("function wireRailNavigation(");
+  const fn = HTML.slice(idx, idx + 900);
+  assert.match(fn, /ev\.button !== 0/);
+  assert.match(fn, /metaKey/);
+  assert.match(fn, /ctrlKey/);
+  assert.match(fn, /shiftKey/);
+});
+
+test("switching tickets drops what belonged to the last one", () => {
+  // Carried over, the new ticket opens focused on a question that is not on it.
+  const idx = HTML.indexOf("function goToTicket(");
+  const fn = HTML.slice(idx, idx + 700);
+  for (const reset of ["focusedQuestion = null", "selectedStep = null", "planOpen = false",
+                       "lastRenderKey = null", "loaded: false"]) {
+    assert.ok(fn.includes(reset), `goToTicket must reset ${reset}`);
+  }
 });
