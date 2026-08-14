@@ -35,10 +35,52 @@ same artefacts to the same paths.
 from __future__ import annotations
 
 import re
+import subprocess
 from pathlib import Path
 from typing import Dict, List, Optional
 
 BRIEF_NAME = "MC-BRIEF.md"
+
+
+def _exclude_locally(worktree: str) -> None:
+    """Make git ignore the brief, without committing a rule saying so.
+
+    The brief has to sit inside the worktree — the agent reads it with a tool
+    scoped to its working directory — but it is Mission Control's scaffolding, not
+    the ticket's work. `worktree_env.py` already settled the principle for `.env`:
+    a path git would track does not get written into a worktree. The difference is
+    that this one has to be written, so it is excluded instead.
+
+    `.git/info/exclude` rather than `.gitignore`: the rule is ours and local, and
+    committing it would put MC's plumbing in the user's diff — which is the thing
+    being avoided.
+
+    It has to be `--git-common-dir`, not `--git-dir`. Every agent runs in a linked
+    worktree, where `--git-dir` is `.git/worktrees/<name>` — writing `info/exclude`
+    there does nothing at all, because git reads exclusions from the common dir.
+    Tested against a real linked worktree rather than reasoned about: written to
+    the per-worktree gitdir, `git add -A` staged the brief anyway.
+
+    Best-effort. A brief that ends up tracked is a tidiness problem; a brief that
+    is not written at all costs the run its decisions.
+    """
+    try:
+        out = subprocess.run(["git", "rev-parse", "--git-common-dir"], cwd=worktree,
+                             capture_output=True, text=True, timeout=10)
+        if out.returncode != 0:
+            return
+        gitdir = Path(worktree) / out.stdout.strip() if not Path(out.stdout.strip()).is_absolute() \
+            else Path(out.stdout.strip())
+        info = gitdir / "info"
+        info.mkdir(parents=True, exist_ok=True)
+        exclude = info / "exclude"
+        current = exclude.read_text(encoding="utf-8") if exclude.exists() else ""
+        if BRIEF_NAME in current.split():
+            return
+        prefix = "" if not current or current.endswith("\n") else "\n"
+        exclude.write_text(f"{current}{prefix}{BRIEF_NAME}\n", encoding="utf-8")
+    except (OSError, subprocess.SubprocessError):
+        return
 
 
 def _clean(text: str) -> str:
@@ -121,6 +163,9 @@ def write(worktree: str, task: Dict, questions: Optional[List[Dict]] = None) -> 
         root = Path(worktree)
         if not root.is_dir():
             return None
+        # Excluded before it is written, so there is no window in which a commit
+        # could pick it up.
+        _exclude_locally(worktree)
         path = root / BRIEF_NAME
         path.write_text(render(task, questions), encoding="utf-8")
         return path

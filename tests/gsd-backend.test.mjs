@@ -311,3 +311,38 @@ print(gsd_brief.write("/definitely/not/a/worktree", {"title": "T"}, []))
 `], { encoding: "utf8", stdio: ["ignore", "pipe", "ignore"] });
   assert.match(out.trim(), /^None$/);
 });
+
+test("the brief cannot end up in the ticket's commit", () => {
+  // The brief has to live inside the worktree — the agent reads it with a tool
+  // scoped to its working directory — but it is MC's scaffolding, not the
+  // ticket's work. GSD's PRD express path commits what it reads, and agents run
+  // `git add -A`, so an untracked brief at the repo root reaches the user's PR.
+  //
+  // It must be --git-common-dir, not --git-dir: every agent runs in a linked
+  // worktree, where --git-dir is .git/worktrees/<name> and git reads exclusions
+  // from the common dir. Written to the wrong one, `git add -A` stages it anyway.
+  const dir = mkdtempSync(join(tmpdir(), "mc-brief-"));
+  const repo = join(dir, "repo"), wt = join(dir, "wt");
+  const git = (args, cwd) => execFileSync("git", args, { cwd, stdio: "ignore" });
+  execFileSync("git", ["init", "-q", repo], { stdio: "ignore" });
+  git(["config", "user.email", "t@t"], repo);
+  git(["config", "user.name", "t"], repo);
+  writeFileSync(join(repo, "a.txt"), "hi");
+  git(["add", "-A"], repo);
+  git(["commit", "-qm", "init"], repo);
+  git(["worktree", "add", "-q", wt, "-b", "wt"], repo);
+
+  execFileSync("python3", ["-c", `
+import sys
+sys.path.insert(0, ${JSON.stringify(SWARM)})
+import gsd_brief
+gsd_brief.write(sys.argv[1], {"title": "T"}, [{"becomes": "D-01", "question": "q", "answer": "a"}])
+`, wt], { stdio: "ignore" });
+
+  assert.ok(existsSync(join(wt, "MC-BRIEF.md")), "the brief is written where the agent can read it");
+  git(["add", "-A"], wt);
+  const staged = execFileSync("git", ["status", "--porcelain"], { cwd: wt, encoding: "utf8" });
+  assert.equal(staged.trim(), "", `git add -A picked the brief up: ${staged}`);
+
+  rmSync(dir, { recursive: true, force: true });
+});
