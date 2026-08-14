@@ -790,10 +790,12 @@ function renderChatEvent(ev) {
     const why = ev.q.why
       ? `<div class="cfind"><div class="ft">Why this is being asked</div><div class="fb">${esc(ev.q.why)}</div></div>`
       : "";
-    // Suggested replies as pills, the first recommended. There is always an escape
-    // pill, because no question may be a dead end.
-    const pills = (ev.q.options || []).map((o, i) =>
-      `<button class="cpill${i === 0 ? " rec" : ""}" data-answer="${esc(o)}" data-q="${esc(ev.q.id)}">${esc(o)}</button>`).join("");
+    // Suggested replies as pills. Cyan means the agent recommended that option — so
+    // it is only ever worn by an option the data actually names. Highlighting the
+    // first one because it is first invents a recommendation nobody made, and reads
+    // as a value already selected on a question that is still wide open.
+    const pills = (ev.q.options || []).map(o =>
+      `<button class="cpill${o === ev.q.recommended ? " rec" : ""}" data-answer="${esc(o)}" data-q="${esc(ev.q.id)}">${esc(o)}</button>`).join("");
     const escapePill = `<button class="cpill esc" data-act="delegate" data-q="${esc(ev.q.id)}">You decide</button>`;
     const owed = (ev.q.thread || []).length && ev.q.thread[ev.q.thread.length - 1].role === "you";
     const waiting = owed ? `<div class="cwait"><i></i>Working out an answer — read-only check</div>` : "";

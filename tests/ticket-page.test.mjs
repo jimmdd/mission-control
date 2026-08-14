@@ -511,3 +511,18 @@ test("with nothing open the composer stops asking for an answer", () => {
   assert.match(out, /Nothing is waiting on you/);
   assert.doesNotMatch(out, /data-send="answer"/, "there is nothing to answer");
 });
+
+test("a pill is only highlighted when the agent actually recommended it", () => {
+  // Cyan on the first option by position invents a recommendation nobody made, and
+  // reads as a value already chosen on a question that is still open — six
+  // questions each showing a selected-looking answer while nothing was settled.
+  const { renderConversation } = convoHelpers();
+  const plain = renderConversation({ questions: [
+    { id: "a", becomes: "D-01", question: "Which licence?", options: ["Host & Link", "Adobe"] }] }, null);
+  assert.doesNotMatch(plain, /class="cpill rec"/, "no recommendation in the data, none on screen");
+
+  const withRec = renderConversation({ questions: [
+    { id: "a", becomes: "D-01", question: "Which licence?", options: ["Host & Link", "Adobe"],
+      recommended: "Adobe" }] }, null);
+  assert.match(withRec, /class="cpill rec" data-answer="Adobe"/, "and it lands on the one named");
+});
