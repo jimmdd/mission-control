@@ -1224,10 +1224,28 @@ function blockingQuestions(questions) {
 
 function renderComposer(active, openCount, side = {}) {
   if (!active) {
-    // Design 2c: with nothing blocking, the composer stops asking for an answer and
-    // starts reporting. The one action that is still yours is taking a decision
-    // back, so that is the one pill — and it is real, not a label.
-    const last = [...(side.questions || [])].reverse().find(q => q.answer);
+    const questions = side.questions || [];
+    const last = [...questions].reverse().find(q => q.answer);
+    // Nothing dispatches until a human confirms — `bridge.py:5050` parks the ticket
+    // on `confirmed` and polls it forever otherwise. That gate only had a button in
+    // the dashboard's triage modal, so a ticket settled entirely in this thread sat
+    // unplanned with the page cheerfully reporting that the planner would run next.
+    // MET-635 sat that way for two days, once a minute, saying so in the log.
+    //
+    // This is design 3d's rule arriving where the work actually happens: confirm is
+    // the one write, and it is deliberate.
+    if (side.needsConfirm) {
+      return `<div class="composer"><div class="cin">
+        <div class="cactive">Every question is settled. Nothing has been dispatched yet.</div>
+        <div class="cexits">
+          <button class="cpill rec" data-act="confirm">Confirm and start planning</button>
+          ${last ? `<button class="cpill esc" data-focus="${esc(last.id)}">Change a decision</button>` : ""}
+        </div>
+        <div class="cfoot">confirming creates the branch and worktree · nothing is written before it</div>
+      </div></div>`;
+    }
+    // Design 2c: confirmed and running. The composer stops asking for an answer and
+    // starts reporting. The one action still yours is taking a decision back.
     return `<div class="composer"><div class="cin">
       <div class="cactive">Nothing is waiting on you.</div>
       ${last ? `<div class="cexits">
@@ -1332,7 +1350,8 @@ function renderDecisions(questions, activeId, side = {}) {
     ${memory}
     ${deliverables}
     ${subtasks}
-    <div class="dsum">${blocking ? `<b>${blocking}</b> blocking planning<br>` : ""}
+    <div class="dsum">${blocking ? `<b>${blocking}</b> blocking planning<br>`
+      : side.needsConfirm ? `<b>confirm</b> to start planning<br>` : ""}
       Everything settled here lands in <code>.planning/</code> as the phase brief.</div>
   </aside>`;
 }
@@ -1372,15 +1391,24 @@ function renderConversation(triage, activeId, side = {}) {
 
   // Design 2c: when the last question settles the thread keeps going in place. The
   // rule marks where triage ended and the plan lands underneath it as a message.
-  const settledMark = (!blockingQuestions(qs).length && qs.some(q => q.answer || q.deferred))
+  const nothingBlocking = !blockingQuestions(qs).length;
+  const settledMark = (nothingBlocking && qs.some(q => q.answer || q.deferred))
     ? renderSettledMark(qs) : "";
+  // The gate the daemon actually enforces. Deferred questions do not block the
+  // thread, but the bridge's confirm path requires every question answered, so a
+  // ticket with one set aside cannot be confirmed from here and must not pretend
+  // otherwise.
+  const needsConfirm = nothingBlocking && qs.length > 0 && !triage?.confirmed
+    && qs.every(q => q.answer);
   // Between the last answer and the plan landing there is a real wait — planning
   // took 18 minutes on the run this was built against. The thread says so rather
   // than ending on a rule with nothing under it.
   const planCard = renderPlanCard(side.plan, side.progress, qs, side.planOpen)
     || (settledMark ? `<div class="cmsg"><span class="cav">${esc(AVATAR)}</span>
-        <div><div class="cbody">That is everything. Writing the plan next — it lands here.</div>
-        <div class="cwait"><i></i>planning<span class="el">no plan on disk yet</span></div></div></div>` : "");
+        <div><div class="cbody">${needsConfirm
+          ? "That is everything. Confirm below and I will branch, set up a worktree and write the plan."
+          : "That is everything. Writing the plan next — it lands here."}</div>
+        ${needsConfirm ? "" : `<div class="cwait"><i></i>planning<span class="el">no plan on disk yet</span></div>`}</div></div>` : "");
   const map = (side.planOpen && side.plan)
     ? `<div class="pmap">${planMap(side.plan, side.progress, triage)}</div>` : "";
 
@@ -1390,9 +1418,9 @@ function renderConversation(triage, activeId, side = {}) {
   // a fact about the ticket, and it was being stated twice.
   return `<div class="convo">
       <div class="stream" id="stream"><div class="stream-in">${stream}${settledMark}${planCard}${map}</div></div>
-      ${renderComposer(active, later, { ...side, questions: qs })}
+      ${renderComposer(active, later, { ...side, questions: qs, needsConfirm })}
     </div>
-    ${renderDecisions(qs, active?.id, side)}`;
+    ${renderDecisions(qs, active?.id, { ...side, needsConfirm })}`;
 }
 
 /**
@@ -1541,12 +1569,44 @@ function wireConversation(triage, keptScroll = null, openGroups = []) {
   document.querySelectorAll("[data-answer]").forEach(btn =>
     btn.addEventListener("click", () => recordAnswer(triage, btn.dataset.q, btn.dataset.answer)));
 
+  // Confirm is the only write on this page that causes anything to be created —
+  // branch, worktree, tmux session. It says so, and it asks once.
+  document.querySelectorAll('[data-act="confirm"]').forEach(btn =>
+    btn.addEventListener("click", () => confirmTriage(triage, btn)));
+
   document.querySelectorAll("[data-focus]").forEach(btn =>
     btn.addEventListener("click", () => { focusedQuestion = btn.dataset.focus; load({ force: true }); }));
 
   // The plan card is a summary; the map is the shape. One switch between them.
   document.querySelectorAll("[data-planopen]").forEach(btn =>
     btn.addEventListener("click", () => { planOpen = !planOpen; load({ force: true }); }));
+}
+
+/**
+ * Confirm: the one write on this page that creates anything.
+ *
+ * `bridge.py:5050` will not dispatch until `confirmed` is true, and it polls the
+ * ticket every 60 seconds while it waits. The dashboard's triage modal has always
+ * been able to set this; the ticket page could not, so a ticket settled here sat
+ * unplanned indefinitely. `status: "answered"` matches what that modal writes, so
+ * the two surfaces leave the ticket in the same state.
+ */
+async function confirmTriage(triage, btn) {
+  const next = JSON.parse(JSON.stringify(triage));
+  next.confirmed = true;
+  next.status = "answered";
+  if (btn) { btn.disabled = true; btn.textContent = "Confirming…"; }
+  try {
+    const res = await fetch(`/api/tasks/${encodeURIComponent(taskId)}/triage-state`, {
+      method: "PUT", headers: { "Content-Type": "application/json" }, body: JSON.stringify(next),
+    });
+    if (!res.ok) throw new Error(`confirm failed (${res.status})`);
+    load({ force: true });
+  } catch (e) {
+    if (btn) { btn.disabled = false; btn.textContent = "Confirm and start planning"; }
+    const note = document.querySelector(".cactive");
+    if (note) note.textContent = String(e.message || e);
+  }
 }
 
 /** Record one answer as the decision it binds. */

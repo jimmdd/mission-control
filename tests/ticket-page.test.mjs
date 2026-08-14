@@ -508,8 +508,13 @@ test("the panel says what is settled and what is blocking, without scrolling", (
 test("with nothing open the composer stops asking for an answer", () => {
   const { renderConversation } = convoHelpers();
   const out = renderConversation({ questions: [CONVO[1]] }, null);
-  assert.match(out, /Nothing is waiting on you/);
   assert.doesNotMatch(out, /data-send="answer"/, "there is nothing to answer");
+  // Nothing to answer is not nothing to do: the daemon will not dispatch until a
+  // human confirms, so that is what the composer offers instead.
+  assert.match(out, /data-act="confirm"/);
+
+  const confirmed = renderConversation({ questions: [CONVO[1]], confirmed: true }, null);
+  assert.match(confirmed, /Nothing is waiting on you/);
 });
 
 test("a pill is only highlighted when the agent actually recommended it", () => {
@@ -704,8 +709,10 @@ test("with the questions settled the thread marks the moment and keeps going", (
   assert.match(out, /TRIAGE SETTLED/, "the rule says where triage ended");
   assert.match(out, /class="pcard"/, "and the plan lands under it, in the same stream");
   // Nothing is waiting, so the composer reports rather than asks.
-  assert.match(out, /Nothing is waiting on you/);
   assert.doesNotMatch(out, /data-send="answer"/);
+  const confirmed = renderConversation({ questions: SETTLED, confirmed: true }, null,
+    { plan: PLAN, progress: PROGRESS });
+  assert.match(confirmed, /Nothing is waiting on you/);
 });
 
 test("the mark is not drawn before there is anything to mark", () => {
@@ -850,4 +857,52 @@ test("the dashboard honours the filter the nav links to", () => {
   const appJs = readFileSync(new URL("../public/app.js", import.meta.url), "utf8");
   assert.match(appJs, /location\.hash\.slice\(1\)/);
   assert.match(appJs, /\['planning', 'in_progress', 'review', 'on_hold', 'done'\]/);
+});
+
+// ─────────── the confirm gate (design 3d, on the thread) ───────────
+// bridge.py:5050 refuses to dispatch until `confirmed` is true, and polls the
+// ticket every 60 seconds while it waits. That gate only ever had a button in the
+// dashboard's triage modal — so a ticket settled entirely in this thread sat
+// unplanned while the page reported that the planner would run next. MET-635 sat
+// that way for two days, once a minute, saying so in the log.
+
+test("settling every question is not the same as starting the work", () => {
+  const { renderConversation } = threadHelpers();
+  const out = renderConversation({ questions: SETTLED }, null, {});
+  assert.match(out, /data-act="confirm"/, "the gate the daemon enforces has a button");
+  assert.match(out, /Nothing has been dispatched yet/);
+  // And it must not claim planning is already under way.
+  assert.doesNotMatch(out, /the planner runs next/);
+  assert.doesNotMatch(out, /no plan on disk yet/);
+  assert.match(out, /confirming creates the branch and worktree/, "the write says what it writes");
+});
+
+test("once confirmed the thread stops asking and starts reporting", () => {
+  const { renderConversation } = threadHelpers();
+  const out = renderConversation({ questions: SETTLED, confirmed: true }, null,
+    { status: "nothing needs you · 2 of 4 done, 1 running" });
+  assert.doesNotMatch(out, /data-act="confirm"/, "confirming twice is not a thing");
+  assert.match(out, /Nothing is waiting on you/);
+  assert.match(out, /2 of 4 done, 1 running/);
+});
+
+test("a deferred question cannot be confirmed away", () => {
+  // The thread lets a question be set aside; the bridge's confirm path requires
+  // every question answered. Offering confirm here would write a state the daemon
+  // then refuses to act on, which is the same silent stall in a new place.
+  const { renderConversation } = threadHelpers();
+  const out = renderConversation({ questions: [
+    ...SETTLED, { id: "z", becomes: "D-09", question: "Rate limit?", deferred: true }] }, null, {});
+  assert.doesNotMatch(out, /data-act="confirm"/);
+});
+
+test("confirm is a deliberate write, and it is the only one", () => {
+  const html = readFileSync(new URL("../public/ticket.html", import.meta.url), "utf8");
+  assert.match(html, /async function confirmTriage\(/);
+  // It writes what the dashboard's modal writes, so the two surfaces agree.
+  const fn = html.slice(html.indexOf("async function confirmTriage("));
+  assert.match(fn.slice(0, 600), /next\.confirmed = true/);
+  assert.match(fn.slice(0, 600), /next\.status = "answered"/);
+  // A failed confirm must put the button back rather than stranding it disabled.
+  assert.match(fn.slice(0, 1200), /btn\.disabled = false/);
 });
