@@ -663,12 +663,27 @@ print(json.dumps({
   assert.match(r.claude, /Run `\/gsd-new-project/, "claude invokes the skill");
   assert.doesNotMatch(r.claude, /Read `.*new-project\.md/, "and does not need the document");
 
-  assert.match(r.codex, /has no `\/gsd-new-project --auto` skill/);
-  assert.match(r.codex, /Read `.*workflows\/new-project\.md` in full/);
-  // A runtime that cannot spawn GSD's sub-agents must do the work, not skip it.
-  assert.match(r.codex, /do that step's work\s+yourself/);
-  // And must not substitute its own format — the thesis rests on GSD's decomposition.
-  assert.match(r.codex, /Do not invent your own planning format/);
+  // Either way it names the command it cannot invoke — the two branches word it
+  // differently ("has no ... skill" when the document is available to hand over,
+  // "cannot resolve it" when nothing is).
+  assert.match(r.codex, /\/gsd-new-project --auto/);
+
+  // What comes next depends on whether GSD is installed on this machine, and both
+  // branches are real behaviour worth asserting. CI has no GSD, and the test used
+  // to assert only the installed path — so it was the last red test on an
+  // otherwise green run, failing for being right.
+  if (/Read `.*workflows\/new-project\.md` in full/.test(r.codex)) {
+    // A runtime that cannot spawn GSD's sub-agents must do the work, not skip it.
+    assert.match(r.codex, /do that step's work\s+yourself/);
+    // And must not substitute its own format — the thesis rests on GSD's decomposition.
+    assert.match(r.codex, /Do not invent your own planning format/);
+  } else {
+    // No document to hand over. Stopping is the only correct move: a plausible
+    // plan that is not GSD's decomposition would corrupt the measurement the whole
+    // phase exists to take.
+    assert.match(r.codex, /could not be found/);
+    assert.match(r.codex, /Stop and report this rather than planning some other way/);
+  }
 });
 
 test("a workflow that cannot be found is reported, not improvised around", () => {
