@@ -162,6 +162,12 @@
   /* Green once nothing is blocking: the count stops being a tally of what you owe
      and becomes the fact that you owe nothing. */
   .tk-count.set { color: var(--green); }
+  /* A status that is not a leg — parked, or waiting to dispatch. Named plainly,
+     because the track cannot point at it. */
+  .tk-off {
+    font-family: var(--mono); font-size: 10px; letter-spacing: .08em; text-transform: uppercase;
+    color: var(--amber); border: 1px solid var(--amber-line); border-radius: 5px; padding: 3px 8px; flex: none;
+  }
 
   .tband { padding: 16px 26px 20px; border-bottom: 1px solid var(--line-soft); }
   /* One line, and it stays one line however long the brief is. The band is the top
@@ -675,10 +681,14 @@ function brief(description) {
  * one line is how a page stops being read.
  */
 function renderTicket(task, triage, activities, extra = {}) {
-  const legIndex = Math.max(0, LEGS.findIndex(l => l.statuses.includes(task.status)));
-  const finished = legIndex >= LEGS.length - 1;
+  // -1 when the status is not a leg at all (on_hold, pending_dispatch). Clamping
+  // that to 0 claimed the ticket was in Intake — a parked ticket that had already
+  // planned and built read as one nothing had happened to yet.
+  const legIndex = LEGS.findIndex(l => l.statuses.includes(task.status));
+  const offTrack = legIndex < 0;
+  const finished = !offTrack && legIndex >= LEGS.length - 1;
   // The fill stops at the centre of the current leg's slice, where its dot is.
-  const pct = ((legIndex + 0.5) / LEGS.length) * 100;
+  const pct = offTrack ? 0 : ((legIndex + 0.5) / LEGS.length) * 100;
 
   const repos = [...new Set(((triage && triage.triage_repos) || []).map(r => `${r.project}/${r.repo}`))];
   const base = pick(/^\s*base[- ]?branch:\s*(\S+)\s*$/im, task.description);
@@ -710,7 +720,8 @@ function renderTicket(task, triage, activities, extra = {}) {
         <a class="tk-crumb" href="/">Tickets ›</a>
         <span class="tk-id">${esc(task.external_id || task.id.slice(0, 8))}</span>
         <h1 class="tk-title">${esc(task.title)}</h1>
-        ${extra.agent ? `<span class="tk-live"><i></i>${esc(extra.agent)}</span>` : ""}
+        ${offTrack ? `<span class="tk-off">${esc((task.status || "").replace(/_/g, " "))}</span>` : ""}
+        ${extra.agent && !offTrack ? `<span class="tk-live"><i></i>${esc(extra.agent)}</span>` : ""}
         <span class="tk-count ${qs.length && settled === qs.length ? "set" : ""}">${
           qs.length ? `${settled} of ${qs.length} settled` : ""}</span>
       </div>

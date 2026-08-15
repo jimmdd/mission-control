@@ -1193,3 +1193,17 @@ test("no assessment recorded means no invented explanation", () => {
   assert.match(out, /data-act="confirm"/, "the gate still holds");
   assert.doesNotMatch(out, /class="cwhy"/, "but it does not make up a reason");
 });
+
+test("a parked ticket is not reported as being in Intake", () => {
+  // `findIndex` returns -1 for a status that is not a leg, and clamping that to 0
+  // said "Intake · now" about a ticket that had already planned and built.
+  const { renderTicket } = threadHelpers();
+  const base = { id: "t", title: "T", created_at: "2026-08-11T10:00:00Z", updated_at: "2026-08-14T10:00:00Z" };
+  const parked = renderTicket({ ...base, status: "on_hold" }, { questions: SETTLED }, []);
+  assert.match(parked, /class="tk-off">on hold</, "the status is named, since no leg can point at it");
+  assert.doesNotMatch(parked, /class="now"/, "and no leg claims to be current");
+
+  const live = renderTicket({ ...base, status: "planning" }, { questions: SETTLED }, []);
+  assert.match(live, /class="now"/, "a real leg still lights up");
+  assert.doesNotMatch(live, /class="tk-off"/);
+});
