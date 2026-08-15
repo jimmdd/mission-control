@@ -82,8 +82,17 @@ def to_mc_plan(plan_files: List[Path]) -> Optional[Dict]:
     """GSD's plans as MC's step list, or None when there is nothing to show.
 
     Steps are numbered across the whole set so the ids are stable and unique.
-    Waves become `parallel_groups`, and a wave depends on the one before it —
-    which is what a wave means, and what the map already draws.
+
+    The grouping is load-bearing, not decorative: `planner.py` reads
+    `parallel_groups` from this same file to decide how many agents to dispatch at
+    once. The first version put every task of a plan file into one group, which
+    would have fired ten agents simultaneously for work GSD wrote as ten ordered
+    steps of one plan.
+
+    GSD's shape: tasks *within* a plan file are sequential — each `<task>` has a
+    precondition describing the state the previous one leaves — while separate
+    plan files sharing a `wave` are the ones meant to run together. So the Nth
+    task of every file in a wave forms one group, and the groups run in order.
     """
     parsed = []
     for p in sorted(plan_files):
@@ -96,34 +105,37 @@ def to_mc_plan(plan_files: List[Path]) -> Optional[Dict]:
         return None
 
     steps: List[Dict] = []
-    groups: Dict[int, List[int]] = {}
+    ordered: List[List[int]] = []
     n = 0
-    for plan in sorted(parsed, key=lambda p: p["wave"]):
-        for t in plan["tasks"]:
-            n += 1
-            steps.append({
-                "step": n,
-                "title": t["title"],
-                "files": t["files"],
-                "verify_command": t["verify_command"],
-                "category": t["kind"],
-                "source": plan["source"],
-                # Depends on every step of the previous wave: a later wave starts
-                # when the earlier one is done, which is the only ordering GSD
-                # states. Inventing finer edges would draw a graph nobody wrote.
-                "depends_on": [],
-            })
-            groups.setdefault(plan["wave"], []).append(n)
-
-    ordered_waves = sorted(groups)
-    for i, wave in enumerate(ordered_waves[1:], start=1):
-        previous = groups[ordered_waves[i - 1]]
-        for step_no in groups[wave]:
-            steps[step_no - 1]["depends_on"] = list(previous)
+    for wave in sorted({p["wave"] for p in parsed}):
+        files_in_wave = [p for p in parsed if p["wave"] == wave]
+        # One group per position: the Nth task of each plan file in this wave.
+        # Within a file the tasks stay ordered, because each one's precondition
+        # describes what the last one left behind.
+        by_position: Dict[int, List[int]] = {}
+        for plan in files_in_wave:
+            previous: Optional[int] = None
+            for i, t in enumerate(plan["tasks"]):
+                n += 1
+                steps.append({
+                    "step": n,
+                    "title": t["title"],
+                    "files": t["files"],
+                    "verify_command": t["verify_command"],
+                    "category": t["kind"],
+                    "source": plan["source"],
+                    # The step before it in the same plan file. Not every step of
+                    # the previous wave: that would draw edges GSD never wrote.
+                    "depends_on": [previous] if previous else [],
+                })
+                by_position.setdefault(i, []).append(n)
+                previous = n
+        for i in sorted(by_position):
+            ordered.append(by_position[i])
 
     return {
         "steps": steps,
-        "parallel_groups": [groups[w] for w in ordered_waves],
+        "parallel_groups": ordered,
         "source": "gsd",
         "phase": parsed[0].get("phase", ""),
     }

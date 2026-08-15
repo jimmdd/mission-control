@@ -78,16 +78,42 @@ test("the numbering is not repeated on every node", () => {
   rmSync(dir, { recursive: true, force: true });
 });
 
-test("waves become groups, and a later wave waits for the earlier one", () => {
+test("tasks inside one plan file are sequential, not a swarm", () => {
+  // This grouping is load-bearing: planner.py reads parallel_groups from the same
+  // file to decide how many agents to dispatch at once. Putting a plan's ten tasks
+  // in one group would fire ten agents for work GSD wrote as ten ordered steps,
+  // each with a precondition describing what the last one left behind.
+  const dir = withPlans({ "01-01-PLAN.md": planFile(1, [
+    { title: "first" }, { title: "second" }, { title: "third" }]) });
+  const p = importPlans(dir);
+  assert.deepEqual(p.parallel_groups, [[1], [2], [3]], "one at a time");
+  assert.deepEqual(p.steps[0].depends_on, []);
+  assert.deepEqual(p.steps[1].depends_on, [1]);
+  assert.deepEqual(p.steps[2].depends_on, [2]);
+  rmSync(dir, { recursive: true, force: true });
+});
+
+test("separate plan files in one wave are what run together", () => {
+  // That is what a wave means in GSD: files, not tasks.
   const dir = withPlans({
-    "01-01-PLAN.md": planFile(1, [{ title: "first" }, { title: "second" }]),
-    "01-02-PLAN.md": planFile(2, [{ title: "third" }]),
+    "01-01-PLAN.md": planFile(1, [{ title: "a1" }, { title: "a2" }]),
+    "01-02-PLAN.md": planFile(1, [{ title: "b1" }, { title: "b2" }]),
   });
   const p = importPlans(dir);
-  assert.equal(p.steps.length, 3, "steps are numbered across the whole set");
-  assert.deepEqual(p.parallel_groups, [[1, 2], [3]]);
-  assert.deepEqual(p.steps[0].depends_on, [], "the first wave waits for nothing");
-  assert.deepEqual(p.steps[2].depends_on, [1, 2], "the second waits for all of the first");
+  assert.equal(p.steps.length, 4);
+  assert.deepEqual(p.parallel_groups, [[1, 3], [2, 4]], "the Nth task of each file runs together");
+  assert.deepEqual(p.steps[1].depends_on, [1], "within a file it stays ordered");
+  assert.deepEqual(p.steps[3].depends_on, [3]);
+  rmSync(dir, { recursive: true, force: true });
+});
+
+test("a later wave still follows the earlier one", () => {
+  const dir = withPlans({
+    "01-01-PLAN.md": planFile(1, [{ title: "first" }]),
+    "01-02-PLAN.md": planFile(2, [{ title: "second" }]),
+  });
+  const p = importPlans(dir);
+  assert.deepEqual(p.parallel_groups, [[1], [2]]);
   rmSync(dir, { recursive: true, force: true });
 });
 

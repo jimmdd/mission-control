@@ -1207,3 +1207,32 @@ test("a parked ticket is not reported as being in Intake", () => {
   assert.match(live, /class="now"/, "a real leg still lights up");
   assert.doesNotMatch(live, /class="tk-off"/);
 });
+
+test("every activity entry says when it happened", () => {
+  // Without a time it is a list of things that happened in no particular when —
+  // and "is it stuck?" is the question that column exists to answer.
+  const { renderConversation } = threadHelpers();
+  const out = renderConversation({ questions: SETTLED, confirmed: true }, null, {
+    taskStatus: "in_progress",
+    activities: [
+      { activity_type: "step_completed", message: "Step 2 completed", created_at: "2026-08-14T09:15:00Z" },
+      { activity_type: "updated", message: "Agent spawn failed for repo/x", created_at: "2026-08-14T09:20:00Z" },
+    ] });
+  const rail = out.split('<aside class="decisions">')[1];
+  assert.equal((rail.match(/class="ts"/g) || []).length, 2, "one stamp per entry");
+  assert.match(rail, /class="cevent bad"[\s\S]*?class="ts"/, "including the ones that went wrong");
+});
+
+test("a collapsed run says when it stopped", () => {
+  // Reading newest first, the most recent of the run is what answers "when did
+  // this go quiet".
+  const { renderConversation } = threadHelpers();
+  const out = renderConversation({ questions: SETTLED, confirmed: true }, null, {
+    taskStatus: "in_progress",
+    activities: [
+      { activity_type: "updated", message: "Agent heartbeat: running.", created_at: "2026-08-14T09:00:00Z" },
+      { activity_type: "updated", message: "Agent heartbeat: running.", created_at: "2026-08-14T09:01:00Z" },
+    ] });
+  const rail = out.split('<aside class="decisions">')[1];
+  assert.match(rail, /2 routine updates · /);
+});

@@ -376,12 +376,17 @@
      page means a human is the blocker, and that is what a failure makes you. */
   /* The run's own account of itself, in the rail. Newest first — the question it
      answers is "what is it doing now". */
-  .dacts { display: flex; flex-direction: column; gap: 8px; max-height: 34vh; overflow-y: auto; }
+  /* No fixed cap: the rail is already a column with its own scroll, and a second
+     scroller inside it meant the newest entry could be hidden behind two of them.
+     It takes what is left and shrinks when the sections above need room. */
+  .dacts { display: flex; flex-direction: column; gap: 8px; min-height: 0; overflow-y: auto; }
   .cevent {
     display: flex; gap: 8px; align-items: baseline; font-family: var(--mono);
     font-size: 10px; line-height: 1.5; color: var(--ink-4);
   }
   .cevent .mk { flex: none; color: rgba(224,224,224,.28); }
+  .cevent .ts { flex: none; color: rgba(224,224,224,.3); font-variant-numeric: tabular-nums; }
+  .cevent.bad .ts { color: rgba(245,158,11,.75); }
   .cevent .tx { min-width: 0; overflow-wrap: anywhere; }
   .cevent.bad { color: var(--amber); }
   .cevent.bad .mk { color: var(--amber); }
@@ -516,6 +521,9 @@
   }
   .drail-h .gn { margin-left: auto; letter-spacing: 0; color: var(--ink-3); font-size: 10px; }
   .dsec + .dsec { border-top: 1px solid var(--line-soft); padding-top: 18px; }
+  /* Activity is the one section that grows without bound, so it is the one that
+     gets the leftover height. */
+  .dsec.grow { display: flex; flex-direction: column; min-height: 0; flex: 1; }
   .drow2 {
     display: block; width: 100%; text-align: left; font-family: inherit; cursor: pointer;
     background: none; border: none; border-left: 2px solid rgba(255,255,255,.12);
@@ -1425,20 +1433,29 @@ function renderActivity(activities) {
   if (!rows.length) return "";
   const out = [];
   let run = 0;
+  // The stamp of the most recent one in the run — reading newest first, that is
+  // the one that answers "when did this stop".
+  let runAt = "";
   const flush = () => {
     if (!run) return;
-    out.push(`<div class="cnoise">${run} routine update${run > 1 ? "s" : ""}</div>`);
+    out.push(`<div class="cnoise">${run} routine update${run > 1 ? "s" : ""}${
+      runAt ? ` · ${esc(runAt)}` : ""}</div>`);
     run = 0;
+    runAt = "";
   };
   for (const { a, kind } of rows.slice().reverse()) {
-    if (kind === "noise") { run++; continue; }
+    const at = shortTime(a.created_at);
+    if (kind === "noise") { if (!run) runAt = at; run++; continue; }
     flush();
+    // Without a time this is a list of things that happened in no particular
+    // when — and "is it stuck?" is the question the column exists to answer.
     out.push(`<div class="cevent ${kind === "trouble" ? "bad" : ""}">
       <span class="mk">${kind === "trouble" ? "!" : "·"}</span>
+      <span class="ts">${esc(at)}</span>
       <span class="tx">${esc(clip(a.message, 120))}</span></div>`);
   }
   flush();
-  return `<div class="dsec"><h2>Activity</h2><div class="dacts">${out.join("")}</div></div>`;
+  return `<div class="dsec grow"><h2>Activity</h2><div class="dacts">${out.join("")}</div></div>`;
 }
 
 /** The question the composer is currently pointed at. */
