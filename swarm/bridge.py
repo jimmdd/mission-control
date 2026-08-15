@@ -340,17 +340,43 @@ def _triage_model_deep() -> str:
     return _load_triage_config()["triage_model_deep"]
 
 
-from context_fabrica_config import (
-    context_fabrica_embedding_model,
-    context_fabrica_schema,
-    existing_context_fabrica_schema,
-    gemini_embedding_payload,
-    gemini_embedding_url,
-    include_existing_context_fabrica_schema,
-    make_existing_context_fabrica_adapter,
-    make_existing_context_fabrica_embedder,
-    make_context_fabrica_adapter,
-)
+# Knowledge recall is optional, and this import made it mandatory. `context_fabrica`
+# is a third-party package: without it installed, `import bridge` raised
+# ModuleNotFoundError at module scope, so every test that shells into Python failed
+# and CI had been red since the branch first reached main — 60 failures, all of them
+# this one line. The daemon already degrades when the store is unreachable ("Mission
+# Control knowledge recall query failed" every cycle, harmlessly); it should degrade
+# the same way when the package is simply absent.
+try:
+    from context_fabrica_config import (
+        context_fabrica_embedding_model,
+        context_fabrica_schema,
+        existing_context_fabrica_schema,
+        gemini_embedding_payload,
+        gemini_embedding_url,
+        include_existing_context_fabrica_schema,
+        make_existing_context_fabrica_adapter,
+        make_existing_context_fabrica_embedder,
+        make_context_fabrica_adapter,
+    )
+    KNOWLEDGE_AVAILABLE = True
+except ImportError as _knowledge_import_error:  # noqa: N816
+    logging.info(f"Knowledge recall unavailable ({_knowledge_import_error}) — "
+                 "planning and dispatch are unaffected")
+    KNOWLEDGE_AVAILABLE = False
+
+    def _knowledge_absent(*_a, **_kw):
+        raise RuntimeError("context_fabrica is not installed")
+
+    context_fabrica_embedding_model = lambda: ""          # noqa: E731
+    context_fabrica_schema = lambda: ""                   # noqa: E731
+    existing_context_fabrica_schema = lambda: ""          # noqa: E731
+    include_existing_context_fabrica_schema = lambda: False  # noqa: E731
+    gemini_embedding_url = lambda _model: ""              # noqa: E731
+    gemini_embedding_payload = _knowledge_absent
+    make_context_fabrica_adapter = _knowledge_absent
+    make_existing_context_fabrica_adapter = _knowledge_absent
+    make_existing_context_fabrica_embedder = _knowledge_absent
 
 _triage_cfg = _load_triage_config()
 EMBEDDING_MODEL = context_fabrica_embedding_model()
