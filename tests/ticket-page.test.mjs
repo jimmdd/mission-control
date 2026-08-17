@@ -1236,3 +1236,56 @@ test("a collapsed run says when it stopped", () => {
   const rail = out.split('<aside class="decisions">')[1];
   assert.match(rail, /2 routine updates · /);
 });
+
+test("the same thing happening thirteen times is said once, with a count", () => {
+  // Collapsed by identity, not by pattern. A retry loop posts the same sentence
+  // over and over and it is usually *trouble*, so the noise rules never touched
+  // it — thirteen identical amber blocks buried everything else in the column.
+  const { renderConversation } = threadHelpers();
+  const repeated = Array.from({ length: 13 }, (_, i) => ({
+    activity_type: "updated",
+    message: "Agent spawn failed for GitProjects/mc-demo-sandbox (attempt 1).",
+    created_at: `2026-08-14T10:${String(i).padStart(2, "0")}:00Z`,
+  }));
+  const out = renderConversation({ questions: SETTLED, confirmed: true }, null,
+    { taskStatus: "in_progress", activities: [
+      ...repeated, { activity_type: "step_completed", message: "Step 1 completed", created_at: "2026-08-14T11:00:00Z" }] });
+  const rail = out.split('<aside class="decisions">')[1];
+
+  assert.equal((rail.match(/Agent spawn failed/g) || []).length, 1, "said once");
+  assert.match(rail, /class="xn">×13</);
+  // And the thing it was burying is still visible.
+  assert.match(rail, /Step 1 completed/);
+});
+
+test("different messages are not merged just because they are adjacent", () => {
+  const { renderConversation } = threadHelpers();
+  const out = renderConversation({ questions: SETTLED, confirmed: true }, null, {
+    taskStatus: "in_progress",
+    activities: [
+      { activity_type: "step_completed", message: "Step 1 completed", created_at: "1" },
+      { activity_type: "step_completed", message: "Step 2 completed", created_at: "2" },
+    ] });
+  const rail = out.split('<aside class="decisions">')[1];
+  assert.match(rail, /Step 1 completed/);
+  assert.match(rail, /Step 2 completed/);
+  assert.doesNotMatch(rail, /class="xn"/);
+});
+
+test("quoting an error is not the same as being one", () => {
+  // Matching "could not" anywhere turned the whole column amber: a planner
+  // question quotes the error it is asking about, and a prompt dump quotes the
+  // ticket. Trouble is anchored at the start now, plus the types that mean it
+  // whatever the wording.
+  const { renderConversation } = threadHelpers();
+  const out = renderConversation({ questions: SETTLED, confirmed: true }, null, {
+    taskStatus: "in_progress",
+    activities: [
+      { activity_type: "updated", message: "Agent spawn failed for repo/x (attempt 1).", created_at: "3" },
+      { activity_type: "step_escalated", message: "Step 2 handed to a deeper model", created_at: "4" },
+      { activity_type: "plan_created", message: "Planning wrote 01-PLAN.md — it could not have been clearer", created_at: "5" },
+    ] });
+  const rail = out.split('<aside class="decisions">')[1];
+  assert.equal((rail.match(/class="cevent bad"/g) || []).length, 2, "the failure and the escalation");
+  assert.match(rail, /class="cevent ">[\s\S]*?Planning wrote/, "a milestone that merely says 'could not' is not one");
+});

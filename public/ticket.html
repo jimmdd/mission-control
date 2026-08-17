@@ -147,7 +147,7 @@
   .rt-seg .bars i { width: 9px; height: 2px; border-radius: 1px; background: rgba(255,255,255,.12); }
   .rt-seg .bars i.done { background: var(--green); }
   .rt-seg .bars i.now  { background: var(--cyan); }
-  .rt-seg .n { margin-left: auto; color: rgba(224,224,224,.4); }
+  .rt-seg .n { margin-left: auto; color: rgba(224,224,224,.4); font-variant-numeric: tabular-nums; }
   .rail .foot { display: block; text-decoration: none; margin-top: auto; padding: 18px 18px 0; font-family: var(--mono); font-size: 10px; color: rgba(224,224,224,.3); }
 
   /* ─────────── the ticket header ─────────── */
@@ -158,7 +158,7 @@
                 overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   .tk-live { display: flex; align-items: center; gap: 7px; font-family: var(--mono); font-size: 10px; color: var(--ink-3); flex: none; }
   .tk-live i { width: 5px; height: 5px; border-radius: 50%; background: var(--green); animation: mcpulse 2s ease-in-out infinite; }
-  .tk-count { margin-left: auto; font-family: var(--mono); font-size: 10.5px; color: var(--ink-3); flex: none; }
+  .tk-count { margin-left: auto; font-family: var(--mono); font-size: 10.5px; color: var(--ink-3); flex: none; font-variant-numeric: tabular-nums; }
   /* Green once nothing is blocking: the count stops being a tally of what you owe
      and becomes the fact that you owe nothing. */
   .tk-count.set { color: var(--green); }
@@ -300,7 +300,7 @@
 
   @keyframes mcpulse { 0%,100% { opacity: 1; } 50% { opacity: .35; } }
 
-  .stream { flex: 1; min-height: 0; overflow-y: auto; padding: 26px 0; }
+  .stream { flex: 1; min-height: 0; overflow-y: auto; padding: 26px 0 8px; }
   /* Bottom-aligned, the way a conversation is: a short thread sits against the
      composer rather than stranded at the top of an empty column. */
   .stream-in { max-width: 668px; margin: 0 auto; padding: 0 26px; display: flex; flex-direction: column;
@@ -316,7 +316,7 @@
     display: block; font-family: var(--mono); font-size: 9.5px; letter-spacing: .09em;
     text-transform: uppercase; color: var(--ink-4); margin-bottom: 5px;
   }
-  .cbody { font-size: 13.5px; line-height: 1.7; color: var(--ink-2); white-space: pre-wrap; }
+  .cbody { font-size: 13.5px; line-height: 1.7; color: var(--ink-2); white-space: pre-wrap; overflow-wrap: anywhere; }
   /* A 500-character question must not push the composer off the screen. It scrolls
      where it stands: nothing is hidden and the answer box stays reachable. */
   .cq { font-size: 13.5px; line-height: 1.7; color: var(--ink); white-space: pre-wrap;
@@ -325,8 +325,8 @@
 
   /* A finding is amber because a human is the blocker — the one meaning amber has. */
   .cfind {
-    border-left: 2px solid var(--amber); background: var(--amber-bg);
-    border-radius: 0 7px 7px 0; padding: 12px 15px; margin-top: 13px;
+    border-left: 2px solid var(--amber); background: rgba(245,158,11,.035);
+    border-radius: 0 7px 7px 0; padding: 11px 15px; margin-top: 13px;
   }
   .cfind .ft { font-size: 12.5px; font-weight: 600; color: #f4f4f6; margin-bottom: 5px; }
   .cfind .fb { font-size: 12px; line-height: 1.6; color: rgba(224,224,224,.6); white-space: normal; }
@@ -388,6 +388,13 @@
   .cevent .ts { flex: none; color: rgba(224,224,224,.3); font-variant-numeric: tabular-nums; }
   .cevent.bad .ts { color: rgba(245,158,11,.75); }
   .cevent .tx { min-width: 0; overflow-wrap: anywhere; }
+  /* How many times the same thing happened. Reads as a count, not as part of the
+     sentence. */
+  .cevent .xn {
+    margin-left: 6px; padding: 1px 5px; border-radius: 4px;
+    background: rgba(255,255,255,.07); color: rgba(224,224,224,.5);
+  }
+  .cevent.bad .xn { background: rgba(245,158,11,.14); color: var(--amber); }
   .cevent.bad { color: var(--amber); }
   .cevent.bad .mk { color: var(--amber); }
   /* Fifty repetitions of "heartbeat: running" is not a conversation, but silence
@@ -541,8 +548,8 @@
   .drow2.set .dtag b { color: var(--green); }
   .drow2.on .dtag b { color: var(--cyan); }
   .drow2.agent .dtag b { color: var(--amber); }
-  .drow2 .dq2 { font-size: 11.5px; line-height: 1.5; color: rgba(224,224,224,.6); display: block;
-                overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .drow2 .dq2 { font-size: 11.5px; line-height: 1.45; color: rgba(224,224,224,.6); display: -webkit-box;
+                -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; }
   .drow2.set .dq2 { color: rgba(224,224,224,.78); }
   .drow2.on .dq2 { color: rgba(224,224,224,.6); }
   .drow2:not(.set):not(.on):not(.agent) .dq2 { color: rgba(224,224,224,.45); }
@@ -1363,10 +1370,14 @@ const HUMAN_MARK = '"source":"human"';
 
 /** Routine chatter. True every 60 seconds, worth reading approximately never. */
 const NOISE = /^Agent heartbeat|^Lease |lease (claimed|released)|^Prompt sent|^Liveness/i;
+/** The full prompt an agent was handed. Useful in a transcript, not in a column. */
+const NOISE_TYPES = ["liveness", "prompt_sent", "lease_claimed", "lease_released"];
 /** Things that went wrong. These are never collapsed, whatever else is.
  *  No `attempt \d` here: a heartbeat says "(attempt 1/3)" on every beat, so it
  *  matched every one of them as a failure. The real failures say so in words. */
-const TROUBLE = /fail|error|refus|escalat|timed out|stopped|blocked|could not|cannot|giving up/i;
+const TROUBLE = /^(agent spawn failed|spawn failed|escalated to human|verification failed|step failed|planning failed|could not create|failed to)/i;
+/** Types that mean trouble whatever the wording. */
+const TROUBLE_TYPES = ["step_escalated", "step_retry", "checkpoint_raised", "needs_human"];
 /** Events worth a line in the thread even though nobody said them. */
 const MILESTONE_TYPES = ["step_dispatched", "step_completed", "step_escalated", "step_retry",
   "plan_created", "checkpoint_raised", "checkpoint_resolved", "spawned", "status_changed", "needs_human"];
@@ -1380,8 +1391,8 @@ function classifyActivity(a) {
   if (a.activity_type === "agent_reply") return "agent";
   // Noise is tested first: a heartbeat is routine even when its wording overlaps
   // whatever a failure would say. Nothing that repeats every 60 seconds is news.
-  if (NOISE.test(msg) || a.activity_type === "liveness") return "noise";
-  if (TROUBLE.test(msg)) return "trouble";
+  if (NOISE.test(msg) || NOISE_TYPES.includes(a.activity_type)) return "noise";
+  if (TROUBLE_TYPES.includes(a.activity_type) || TROUBLE.test(msg.trim())) return "trouble";
   if (MILESTONE_TYPES.includes(a.activity_type)) return "event";
   return "noise";
 }
@@ -1443,16 +1454,28 @@ function renderActivity(activities) {
     run = 0;
     runAt = "";
   };
+  // Repetition is collapsed by identity, not by pattern. A retry loop posts the
+  // same sentence over and over and it is usually *trouble*, so the noise rules
+  // never touched it: thirteen identical amber blocks buried everything else in
+  // the column. Saying it once with a count says strictly more.
+  const seen = [];
   for (const { a, kind } of rows.slice().reverse()) {
+    const last = seen[seen.length - 1];
+    if (last && last.kind === kind && last.a.message === a.message) { last.n++; continue; }
+    seen.push({ a, kind, n: 1 });
+  }
+
+  for (const { a, kind, n } of seen) {
     const at = shortTime(a.created_at);
-    if (kind === "noise") { if (!run) runAt = at; run++; continue; }
+    if (kind === "noise") { if (!run) runAt = at; run += n; continue; }
     flush();
     // Without a time this is a list of things that happened in no particular
     // when — and "is it stuck?" is the question the column exists to answer.
     out.push(`<div class="cevent ${kind === "trouble" ? "bad" : ""}">
       <span class="mk">${kind === "trouble" ? "!" : "·"}</span>
       <span class="ts">${esc(at)}</span>
-      <span class="tx">${esc(clip(a.message, 120))}</span></div>`);
+      <span class="tx">${esc(clip(a.message, 110))}${
+        n > 1 ? `<span class="xn">×${n}</span>` : ""}</span></div>`);
   }
   flush();
   return `<div class="dsec grow"><h2>Activity</h2><div class="dacts">${out.join("")}</div></div>`;
