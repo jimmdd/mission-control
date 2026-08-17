@@ -27,7 +27,9 @@ export interface NotifierOptions {
 // be watching the board.
 const HUMAN_RELEVANT = new Set(["needs_human", "awaiting_approval", "agent_exited", "agent_stalled", "new_triage_question"]);
 
-function describe(event: McEvent): { title: string; message: string } {
+// Exported so the message bus renders an event exactly the way the notify hook and
+// webhook do — one wording for every channel.
+export function describe(event: McEvent): { title: string; message: string } {
   const id = typeof event.taskId === "string" ? event.taskId.slice(0, 8) : "";
   const detail = String(event.message ?? event.prompt ?? event.reason ?? "").trim();
   switch (event.type) {

@@ -4,6 +4,7 @@ import { createHandler, getSwarmAgentStatusMap, getConnectionsReport } from "./s
 import { McEventBus } from "./src/events.js";
 import { startLivenessReaper } from "./src/reaper.js";
 import { startNotifier } from "./src/notifier.js";
+import { startMessageBus } from "./src/messagebus/index.js";
 
 // Config
 const PORT = parseInt(process.env.MC_PORT ?? "18900", 10);
@@ -68,6 +69,15 @@ const stopNotifier = startNotifier(events, {
   logger,
 });
 
+// Chat interface (Telegram + Slack DM): pushes the same human-relevant events out, and
+// accepts commands back. Self-gating — does nothing until a bot token and an allowlist
+// are set in Settings, and picks up those edits live rather than at restart.
+const stopMessageBus = startMessageBus(events, {
+  mcHome: MC_HOME,
+  apiBaseUrl: `http://${HOST === "::1" ? "[::1]" : HOST}:${PORT}`,
+  logger,
+});
+
 const server = createServer(async (req, res) => {
   // Health endpoint
   if (req.url === "/health") {
@@ -122,6 +132,7 @@ function shutdown(signal: string) {
   console.log(`[mc] ${signal} received, shutting down`);
   stopReaper();
   stopNotifier();
+  stopMessageBus();
   server.close(() => {
     db.close();
     console.log("[mc] stopped");

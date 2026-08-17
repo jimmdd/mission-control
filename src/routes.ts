@@ -9,6 +9,9 @@ import type { IncomingMessage, ServerResponse } from "node:http";
 import { McEventBus } from "./events.js";
 import type { McEvent } from "./events.js";
 import { getPreviews, startPreview, stopPreview, stopAllPreviews } from "./preview.js";
+import { readBusConfig } from "./messagebus/config.js";
+import { sendTelegramMessage, telegramGetMe } from "./messagebus/telegram.js";
+import { sendSlackMessage, slackAuthTest } from "./messagebus/slack.js";
 import type {
   AgentProgressState,
   CreateActivityInput,
@@ -2379,6 +2382,7 @@ async function handleApiRequest(
                 knowledgeStore: isSet("CONTEXT_FABRICA_DSN"),
                 linear: isSet("LINEAR_API_KEY"),
                 notifications: isSet("MISSION_CONTROL_NOTIFY_WEBHOOK"),
+                messageBus: isSet("TELEGRAM_BOT_TOKEN") || isSet("SLACK_BOT_TOKEN"),
               },
               keys: SETTABLE_KEYS,
             });
@@ -2413,6 +2417,87 @@ async function handleApiRequest(
             sendJson(res, 200, { success: true, updated: Object.keys(updates), rejected });
             return;
           }
+        }
+
+        // Prove the chat interface end to end from Settings: identify the bot, then send
+        // a real message to every allowlisted target. Verifying the token alone is not
+        // enough — a wrong chat id or a missing im:write scope only shows on a send.
+        if (segments[0] === "settings" && segments[1] === "messagebus-test" && segments.length === 2 && method === "POST") {
+          const body = await parseBody(req);
+          const surface = isRecord(body) && typeof body.surface === "string" ? body.surface.toLowerCase() : "";
+          if (surface !== "telegram" && surface !== "slack") {
+            sendJson(res, 400, { error: 'surface must be "telegram" or "slack"' });
+            return;
+          }
+          const mcHome = process.env.MC_HOME ?? join(homedir(), ".mission-control");
+          const cfg = readBusConfig(mcHome);
+          const text = "✅ Mission Control test message — the chat interface is connected. Send /help for commands.";
+
+          if (surface === "telegram") {
+            if (!cfg.telegram.token) {
+              sendJson(res, 400, { error: "TELEGRAM_BOT_TOKEN is not set" });
+              return;
+            }
+            if (cfg.telegram.chatIds.length === 0) {
+              sendJson(res, 400, { error: "TELEGRAM_ALLOWED_CHAT_IDS is empty — add your chat id" });
+              return;
+            }
+            let bot = "";
+            try {
+              const me = await telegramGetMe(cfg.telegram.token);
+              bot = me.username ? `@${me.username}` : "";
+            } catch (e) {
+              sendJson(res, 400, { error: `Bot token rejected: ${e instanceof Error ? e.message : String(e)}` });
+              return;
+            }
+            const results = await Promise.all(
+              cfg.telegram.chatIds.map(async (chatId) => {
+                try {
+                  await sendTelegramMessage(cfg.telegram.token, chatId, text);
+                  return { target: chatId, ok: true };
+                } catch (e) {
+                  return { target: chatId, ok: false, error: e instanceof Error ? e.message : String(e) };
+                }
+              }),
+            );
+            sendJson(res, 200, { surface, bot, interaction: cfg.telegram.interaction, events: cfg.telegram.events, results });
+            return;
+          }
+
+          if (!cfg.slack.botToken) {
+            sendJson(res, 400, { error: "SLACK_BOT_TOKEN is not set" });
+            return;
+          }
+          if (cfg.slack.userIds.length === 0) {
+            sendJson(res, 400, { error: "SLACK_ALLOWED_USER_IDS is empty — add your Slack user id (U…)" });
+            return;
+          }
+          let bot = "";
+          let team = "";
+          try {
+            const auth = await slackAuthTest(cfg.slack.botToken);
+            bot = auth.user ?? "";
+            team = auth.team ?? "";
+          } catch (e) {
+            sendJson(res, 400, { error: `Bot token rejected: ${e instanceof Error ? e.message : String(e)}` });
+            return;
+          }
+          const results = await Promise.all(
+            cfg.slack.userIds.map(async (userId) => {
+              try {
+                await sendSlackMessage(cfg.slack.botToken, userId, text);
+                return { target: userId, ok: true };
+              } catch (e) {
+                return { target: userId, ok: false, error: e instanceof Error ? e.message : String(e) };
+              }
+            }),
+          );
+          // Commands need Socket Mode; saying so here beats silently never listening.
+          const inbound = cfg.slack.interaction === "command" && !cfg.slack.appToken
+            ? "interaction is 'command' but SLACK_APP_TOKEN (xapp-) is missing — inbound commands are off"
+            : undefined;
+          sendJson(res, 200, { surface, bot, team, interaction: cfg.slack.interaction, events: cfg.slack.events, results, inbound });
+          return;
         }
 
         if (segments[0] === "linear" && segments[1] === "meta" && segments.length === 2 && method === "GET") {
@@ -2767,11 +2852,35 @@ const SETTABLE_KEYS = [
   "REPO_WATCH_ROOT",
   "REPO_WATCH_REPOS",
   "MISSION_CONTROL_NOTIFY_WEBHOOK",
+  // Message bus — chat interface. Bot/app tokens are secrets; the rest is config.
+  "TELEGRAM_BOT_TOKEN",
+  "TELEGRAM_ALLOWED_CHAT_IDS",
+  "TELEGRAM_INTERACTION",
+  "TELEGRAM_EVENTS",
+  "SLACK_BOT_TOKEN",
+  "SLACK_APP_TOKEN",
+  "SLACK_ALLOWED_USER_IDS",
+  "SLACK_INTERACTION",
+  "SLACK_EVENTS",
 ];
 
 // Non-secret settings whose current value is safe to return to the UI (so a
 // dropdown or text field can show the active value). Secret keys never expose values.
-const VALUE_KEYS = ["LINEAR_INTERACTION", "LINEAR_LABEL", "LINEAR_TRIAGE_LABEL", "LINEAR_TEAM_KEYS", "LINEAR_ASSIGNEES", "REPO_WATCH_ROOT", "REPO_WATCH_REPOS"];
+const VALUE_KEYS = [
+  "LINEAR_INTERACTION",
+  "LINEAR_LABEL",
+  "LINEAR_TRIAGE_LABEL",
+  "LINEAR_TEAM_KEYS",
+  "LINEAR_ASSIGNEES",
+  "REPO_WATCH_ROOT",
+  "REPO_WATCH_REPOS",
+  "TELEGRAM_ALLOWED_CHAT_IDS",
+  "TELEGRAM_INTERACTION",
+  "TELEGRAM_EVENTS",
+  "SLACK_ALLOWED_USER_IDS",
+  "SLACK_INTERACTION",
+  "SLACK_EVENTS",
+];
 
 function envFilePath(): string {
   const mcHome = process.env.MC_HOME ?? join(homedir(), ".mission-control");

@@ -1,6 +1,9 @@
 # Slack adaptor — design notes
 
-> Status: **design only, not built.** Parked for phase P3 of the v2 plan.
+> Status: **partly built.** A DM-scoped Slack surface (Socket Mode, outbound alerts +
+> inbound commands) shipped with the message bus — see `docs/message-bus.md`. What is
+> still design-only is everything below that needs identity: **thread = ticket**,
+> channel ingestion, approve/deny buttons, and the `actors` / `actor_tokens` schema.
 > Captured 10 Aug 2026. See the approved plan at `~/.claude/plans/kind-mixing-pixel.md`.
 
 ## Framing — what this is and is not

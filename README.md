@@ -35,6 +35,7 @@ It is built for teams running real coding agents, not just prompt demos.
 - **Operational visibility**
   - dashboard for tasks, swarm status, health, and system stats
   - CLI for task operations and swarm session monitoring
+  - chat interface (Telegram, Slack DM): alerts out and commands back — see [`docs/message-bus.md`](docs/message-bus.md)
 - **Knowledge system**
   - Context Fabrica-backed storage for notes, facts, and procedural skills
   - repo exploration and distilled learnings from completed work
@@ -198,6 +199,35 @@ MISSION_CONTROL_BRIDGE_LEASE_SECONDS=900
 `./mc services health` reports service liveness plus local runtime readiness
 for tools such as `tmux`, `git`, `gh`, Node/npm, model keys, PostgreSQL, and
 context-fabrica knowledge diagnostics.
+
+---
+
+## Chat interface (Telegram / Slack DM)
+
+Mission Control can ping you where you already are and take instructions back, so nobody
+has to watch the board for a blocked agent or an unanswered triage question.
+
+```
+🔔 Task 0e46593f needs you
+Triage has a new question: which repo owns the launch flow?
+↳ 0e46593f · reply /task 0e46593f
+
+  → /answer 0e46593f the new-ui app, base off main
+  ← Answered "which repo owns the launch flow?".
+    All 3 questions answered — send /confirm 0e46593f to start the work.
+```
+
+Enable it in ⚙ SETTINGS: paste a bot token, add your chat id (Telegram) or user id
+(Slack), set the interaction level to **Command**, then **Send test message**. Nothing
+runs until a token is present, and Settings edits apply live — no restart.
+
+`/status`, `/tasks`, `/task`, `/answer`, `/confirm`, `/checkpoints`, `/approve`, `/deny`,
+`/followup`, `/preview`, `/done`, `/agents`. Refs are a short task id, a Linear key, or
+part of the title. Full setup, scopes, event routing, and the security model:
+[`docs/message-bus.md`](docs/message-bus.md).
+
+Slack inbound uses **Socket Mode** (an outbound WebSocket) because Mission Control binds
+to `127.0.0.1` and must not be exposed to the internet.
 
 ---
 

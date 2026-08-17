@@ -82,6 +82,47 @@
       ],
     },
     {
+      title: "Message bus — Telegram",
+      note: "Get pinged where you already are, and steer tickets back from chat. Token from @BotFather; chat id from @userinfobot. Send /help to the bot once commands are on.",
+      fields: [
+        { key: "TELEGRAM_BOT_TOKEN", label: "Telegram bot token", secret: true },
+        { key: "TELEGRAM_ALLOWED_CHAT_IDS", label: "Allowed chat ids (comma-separated)", secret: false },
+        { key: "TELEGRAM_INTERACTION", label: "Interaction level", type: "select", default: "notify",
+          options: [
+            { value: "off", label: "Off — no messages" },
+            { value: "notify", label: "Notify — alerts out only" },
+            { value: "command", label: "Command — alerts out, commands in" },
+          ] },
+        { key: "TELEGRAM_EVENTS", label: "Which events", type: "select", default: "action",
+          options: [
+            { value: "action", label: "Action needed + completions (recommended)" },
+            { value: "all", label: "All — adds lifecycle chatter" },
+          ] },
+        { key: "__telegram_test", type: "action", action: "telegram_test" },
+      ],
+    },
+    {
+      title: "Message bus — Slack DM",
+      note: "Scoped to a direct message with you. Bot token (xoxb-) sends; an app-level token (xapp-, Socket Mode) is what lets commands come back — no inbound port is opened either way. Scopes: chat:write, im:write, im:history.",
+      fields: [
+        { key: "SLACK_BOT_TOKEN", label: "Slack bot token (xoxb-)", secret: true },
+        { key: "SLACK_APP_TOKEN", label: "Slack app-level token (xapp-, for commands)", secret: true },
+        { key: "SLACK_ALLOWED_USER_IDS", label: "Your Slack user id (U…)", secret: false },
+        { key: "SLACK_INTERACTION", label: "Interaction level", type: "select", default: "notify",
+          options: [
+            { value: "off", label: "Off — no messages" },
+            { value: "notify", label: "Notify — alerts out only" },
+            { value: "command", label: "Command — alerts out, commands in (needs xapp- token)" },
+          ] },
+        { key: "SLACK_EVENTS", label: "Which events", type: "select", default: "action",
+          options: [
+            { value: "action", label: "Action needed + completions (recommended)" },
+            { value: "all", label: "All — adds lifecycle chatter" },
+          ] },
+        { key: "__slack_test", type: "action", action: "slack_test" },
+      ],
+    },
+    {
       title: "Local previews",
       note: "Preview a task's branch from its card (▶ Preview). Each runs on its own port; they auto-stop after 2h idle and are capped at 4 concurrent.",
       fields: [
@@ -135,6 +176,26 @@
       alert("Linear sync complete:\n\n" + (r.output || "done"));
     } catch (e) {
       alert("Linear sync failed: " + e.message);
+    }
+    await refresh();
+  }
+
+  async function sendBusTest(surface, btn) {
+    if (btn) { btn.disabled = true; btn.textContent = "Sending…"; }
+    try {
+      const r = await post("/settings/messagebus-test", { surface });
+      const results = r.results || [];
+      const ok = results.filter((x) => x.ok).map((x) => x.target);
+      const bad = results.filter((x) => !x.ok);
+      const lines = [];
+      if (r.bot) lines.push(`Bot: ${r.bot}${r.team ? ` (${r.team})` : ""}`);
+      lines.push(`Mode: ${r.interaction} · events: ${r.events}`);
+      if (ok.length) lines.push(`Delivered to: ${ok.join(", ")}`);
+      for (const b of bad) lines.push(`Failed for ${b.target}: ${b.error}`);
+      if (r.inbound) lines.push(`Note: ${r.inbound}`);
+      alert(lines.join("\n"));
+    } catch (e) {
+      alert("Test failed: " + e.message);
     }
     await refresh();
   }
@@ -237,6 +298,21 @@
           <div class="mc-set-field">
             <button class="mc-set-btn" id="mc-linear-sync" style="width:100%"${configured.LINEAR_API_KEY ? "" : " disabled"}>↻ Sync Linear now</button>
             <div class="mc-set-note">Pull issues and push status changes now, without waiting for the 5-minute cycle.</div>
+          </div>`;
+        }
+        if (f.type === "action" && (f.action === "telegram_test" || f.action === "slack_test")) {
+          const tg = f.action === "telegram_test";
+          const ready = tg ? configured.TELEGRAM_BOT_TOKEN : configured.SLACK_BOT_TOKEN;
+          const targets = tg ? values.TELEGRAM_ALLOWED_CHAT_IDS : values.SLACK_ALLOWED_USER_IDS;
+          const st = !ready
+            ? "Paste a bot token first."
+            : !targets
+            ? tg ? "Add your chat id, then test." : "Add your Slack user id, then test."
+            : "Sends a real message to every allowlisted target.";
+          return `
+          <div class="mc-set-field">
+            <button class="mc-set-btn" id="mc-${tg ? "telegram" : "slack"}-test" style="width:100%"${ready && targets ? "" : " disabled"}>✈ Send test message</button>
+            <div class="mc-set-note">${esc(st)}</div>
           </div>`;
         }
         if (f.type === "action" && f.action === "previews_stop_all") {
@@ -356,6 +432,10 @@
     if (linearSync) linearSync.onclick = () => syncLinearNow(linearSync);
     const previewsStop = root.querySelector("#mc-previews-stop-all");
     if (previewsStop) previewsStop.onclick = () => stopAllPreviews(previewsStop);
+    const tgTest = root.querySelector("#mc-telegram-test");
+    if (tgTest) tgTest.onclick = () => sendBusTest("telegram", tgTest);
+    const slackTest = root.querySelector("#mc-slack-test");
+    if (slackTest) slackTest.onclick = () => sendBusTest("slack", slackTest);
   }
 
   function mountButton() {
