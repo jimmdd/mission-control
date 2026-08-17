@@ -98,6 +98,7 @@
             { value: "action", label: "Action needed + completions (recommended)" },
             { value: "all", label: "All — adds lifecycle chatter" },
           ] },
+        { key: "__telegram_save", type: "action", action: "save_section" },
         { key: "__telegram_test", type: "action", action: "telegram_test" },
       ],
     },
@@ -119,6 +120,7 @@
             { value: "action", label: "Action needed + completions (recommended)" },
             { value: "all", label: "All — adds lifecycle chatter" },
           ] },
+        { key: "__slack_save", type: "action", action: "save_section" },
         { key: "__slack_test", type: "action", action: "slack_test" },
       ],
     },
@@ -248,6 +250,41 @@
     }
   }
 
+  // Save every filled field in one section at once. Setting up a chat surface means a
+  // token, an allowlist and two dropdowns — four round trips to configure one thing is
+  // busywork, and the endpoint already takes many keys per call. Blank fields are
+  // skipped so saving the section never wipes a secret you left untouched.
+  async function saveSection(index, btn) {
+    const sec = SECTIONS[index];
+    if (!sec) return;
+    const updates = {};
+    for (const f of sec.fields) {
+      if (f.type === "action" || f.type === "multiselect") continue;
+      const el = document.getElementById(`mc-set-${f.key}`);
+      if (!el) continue;
+      const value = String(el.value ?? "").trim();
+      if (value) updates[f.key] = value;
+    }
+    if (Object.keys(updates).length === 0) {
+      alert("Nothing to save — fill in a field first.");
+      return;
+    }
+    if (btn) { btn.disabled = true; btn.textContent = "Saving…"; }
+    try {
+      const r = await post("/settings", updates);
+      // Clear secrets so they are not left sitting in the DOM after a save.
+      for (const f of sec.fields) {
+        if (!f.secret) continue;
+        const el = document.getElementById(`mc-set-${f.key}`);
+        if (el) el.value = "";
+      }
+      alert(`Saved: ${(r.updated || Object.keys(updates)).join(", ")}`);
+    } catch (e) {
+      alert("Save failed: " + e.message);
+    }
+    await refresh();
+  }
+
   function render() {
     let root = document.getElementById("mc-set-overlay");
     if (!state.open) { if (root) root.style.display = "none"; return; }
@@ -272,7 +309,7 @@
 
     const values = (state.settings && state.settings.values) || {};
 
-    const sections = SECTIONS.map((sec) => {
+    const sections = SECTIONS.map((sec, sectionIndex) => {
       const fields = sec.fields.map((f) => {
         const isSet = configured[f.key];
         if (f.type === "action" && f.action === "repos") {
@@ -298,6 +335,13 @@
           <div class="mc-set-field">
             <button class="mc-set-btn" id="mc-linear-sync" style="width:100%"${configured.LINEAR_API_KEY ? "" : " disabled"}>↻ Sync Linear now</button>
             <div class="mc-set-note">Pull issues and push status changes now, without waiting for the 5-minute cycle.</div>
+          </div>`;
+        }
+        if (f.type === "action" && f.action === "save_section") {
+          return `
+          <div class="mc-set-field">
+            <button class="mc-set-btn" data-save-section="${sectionIndex}" style="width:100%">💾 Save all fields above</button>
+            <div class="mc-set-note">One call for the whole card, instead of a Save per field. Blank fields are left as they are.</div>
           </div>`;
         }
         if (f.type === "action" && (f.action === "telegram_test" || f.action === "slack_test")) {
@@ -416,6 +460,9 @@
     root.querySelector("#mc-set-close").onclick = () => { state.open = false; render(); };
     root.querySelectorAll("[data-save]").forEach((el) => { el.onclick = () => save(el.dataset.save); });
     root.querySelectorAll("[data-save-ms]").forEach((el) => { el.onclick = () => saveMulti(el.dataset.saveMs); });
+    root.querySelectorAll("[data-save-section]").forEach((el) => {
+      el.onclick = () => saveSection(Number(el.dataset.saveSection), el);
+    });
     root.querySelectorAll("[data-ms-toggle]").forEach((el) => {
       el.onclick = () => {
         const p = document.getElementById(`mc-ms-panel-${el.dataset.msToggle}`);
