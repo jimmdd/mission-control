@@ -1469,11 +1469,19 @@ function renderActivity(activities) {
   // same sentence over and over and it is usually *trouble*, so the noise rules
   // never touched it: thirteen identical amber blocks buried everything else in
   // the column. Saying it once with a count says strictly more.
+  // Collapsed across the whole column, not just where they happen to be adjacent.
+  // A retry loop interleaves its escalation with heartbeats, so the same sentence
+  // appeared five times with "3 routine updates" between each — adjacent-only
+  // merging left every one of them. Kept at its newest position, counted once.
   const seen = [];
+  const byMessage = new Map();
   for (const { a, kind } of rows.slice().reverse()) {
-    const last = seen[seen.length - 1];
-    if (last && last.kind === kind && last.a.message === a.message) { last.n++; continue; }
-    seen.push({ a, kind, n: 1 });
+    if (kind === "noise") { seen.push({ a, kind, n: 1 }); continue; }
+    const prior = byMessage.get(a.message);
+    if (prior) { prior.n++; continue; }
+    const entry = { a, kind, n: 1 };
+    byMessage.set(a.message, entry);
+    seen.push(entry);
   }
 
   for (const { a, kind, n } of seen) {

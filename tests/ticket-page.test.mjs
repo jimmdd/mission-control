@@ -1335,3 +1335,22 @@ test("choosing a level writes where the bridge reads it", () => {
   assert.match(fn, /triage-state/, "the same state process_level.requires_confirmation consults");
   assert.match(fn, /load\(\{ force: true \}\)/, "and the gate re-evaluates immediately");
 });
+
+test("repeats are collapsed across the column, not only where adjacent", () => {
+  // A retry loop interleaves its escalation with heartbeats, so the same sentence
+  // appeared five times with "3 routine updates" between each — adjacent-only
+  // merging left every one of them on screen.
+  const { renderConversation } = threadHelpers();
+  const activities = [];
+  for (let i = 0; i < 5; i++) {
+    activities.push({ activity_type: "checkpoint_raised", message: "Escalated to human: planning could not start",
+                      created_at: `2026-08-14T1${i}:00:00Z` });
+    activities.push({ activity_type: "updated", message: "Agent heartbeat: running.",
+                      created_at: `2026-08-14T1${i}:30:00Z` });
+  }
+  const rail = renderConversation({ questions: SETTLED, confirmed: true }, null,
+    { taskStatus: "in_progress", activities }).split('<aside class="decisions">')[1];
+
+  assert.equal((rail.match(/Escalated to human/g) || []).length, 1, "said once");
+  assert.match(rail, /class="xn">×5</);
+});
