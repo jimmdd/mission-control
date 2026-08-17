@@ -20,7 +20,8 @@ import {
   type BusConfig,
 } from "./config.js";
 import { executeCommand, parseCommand } from "./commands.js";
-import { formatEvent, shouldSend } from "./format.js";
+import { formatEvent, shouldSend, type TaskContext } from "./format.js";
+import { taskLabel, taskTitle } from "./ref.js";
 import { sendSlackMessage, startSlackListener } from "./slack.js";
 import { sendTelegramMessage, startTelegramListener } from "./telegram.js";
 import type { IncomingChatMessage, Logger, SurfaceKind } from "./types.js";
@@ -41,6 +42,12 @@ export interface MessageBusOptions {
   /** Test seam: skip inbound listeners entirely. */
   inbound?: boolean;
   now?: () => number;
+  /**
+   * Resolve a task so an alert can name it the way a person does. Synchronous by design
+   * (the server passes db.getTask) — an alert must not wait on an HTTP round trip, and
+   * an unresolvable task just degrades to the short id.
+   */
+  lookupTask?: (taskId: string) => Record<string, unknown> | null | undefined;
 }
 
 function inboundSignature(cfg: BusConfig): string {
@@ -117,6 +124,21 @@ export function startMessageBus(events: McEventBus, opts: MessageBusOptions): ()
     const taskId = typeof event.taskId === "string" ? event.taskId : "";
     let text: string | null = null;
 
+    let context: TaskContext | undefined;
+    if (taskId && opts.lookupTask) {
+      try {
+        const task = opts.lookupTask(taskId);
+        if (task) {
+          const title = taskTitle(task);
+          const url = typeof task.external_url === "string" ? task.external_url : "";
+          context = { label: taskLabel(task), title: title || undefined, url: url || undefined };
+        }
+      } catch (err) {
+        // A lookup failure must not swallow the alert — degrade to the short id.
+        log?.error(`[messagebus] task lookup failed: ${err instanceof Error ? err.message : String(err)}`);
+      }
+    }
+
     for (const { surface, targets, scope } of surfaces) {
       if (!shouldSend(event.type, scope)) continue;
       const key = `${surface}:${event.type}:${taskId}`;
@@ -124,7 +146,7 @@ export function startMessageBus(events: McEventBus, opts: MessageBusOptions): ()
       const previous = lastSent.get(key);
       if (previous !== undefined && at - previous < cooldownMs) continue;
       lastSent.set(key, at);
-      text ??= formatEvent(event);
+      text ??= formatEvent(event, context);
       for (const target of targets) {
         void send(surface, cfg, target, text).catch((err) =>
           log?.error(`[messagebus] ${surface} send failed: ${err instanceof Error ? err.message : String(err)}`),

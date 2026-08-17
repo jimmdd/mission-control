@@ -49,25 +49,45 @@ Two properties are deliberate:
 | `all` | adds `delegated`, `subtask_completed`, `parent_resumed`, `checkpoint_resolved`, `objective_created`, `objective_scope_approved` |
 | never | `progress`, `liveness`, `settings_updated` — at any scope |
 
+## What an alert looks like
+
+```
+🔔 MET-639 needs you
+metalex for new ui
+The launch flow spans two repos — which one owns the MetaLeX step?
+https://linear.app/organizationtechnology/issue/MET-639/metalex-step-validation…
+↳ /task MET-639
+```
+
+Key, title, what happened, the Linear link, and a command you can type back. An alert
+that only carried a UUID prefix answered neither "which ticket" nor "what do I do", so
+the bus resolves the task (`db.getTask`, synchronously — an alert must not wait on a
+round trip) and degrades to the short id only when it cannot.
+
 Deduped per (surface, type, task) with a 60s window, because a flapping condition
 otherwise becomes 177 messages — the MET-536 "✅ Completed" incident is why that ledger
 exists.
 
 ## Commands
 
-A **ref** is a short task id (`0e46593f`), a Linear key (`MET-639`), or a piece of the
-title. Ambiguous refs are reported, never guessed.
+A **ref** is a Linear key — `MET-639`, or loosely as `met 639` / `met639` / `met-639` —
+or a piece of the title (a short task id still works, but nothing asks you for one).
+Ambiguous refs are reported, never guessed.
+
+Nothing user-facing prints a UUID: every listing, alert and reply names a ticket by its
+Linear key and title, and every ref the bot suggests can be typed back verbatim.
 
 | Command | What it does |
 |---|---|
 | `/status` | board counts, pending approvals, tickets with unanswered questions |
-| `/tasks [status]` | list tasks; bare = the ones where a human is the bottleneck |
+| `/tasks [status]` | list tickets; bare = the ones where a human is the bottleneck; a non-status argument is treated as a search |
+| `/search <words>` | keyword search over key, title and description — every word must match, so more words narrow. `/find` is an alias. Title hits and open tickets rank first |
 | `/task <ref>` | one ticket: status, triage progress, next question, recent activity |
 | `/answer <ref> <text>` | answers the next open triage question; on a review/testing ticket it lands as `manual_feedback` (which relaunches the agent), in planning as `planning_answer` |
 | `/confirm <ref>` | confirm triage once every question is answered — this is what starts the work |
-| `/checkpoints` | pending approvals with their prompts |
-| `/approve [ref] [note]` | resolve a checkpoint; the ref is optional when exactly one is pending |
-| `/deny <ref> <reason>` | reject it — the reason is required, since that is what the agent acts on |
+| `/checkpoints` | pending approvals, numbered, each named by its ticket |
+| `/approve [ref] [note]` | resolve one: by ticket (`/approve MET-639`), by list number (`/approve 2`), or bare when exactly one is pending. The reply echoes the prompt it resolved, so a mis-aimed number is visible immediately |
+| `/deny <ref> <reason>` | reject it — the reason is required, since that is what the agent acts on. A bare `/deny wrong repo` is read as a reason, not a ref |
 | `/followup <ref> <action>` | queue a canned follow-up + relaunch: `review_comments`, `merge_conflicts`, `ci_lint`, `rebuild_design` |
 | `/preview <ref>` | start a local preview of the ticket's branch |
 | `/done <ref> [reason]` | close a ticket |

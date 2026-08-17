@@ -28,9 +28,11 @@ export interface NotifierOptions {
 const HUMAN_RELEVANT = new Set(["needs_human", "awaiting_approval", "agent_exited", "agent_stalled", "new_triage_question"]);
 
 // Exported so the message bus renders an event exactly the way the notify hook and
-// webhook do — one wording for every channel.
-export function describe(event: McEvent): { title: string; message: string } {
-  const id = typeof event.taskId === "string" ? event.taskId.slice(0, 8) : "";
+// webhook do — one wording for every channel. `taskLabel` lets a channel that can look
+// the task up name it the way a person would ("MET-639"); without one it falls back to
+// the short id, which is all a bare event carries.
+export function describe(event: McEvent, taskLabel?: string): { title: string; message: string } {
+  const id = taskLabel ?? (typeof event.taskId === "string" ? event.taskId.slice(0, 8) : "");
   const detail = String(event.message ?? event.prompt ?? event.reason ?? "").trim();
   switch (event.type) {
     case "needs_human":

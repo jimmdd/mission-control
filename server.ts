@@ -76,6 +76,8 @@ const stopMessageBus = startMessageBus(events, {
   mcHome: MC_HOME,
   apiBaseUrl: `http://${HOST === "::1" ? "[::1]" : HOST}:${PORT}`,
   logger,
+  // So an alert can say "MET-639 · metalex for new ui" instead of a UUID prefix.
+  lookupTask: (taskId) => db.getTask(taskId) as unknown as Record<string, unknown> | null,
 });
 
 const server = createServer(async (req, res) => {

@@ -7,6 +7,7 @@
 // feedback, resuming a task on checkpoint approval, rolling up delegation on done)
 // happen identically from chat.
 import type { SurfaceKind } from "./types.js";
+import { linearKey, normalizeRef, takeRef, taskLabel, taskTitle } from "./ref.js";
 
 export interface ApiClient {
   get(path: string): Promise<unknown>;
@@ -29,24 +30,38 @@ const HELP = [
   "Mission Control commands",
   "",
   "/status — board counts, what needs you",
-  "/tasks [status] — list tasks (default: the ones needing attention)",
+  "/tasks [status] — list tickets (default: the ones needing attention)",
+  "/search <words> — keyword search over key, title and description",
   "/task <ref> — one ticket: status, open questions, last activity",
   "/answer <ref> <text> — answer the next triage question, or leave feedback on a ticket in review",
   "/confirm <ref> — confirm triage once every question is answered (starts the work)",
-  "/checkpoints — pending approvals",
-  "/approve [ref] [note] — approve a checkpoint (ref optional when only one is pending)",
-  "/deny <ref> <reason> — reject a checkpoint",
+  "/checkpoints — pending approvals, numbered",
+  "/approve [ref] [note] — approve: /approve MET-639, or /approve 2 from the list, or bare when only one is pending",
+  "/deny <ref> <reason> — reject it, with the reason the agent should act on",
   "/followup <ref> <action> — queue a canned follow-up and relaunch:",
   `    ${FOLLOWUP_ACTIONS.join(", ")}`,
   "/preview <ref> — start a local preview of the ticket's branch",
   "/done <ref> [reason] — mark a ticket done",
   "/agents — agent roster and what each is on",
   "",
-  "A ref is a short task id (0e46593f), a Linear key (MET-639), or a bit of the title.",
+  "A ref is a Linear key — MET-639, or just \"met 639\" — or a bit of the title.",
 ].join("\n");
 
 // Statuses shown by a bare /tasks: the ones where a human is the bottleneck.
 const ATTENTION_STATUSES = ["inbox", "planning", "review", "testing", "on_hold"];
+
+// The full set, so /tasks can tell "is this a status filter or a search?" apart.
+const ALL_STATUSES = new Set([
+  "pending_dispatch",
+  "planning",
+  "inbox",
+  "assigned",
+  "in_progress",
+  "testing",
+  "review",
+  "on_hold",
+  "done",
+]);
 
 function asArray(value: unknown): Record<string, unknown>[] {
   return Array.isArray(value) ? (value.filter((v) => v && typeof v === "object") as Record<string, unknown>[]) : [];
@@ -75,14 +90,8 @@ function triageQuestions(triage: Record<string, unknown> | null): Record<string,
   return triage ? asArray(triage.questions) : [];
 }
 
-/** The Linear key lives in the title prefix ("[MET-639] …") and the issue URL. */
 function matchesLinearKey(task: TaskRecord, key: string): boolean {
-  const upper = key.toUpperCase();
-  return (
-    str(task.title).toUpperCase().includes(`[${upper}]`) ||
-    str(task.external_url).toUpperCase().includes(`/${upper}/`) ||
-    str(task.external_url).toUpperCase().endsWith(`/${upper}`)
-  );
+  return linearKey(task) === key.toUpperCase();
 }
 
 interface ResolveOutcome {
@@ -96,8 +105,8 @@ interface ResolveOutcome {
  * acting on the wrong ticket is worse than one more message.
  */
 export async function resolveTask(api: ApiClient, ref: string): Promise<ResolveOutcome> {
-  const needle = ref.trim();
-  if (!needle) return { error: "Which ticket? Add a ref: /task 0e46593f" };
+  const needle = normalizeRef(ref);
+  if (!needle) return { error: "Which ticket? Add a ref, e.g. /task MET-639" };
   const tasks = asArray(await api.get("/tasks"));
   if (tasks.length === 0) return { error: "No tasks on the board." };
 
@@ -105,24 +114,26 @@ export async function resolveTask(api: ApiClient, ref: string): Promise<ResolveO
   if (exact) return { task: exact };
 
   const candidates: Record<string, unknown>[][] = [];
-  if (needle.length >= 4) {
-    candidates.push(tasks.filter((t) => str(t.id).toLowerCase().startsWith(needle.toLowerCase())));
-  }
+  // Linear key first: it is what people actually type.
   if (/^[A-Za-z]{2,}-\d+$/.test(needle)) {
     candidates.push(tasks.filter((t) => matchesLinearKey(t, needle)));
+  }
+  if (needle.length >= 4) {
+    candidates.push(tasks.filter((t) => str(t.id).toLowerCase().startsWith(needle.toLowerCase())));
   }
   candidates.push(tasks.filter((t) => str(t.title).toLowerCase().includes(needle.toLowerCase())));
 
   for (const round of candidates) {
     if (round.length === 1) return { task: round[0] };
     if (round.length > 1) {
-      const lines = round.slice(0, 6).map((t) => `  ${shortId(t.id)} · ${str(t.title).slice(0, 60)}`);
+      const lines = round.slice(0, 6).map((t) => `  ${taskLabel(t)} · ${taskTitle(t).slice(0, 60)}`);
+      const more = round.length > 6 ? [`  … and ${round.length - 6} more`] : [];
       return {
-        error: [`"${needle}" matches ${round.length} tickets — be more specific:`, ...lines].join("\n"),
+        error: [`"${ref.trim()}" matches ${round.length} tickets — name one:`, ...lines, ...more].join("\n"),
       };
     }
   }
-  return { error: `No ticket matches "${needle}".` };
+  return { error: `No ticket matches "${ref.trim()}".` };
 }
 
 function describeTask(task: TaskRecord): string {
@@ -130,8 +141,8 @@ function describeTask(task: TaskRecord): string {
   const questions = triageQuestions(triage);
   const unanswered = questions.filter((q) => !str(q.answer).trim());
   const lines = [
-    `${shortId(task.id)} · ${str(task.status)} · ${str(task.priority)}`,
-    str(task.title),
+    `${taskLabel(task)} · ${str(task.status)} · ${str(task.priority)}`,
+    taskTitle(task),
   ];
   if (questions.length) {
     lines.push(
@@ -166,26 +177,69 @@ async function cmdStatus(ctx: CommandContext): Promise<string> {
     `Board: ${counts || "empty"}`,
     `Pending approvals: ${pending.length}`,
     `Tickets with unanswered questions: ${waiting.length}${
-      waiting.length ? ` (${waiting.slice(0, 5).map((t) => shortId(t.id)).join(", ")})` : ""
+      waiting.length ? ` (${waiting.slice(0, 5).map((t) => taskLabel(t)).join(", ")})` : ""
     }`,
   ].join("\n");
 }
 
+function listLines(tasks: Record<string, unknown>[], limit = 20): string {
+  const lines = tasks.slice(0, limit).map((t) => `${taskLabel(t)} · ${str(t.status)} · ${taskTitle(t).slice(0, 60)}`);
+  const more = tasks.length > limit ? `\n… ${tasks.length - limit} more` : "";
+  return `${lines.join("\n")}${more}`;
+}
+
+/**
+ * `/tasks` with no argument shows what is waiting on a human; with a status it filters;
+ * with anything else it searches, because "/tasks metalex" is obviously a search and
+ * answering "no tasks with status metalex" would be pedantry.
+ */
 async function cmdTasks(ctx: CommandContext, rest: string): Promise<string> {
-  const filter = rest.trim().toLowerCase();
+  const arg = rest.trim().toLowerCase();
+  if (arg && !ALL_STATUSES.has(arg)) return cmdSearch(ctx, rest);
+
   const tasks = asArray(await ctx.api.get("/tasks"));
-  const wanted = filter
-    ? tasks.filter((t) => str(t.status).toLowerCase() === filter)
+  const wanted = arg
+    ? tasks.filter((t) => str(t.status).toLowerCase() === arg)
     : tasks.filter((t) => ATTENTION_STATUSES.includes(str(t.status)));
   if (wanted.length === 0) {
-    return filter ? `No tasks with status "${filter}".` : "Nothing waiting on you.";
+    return arg ? `No tickets are ${arg}.` : "Nothing waiting on you.";
   }
-  const lines = wanted
-    .slice(0, 20)
-    .map((t) => `${shortId(t.id)} · ${str(t.status)} · ${str(t.title).slice(0, 60)}`);
-  const header = filter ? `${wanted.length} ${filter}` : `${wanted.length} needing attention`;
-  const more = wanted.length > 20 ? `\n… ${wanted.length - 20} more` : "";
-  return `${header}:\n${lines.join("\n")}${more}`;
+  return `${arg ? `${wanted.length} ${arg}` : `${wanted.length} needing attention`}:\n${listLines(wanted)}`;
+}
+
+/**
+ * Keyword search over key, title and description — every word must appear somewhere, so
+ * adding words narrows. Title hits rank above description-only hits, and open tickets
+ * above closed ones, since a search is nearly always about live work.
+ */
+async function cmdSearch(ctx: CommandContext, rest: string): Promise<string> {
+  const query = rest.trim();
+  if (!query) return "Search for what? e.g. /search metalex validation";
+  const words = query.toLowerCase().split(/\s+/).filter(Boolean);
+  const tasks = asArray(await ctx.api.get("/tasks"));
+
+  const scored: Array<{ task: Record<string, unknown>; score: number }> = [];
+  for (const task of tasks) {
+    const label = taskLabel(task).toLowerCase();
+    const title = `${label} ${taskTitle(task)}`.toLowerCase();
+    const haystack = `${title} ${str(task.description)}`.toLowerCase();
+    if (!words.every((w) => haystack.includes(w))) continue;
+    let score = words.every((w) => title.includes(w)) ? 2 : 0;
+    if (str(task.status) !== "done") score += 1;
+    scored.push({ task, score });
+  }
+  if (scored.length === 0) return `Nothing matches "${query}".`;
+
+  scored.sort((a, b) => b.score - a.score);
+  const hits = scored.map((s) => s.task);
+  const open = hits.filter((t) => str(t.status) !== "done").length;
+  return [
+    `${hits.length} match "${query}" (${open} open):`,
+    listLines(hits, 15),
+    hits.length === 1 ? "" : "\nName one to act on it, e.g. /task MET-639",
+  ]
+    .filter(Boolean)
+    .join("\n");
 }
 
 async function cmdTask(ctx: CommandContext, rest: string): Promise<string> {
@@ -204,14 +258,14 @@ async function cmdTask(ctx: CommandContext, rest: string): Promise<string> {
  * (planning → planning_answer, review/testing → manual_feedback, else updated).
  */
 async function cmdAnswer(ctx: CommandContext, rest: string): Promise<string> {
-  const [ref, ...words] = rest.trim().split(/\s+/);
-  const text = words.join(" ").trim();
-  if (!ref) return "Usage: /answer <ref> <your answer>";
-  if (!text) return "Nothing to say? Usage: /answer <ref> <your answer>";
+  const { ref, rest: text } = takeRef(rest);
+  if (!ref) return "Usage: /answer MET-639 <your answer>";
+  if (!text) return "Nothing to say? Usage: /answer MET-639 <your answer>";
 
   const { task, error } = await resolveTask(ctx.api, ref);
   if (!task) return error ?? "Not found.";
   const taskId = str(task.id);
+  const label = taskLabel(task);
   const triage = parseTriage(task);
   const questions = triageQuestions(triage);
   const nextIndex = questions.findIndex((q) => !str(q.answer).trim());
@@ -229,8 +283,8 @@ async function cmdAnswer(ctx: CommandContext, rest: string): Promise<string> {
     const remaining = questions.filter((q) => !str(q.answer).trim()).length;
     const asked = str(question.question).slice(0, 120);
     return remaining === 0
-      ? `Answered "${asked}".\nAll ${questions.length} questions answered — send /confirm ${shortId(taskId)} to start the work.`
-      : `Answered "${asked}".\n${remaining} question(s) left — /task ${shortId(taskId)} to see the next one.`;
+      ? `${label} — answered "${asked}".\nAll ${questions.length} questions answered — send /confirm ${label} to start the work.`
+      : `${label} — answered "${asked}".\n${remaining} question(s) left — /task ${label} to see the next one.`;
   }
 
   const status = str(task.status);
@@ -242,8 +296,8 @@ async function cmdAnswer(ctx: CommandContext, rest: string): Promise<string> {
     metadata: JSON.stringify({ source: "messagebus", surface: ctx.surface, actor: ctx.actor }),
   });
   return activityType === "manual_feedback"
-    ? `Feedback logged on ${shortId(taskId)} — the bridge will relaunch the agent with it.`
-    : `Logged on ${shortId(taskId)} as ${activityType}.`;
+    ? `Feedback logged on ${label} — the bridge will relaunch the agent with it.`
+    : `Logged on ${label} as ${activityType}.`;
 }
 
 async function cmdConfirm(ctx: CommandContext, rest: string): Promise<string> {
@@ -251,80 +305,141 @@ async function cmdConfirm(ctx: CommandContext, rest: string): Promise<string> {
   if (!task) return error ?? "Not found.";
   const triage = parseTriage(task);
   const questions = triageQuestions(triage);
-  if (!triage || questions.length === 0) return `${shortId(task.id)} has no triage questions to confirm.`;
+  const label = taskLabel(task);
+  if (!triage || questions.length === 0) return `${label} has no triage questions to confirm.`;
   const unanswered = questions.filter((q) => !str(q.answer).trim());
   if (unanswered.length) {
-    return `${unanswered.length} question(s) still unanswered — /answer ${shortId(task.id)} <text> first.`;
+    return `${unanswered.length} question(s) still unanswered — /answer ${label} <text> first.`;
   }
   triage.confirmed = true;
   triage.status = "answered";
   await ctx.api.patch(`/tasks/${str(task.id)}`, { triage_state: JSON.stringify(triage) });
-  return `Triage confirmed on ${shortId(task.id)} — the bridge will dispatch the agent.`;
+  return `Triage confirmed on ${label} — the bridge will dispatch the agent.`;
+}
+
+/**
+ * Pending checkpoints, joined to their tickets so each one reads as "MET-639 · <what
+ * the agent is asking>" rather than a checkpoint UUID nobody can place.
+ */
+async function pendingCheckpoints(
+  ctx: CommandContext,
+): Promise<Array<{ id: string; label: string; kind: string; prompt: string; options: string }>> {
+  const [pending, tasks] = await Promise.all([ctx.api.get("/checkpoints"), ctx.api.get("/tasks")]);
+  const byId = new Map(asArray(tasks).map((t) => [str(t.id), t]));
+  return asArray(pending).map((c) => {
+    const task = byId.get(str(c.task_id));
+    return {
+      id: str(c.id),
+      label: task ? taskLabel(task) : shortId(c.task_id),
+      kind: str(c.kind),
+      prompt: str(c.prompt),
+      options: str(c.options),
+    };
+  });
 }
 
 async function cmdCheckpoints(ctx: CommandContext): Promise<string> {
-  const pending = asArray(await ctx.api.get("/checkpoints"));
+  const pending = await pendingCheckpoints(ctx);
   if (pending.length === 0) return "No pending approvals.";
-  const lines = pending.slice(0, 10).map((c) => {
-    const options = str(c.options);
-    return [
-      `${shortId(c.id)} · ${str(c.kind)} · task ${shortId(c.task_id)}`,
-      `  ${str(c.prompt).slice(0, 240)}`,
-      options ? `  options: ${options.slice(0, 120)}` : "",
+  const lines = pending.slice(0, 10).map((c, i) =>
+    [
+      `${i + 1}. ${c.label} · ${c.kind}`,
+      `   ${c.prompt.slice(0, 240)}`,
+      c.options ? `   options: ${c.options.slice(0, 120)}` : "",
     ]
       .filter(Boolean)
-      .join("\n");
-  });
-  return `${pending.length} pending:\n${lines.join("\n")}`;
+      .join("\n"),
+  );
+  return [
+    `${pending.length} pending:`,
+    ...lines,
+    "",
+    "Approve with the ticket or the number: /approve MET-639 · /deny 2 wrong repo",
+  ].join("\n");
 }
 
+/**
+ * Accept the three things a person might reasonably say: the ticket it belongs to, its
+ * position in the last listing, or nothing at all when only one is pending.
+ */
 async function resolveCheckpoint(
   ctx: CommandContext,
   ref: string,
-): Promise<{ id?: string; error?: string }> {
-  const pending = asArray(await ctx.api.get("/checkpoints"));
+): Promise<{ id?: string; label?: string; prompt?: string; error?: string }> {
+  const pending = await pendingCheckpoints(ctx);
   if (pending.length === 0) return { error: "No pending approvals." };
+  const pick = (c: (typeof pending)[number]) => ({ id: c.id, label: c.label, prompt: c.prompt });
+
   if (!ref) {
     // Zero-ref is only safe when there is exactly one thing it could mean.
-    if (pending.length === 1) return { id: str(pending[0].id) };
-    return { error: `${pending.length} pending — name one: /checkpoints to list them.` };
+    if (pending.length === 1) return pick(pending[0]);
+    return { error: `${pending.length} pending — say which: /checkpoints to list them.` };
   }
-  const matches = pending.filter((c) => str(c.id).toLowerCase().startsWith(ref.toLowerCase()));
-  if (matches.length === 1) return { id: str(matches[0].id) };
-  if (matches.length > 1) return { error: `"${ref}" matches ${matches.length} checkpoints — use more characters.` };
-  return { error: `No pending checkpoint matches "${ref}".` };
+
+  if (/^\d{1,2}$/.test(ref)) {
+    const index = Number(ref) - 1;
+    if (index >= 0 && index < pending.length) return pick(pending[index]);
+    return { error: `There is no #${ref} — ${pending.length} pending. /checkpoints to list them.` };
+  }
+
+  const key = normalizeRef(ref).toUpperCase();
+  const byTask = pending.filter((c) => c.label.toUpperCase() === key);
+  if (byTask.length === 1) return pick(byTask[0]);
+  if (byTask.length > 1) {
+    return { error: `${key} has ${byTask.length} pending approvals — use the number from /checkpoints.` };
+  }
+
+  const byId = pending.filter((c) => c.id.toLowerCase().startsWith(ref.toLowerCase()));
+  if (byId.length === 1) return pick(byId[0]);
+  return { error: `No pending approval matches "${ref}". /checkpoints to list them.` };
+}
+
+/**
+ * Does this start with a ref, or is it all reason?
+ *
+ * "/deny wrong repo" must deny the single pending item with reason "wrong repo", while
+ * "/deny met 639 wrong repo" must target MET-639. So a ref has to be recognisable in
+ * itself — a list number, a Linear key (however spaced), or an id prefix — and an
+ * ordinary word is treated as prose, not as a ticket nobody can match.
+ */
+function looksLikeCheckpointRef(tokens: string[]): boolean {
+  if (tokens.length === 0) return false;
+  const [first, second] = tokens;
+  if (/^\d{1,2}$/.test(first)) return true;
+  if (/^[A-Za-z]{2,}[-_]?\d+$/.test(first)) return true;
+  if (/^[A-Za-z]{2,}$/.test(first) && second !== undefined && /^\d+$/.test(second)) return true;
+  return /^[0-9a-f]{4,}(-[0-9a-f]+)*$/i.test(first);
 }
 
 async function cmdResolveCheckpoint(ctx: CommandContext, rest: string, decision: "approve" | "reject"): Promise<string> {
-  const parts = rest.trim().split(/\s+/).filter(Boolean);
+  const tokens = rest.trim().split(/\s+/).filter(Boolean);
+  const { ref, rest: note } = looksLikeCheckpointRef(tokens) ? takeRef(rest) : { ref: "", rest: rest.trim() };
   // A denial without a reason is useless to the agent that has to act on it.
-  const looksLikeRef = parts[0] && /^[0-9a-f-]{4,}$/i.test(parts[0]);
-  const ref = looksLikeRef ? parts[0] : "";
-  const note = (looksLikeRef ? parts.slice(1) : parts).join(" ").trim();
-  if (decision === "reject" && !note) return "Usage: /deny <ref> <reason> — the reason is what the agent acts on.";
+  if (decision === "reject" && !note) return "Usage: /deny MET-639 <reason> — the reason is what the agent acts on.";
 
-  const { id, error } = await resolveCheckpoint(ctx, ref);
+  const { id, label, prompt, error } = await resolveCheckpoint(ctx, ref);
   if (!id) return error ?? "Not found.";
-  const result = await ctx.api.post(`/checkpoints/${id}/resolve`, {
-    decision,
-    response: note || undefined,
-  });
-  const checkpoint = result && typeof result === "object" ? (result as Record<string, unknown>).checkpoint : null;
-  const taskId = checkpoint && typeof checkpoint === "object" ? shortId((checkpoint as Record<string, unknown>).task_id) : "";
-  return `${decision === "approve" ? "Approved" : "Denied"} ${shortId(id)}${taskId ? ` on ${taskId}` : ""}${
-    note ? ` — "${note}"` : ""
-  }. The agent resumes from here.`;
+  await ctx.api.post(`/checkpoints/${id}/resolve`, { decision, response: note || undefined });
+  // Echo what was actually resolved: if a list number pointed somewhere unexpected, the
+  // prompt in the reply is what makes that visible immediately.
+  return [
+    `${decision === "approve" ? "Approved" : "Denied"} on ${label}: "${(prompt ?? "").slice(0, 140)}"`,
+    note ? `Note: ${note}` : "",
+    "The agent resumes from here.",
+  ]
+    .filter(Boolean)
+    .join("\n");
 }
 
 async function cmdFollowup(ctx: CommandContext, rest: string): Promise<string> {
   const parts = rest.trim().split(/\s+/).filter(Boolean);
   const action = parts.find((p) => FOLLOWUP_ACTIONS.includes(p.toLowerCase()))?.toLowerCase();
+  if (!action) return `Usage: /followup MET-639 <action>\nactions: ${FOLLOWUP_ACTIONS.join(", ")}`;
   const ref = parts.filter((p) => p.toLowerCase() !== action).join(" ");
-  if (!action) return `Usage: /followup <ref> <action>\nactions: ${FOLLOWUP_ACTIONS.join(", ")}`;
   const { task, error } = await resolveTask(ctx.api, ref);
   if (!task) return error ?? "Not found.";
   await ctx.api.post(`/tasks/${str(task.id)}/followup`, { action });
-  return `Queued ${action.replace(/_/g, " ")} on ${shortId(task.id)} — relaunching the agent on its worktree.`;
+  return `Queued ${action.replace(/_/g, " ")} on ${taskLabel(task)} — relaunching the agent on its worktree.`;
 }
 
 async function cmdPreview(ctx: CommandContext, rest: string): Promise<string> {
@@ -332,18 +447,18 @@ async function cmdPreview(ctx: CommandContext, rest: string): Promise<string> {
   if (!task) return error ?? "Not found.";
   const state = (await ctx.api.post(`/tasks/${str(task.id)}/preview`, {})) as Record<string, unknown>;
   const url = str(state?.url);
-  return url ? `Preview up for ${shortId(task.id)}: ${url}` : `Preview started for ${shortId(task.id)}.`;
+  return url ? `Preview up for ${taskLabel(task)}: ${url}` : `Preview started for ${taskLabel(task)}.`;
 }
 
 async function cmdDone(ctx: CommandContext, rest: string): Promise<string> {
-  const [ref, ...words] = rest.trim().split(/\s+/);
-  const { task, error } = await resolveTask(ctx.api, ref ?? "");
+  const { ref, rest: reason } = takeRef(rest);
+  const { task, error } = await resolveTask(ctx.api, ref);
   if (!task) return error ?? "Not found.";
-  const reason = words.join(" ").trim();
+  const label = taskLabel(task);
   const result = (await ctx.api.post(`/tasks/${str(task.id)}/done`, reason ? { reason } : {})) as Record<string, unknown>;
   return result?.alreadyDone
-    ? `${shortId(task.id)} was already done.`
-    : `Marked ${shortId(task.id)} done${reason ? ` — "${reason}"` : ""}.`;
+    ? `${label} was already done.`
+    : `Marked ${label} done${reason ? ` — "${reason}"` : ""}.`;
 }
 
 async function cmdAgents(ctx: CommandContext): Promise<string> {
@@ -381,6 +496,8 @@ const KNOWN_COMMANDS = new Set([
   "status",
   "tasks",
   "task",
+  "search",
+  "find",
   "answer",
   "confirm",
   "checkpoints",
@@ -406,6 +523,9 @@ export async function executeCommand(text: string, ctx: CommandContext): Promise
         return await cmdStatus(ctx);
       case "tasks":
         return await cmdTasks(ctx, parsed.rest);
+      case "search":
+      case "find":
+        return await cmdSearch(ctx, parsed.rest);
       case "task":
         return await cmdTask(ctx, parsed.rest);
       case "answer":

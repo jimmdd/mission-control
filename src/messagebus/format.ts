@@ -47,19 +47,40 @@ export function shouldSend(type: string, scope: EventScope): boolean {
   return scope === "all" && ALL_EXTRA.has(type);
 }
 
+/** What the bus knows about the event's ticket, when it can look it up. */
+export interface TaskContext {
+  /** How a person names it: "MET-639", or the short id if it has no Linear key. */
+  label: string;
+  /** Title with any "[MET-639]" prefix stripped — the label already says that. */
+  title?: string;
+  url?: string;
+}
+
 /**
  * Render an event as chat text. Plain text, no Markdown/mrkdwn: arbitrary agent output
  * (backticks, underscores, stray asterisks) must never turn into a Telegram 400 or a
  * mangled Slack message.
+ *
+ * An alert has to answer "which ticket, and what do I do about it" on its own. A bare
+ * UUID answers neither, so when the ticket can be resolved the message leads with its
+ * Linear key and title, and the footer is a command that can be typed as-is.
  */
-export function formatEvent(event: McEvent): string {
-  const { title, message } = describe(event);
+export function formatEvent(event: McEvent, task?: TaskContext): string {
+  const shortId = typeof event.taskId === "string" ? event.taskId.slice(0, 8) : "";
+  const label = task?.label ?? shortId;
+  const { title, message } = describe(event, label || undefined);
   const emoji = EMOJI[event.type] ?? "•";
-  const taskId = typeof event.taskId === "string" ? event.taskId : "";
   const body = message.trim();
-  const lines = [`${emoji} ${title}`];
+
+  // "Task MET-639 needs you" → "MET-639 needs you". The shared wording keeps the "Task"
+  // prefix because a bare id needs it ("df544305 needs you" reads like nothing), but a
+  // Linear key is already a name.
+  const headline = task?.label ? title.replace(/^Task\s+/, "") : title;
+
+  const lines = [`${emoji} ${headline}`];
+  if (task?.title) lines.push(task.title);
   if (body) lines.push(body);
-  // The short id is what every command takes as a ref, so the reply is actionable.
-  if (taskId) lines.push(`↳ ${taskId.slice(0, 8)} · reply /task ${taskId.slice(0, 8)}`);
+  if (task?.url) lines.push(task.url);
+  if (label) lines.push(`↳ /task ${label}`);
   return lines.join("\n");
 }

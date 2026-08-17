@@ -208,22 +208,24 @@ Mission Control can ping you where you already are and take instructions back, s
 has to watch the board for a blocked agent or an unanswered triage question.
 
 ```
-🔔 Task 0e46593f needs you
+🔔 MET-639 needs you
+metalex for new ui
 Triage has a new question: which repo owns the launch flow?
-↳ 0e46593f · reply /task 0e46593f
+↳ /task MET-639
 
-  → /answer 0e46593f the new-ui app, base off main
-  ← Answered "which repo owns the launch flow?".
-    All 3 questions answered — send /confirm 0e46593f to start the work.
+  → /answer met 639 the new-ui app, base off main
+  ← MET-639 — answered "which repo owns the launch flow?".
+    All 3 questions answered — send /confirm MET-639 to start the work.
 ```
 
 Enable it in ⚙ SETTINGS: paste a bot token, add your chat id (Telegram) or user id
 (Slack), set the interaction level to **Command**, then **Send test message**. Nothing
 runs until a token is present, and Settings edits apply live — no restart.
 
-`/status`, `/tasks`, `/task`, `/answer`, `/confirm`, `/checkpoints`, `/approve`, `/deny`,
-`/followup`, `/preview`, `/done`, `/agents`. Refs are a short task id, a Linear key, or
-part of the title. Full setup, scopes, event routing, and the security model:
+`/status`, `/tasks`, `/search`, `/task`, `/answer`, `/confirm`, `/checkpoints`,
+`/approve`, `/deny`, `/followup`, `/preview`, `/done`, `/agents`. Tickets are named by
+Linear key throughout — typed loosely (`met 639`) or searched by keyword. Full setup,
+scopes, event routing, and the security model:
 [`docs/message-bus.md`](docs/message-bus.md).
 
 Slack inbound uses **Socket Mode** (an outbound WebSocket) because Mission Control binds
