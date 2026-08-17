@@ -25,6 +25,13 @@ export interface TelegramConfig {
   chatIds: string[];
   interaction: Interaction;
   events: EventScope;
+  /**
+   * Natural-language replies to non-command text. Telegram only — Slack is
+   * commands-only by request, so there is no equivalent key for it. Defaults on:
+   * the surface is a private DM with one allowlisted operator, and every write it
+   * proposes still needs an explicit /yes.
+   */
+  assistant: boolean;
 }
 
 export interface SlackConfig {
@@ -89,6 +96,7 @@ export function readBusConfig(mcHome: string): BusConfig {
       chatIds: parseList(get("TELEGRAM_ALLOWED_CHAT_IDS")),
       interaction: parseInteraction(get("TELEGRAM_INTERACTION")),
       events: scope("TELEGRAM_EVENTS"),
+      assistant: !["off", "0", "false", "no"].includes(get("TELEGRAM_ASSISTANT").toLowerCase()),
     },
     slack: {
       botToken: get("SLACK_BOT_TOKEN"),

@@ -96,7 +96,53 @@ Linear key and title, and every ref the bot suggests can be typed back verbatim.
 `/answer` is one verb on purpose: in chat you type your input and expect the system to
 know where it belongs. The status decides — that mirrors the dashboard's note box exactly.
 
-Ordinary chatter gets no reply; an unrecognised `/command` gets pointed at `/help`.
+An unrecognised `/command` gets pointed at `/help`.
+
+## Talking to it (Telegram only)
+
+Anything that is not a command goes to an assistant, because in chat you expect to be able
+to just say what you mean:
+
+```
+  → what's blocked right now?
+  ← The following tickets are waiting for a human answer to proceed:
+    - MET-635: Implement brand guideline changes from Paper prototype
+    - MET-597: merge accounting into backoffice
+    …
+
+  → what is MET-635 stuck on?
+  ← MET-635 is stuck because the agent cannot access the attached HTML file and
+    linked zip. It needs you to provide the content or clarify how to proceed.
+
+  → tell 639 to use UTC everywhere
+  ← Okay, I'll tell MET-639 to use UTC everywhere.
+    → /answer MET-639 use UTC everywhere
+    Confirm? /yes · /no
+```
+
+**The model never touches the board.** It answers from a board snapshot, and when an ask
+implies an action it proposes one of the existing commands — which then runs through the
+same command layer a typed command would. Reads (`/status`, `/tasks`, `/search`, `/task`,
+`/checkpoints`, `/agents`) run immediately, since a confirmation before showing a list is
+friction with no safety value. Every **write** waits for `/yes`, expires after 5 minutes,
+and is single-slot per chat so `/yes` can never resolve something older than the last
+thing discussed.
+
+That gate is the security boundary, and it is why ticket content cannot drive the system:
+a malicious description can influence what the assistant *says*, but reaching a write
+still needs a command a human confirmed. A proposed command that is not in the known set
+is dropped rather than offered.
+
+Provider selection is not duplicated here — `swarm/llm-call.py` routes through
+`planner._call_llm`, so the assistant uses whatever the swarm is configured for (with its
+OpenRouter fallback intact). One caveat worth knowing: the small/fast tier is a *thinking*
+model, and a low token cap can be consumed entirely by thinking, returning a response with
+no content at all — the floor here is 512 for that reason.
+
+**Telegram only, deliberately.** Slack stays commands-only, so a stray Slack DM neither
+spends a generation call nor proposes a write. Switch it off with
+`TELEGRAM_ASSISTANT=off` (Settings → "Plain-text messages"), and plain text is ignored
+as before.
 
 ## Setup — Telegram
 
@@ -106,7 +152,8 @@ Ordinary chatter gets no reply; an unrecognised `/command` gets pointed at `/hel
    **Command**, hit **Send test message**.
 
 Env keys: `TELEGRAM_BOT_TOKEN`, `TELEGRAM_ALLOWED_CHAT_IDS`, `TELEGRAM_INTERACTION`
-(`off|notify|command`), `TELEGRAM_EVENTS` (`action|all`).
+(`off|notify|command`), `TELEGRAM_EVENTS` (`action|all`), `TELEGRAM_ASSISTANT`
+(`on|off`, default on — the natural-language fallback above).
 
 ## Setup — Slack (DM-scoped)
 

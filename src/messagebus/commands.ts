@@ -45,6 +45,9 @@ const HELP = [
   "/agents — agent roster and what each is on",
   "",
   "A ref is a Linear key — MET-639, or just \"met 639\" — or a bit of the title.",
+  "",
+  "Or just talk: ask \"what's blocked?\" or say \"tell 639 to use UTC\" and I'll answer,",
+  "or propose the command and wait for your /yes.",
 ].join("\n");
 
 // Statuses shown by a bare /tasks: the ones where a human is the bottleneck.

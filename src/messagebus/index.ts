@@ -19,7 +19,8 @@ import {
   telegramOutboundReady,
   type BusConfig,
 } from "./config.js";
-import { executeCommand, parseCommand } from "./commands.js";
+import { executeCommand } from "./commands.js";
+import { askAssistant, createLlmCall, type AssistantOutcome, type LlmCall } from "./assistant.js";
 import { formatEvent, shouldSend, type TaskContext } from "./format.js";
 import { taskLabel, taskTitle } from "./ref.js";
 import { sendSlackMessage, startSlackListener } from "./slack.js";
@@ -48,6 +49,8 @@ export interface MessageBusOptions {
    * an unresolvable task just degrades to the short id.
    */
   lookupTask?: (taskId: string) => Record<string, unknown> | null | undefined;
+  /** Test seam: replace the model call behind the natural-language assistant. */
+  llm?: LlmCall;
 }
 
 function inboundSignature(cfg: BusConfig): string {
@@ -63,7 +66,26 @@ export interface InboundHandlerDeps {
   api: ApiClient;
   send: (surface: SurfaceKind, target: string, text: string) => Promise<void>;
   logger?: Logger;
+  /**
+   * Natural-language fallback for text that is not a command. Telegram only, by request:
+   * Slack stays commands-only, so a stray DM there can never spend a generation call or
+   * touch a ticket. Absent = plain text is ignored, as before.
+   */
+  assistant?: {
+    ask: (question: string) => Promise<AssistantOutcome>;
+    /** Live gate, re-read per message, so it can be switched off without a restart. */
+    enabled: (surface: SurfaceKind) => boolean;
+  };
 }
+
+// A write the assistant proposed, waiting on /yes. Keyed per chat, single-slot: a second
+// proposal replaces the first, so /yes can never resolve something older than the last
+// thing discussed.
+interface PendingWrite {
+  command: string;
+  at: number;
+}
+const PENDING_TTL_MS = 5 * 60_000;
 
 /**
  * Turn one inbound chat message into a command run and a reply. Exported so the inbound
@@ -71,17 +93,53 @@ export interface InboundHandlerDeps {
  * autonomous operator over the same bus) can reuse it verbatim.
  */
 export function makeInboundHandler(deps: InboundHandlerDeps): (message: IncomingChatMessage) => Promise<void> {
+  const pending = new Map<string, PendingWrite>();
+
   return async (message) => {
     const actor = message.userName
       ? `${message.surface}:@${message.userName}`
       : `${message.surface}:${message.userId || "unknown"}`;
+    const ctx = { api: deps.api, surface: message.surface, actor };
+    const chatKey = `${message.surface}:${message.target}`;
+    const text = message.text.trim();
+    const spoken = text.toLowerCase().replace(/^\//, "");
     let reply: string | null;
+
     try {
-      reply = await executeCommand(message.text, { api: deps.api, surface: message.surface, actor });
-      // An unrecognised slash command gets a nudge; ordinary chatter is left alone so
-      // the bot is not a participant in every conversation.
-      if (reply === null && message.text.trim().startsWith("/")) {
-        reply = "Unknown command. /help lists what I can do.";
+      // Confirmation of a proposed write, before anything else can claim the message.
+      if (spoken === "yes" || spoken === "no") {
+        const held = pending.get(chatKey);
+        pending.delete(chatKey);
+        if (!held || Date.now() - held.at > PENDING_TTL_MS) {
+          reply = held ? "That proposal expired — ask me again." : "Nothing is waiting for confirmation.";
+        } else if (spoken === "no") {
+          reply = `Dropped: ${held.command}`;
+        } else {
+          const result = await executeCommand(held.command, ctx);
+          reply = result ?? `Ran ${held.command}.`;
+        }
+      } else {
+        reply = await executeCommand(text, ctx);
+
+        if (reply === null && deps.assistant?.enabled(message.surface)) {
+          // Not a command — hand it to the assistant. A read runs immediately; a write is
+          // held until the operator says /yes, so a sentence can never silently relaunch
+          // an agent or close a ticket.
+          const outcome = await deps.assistant.ask(text);
+          if (outcome.kind === "read" && outcome.command) {
+            const result = await executeCommand(outcome.command, ctx);
+            reply = [outcome.reply, result].filter(Boolean).join("\n\n");
+          } else if (outcome.kind === "write" && outcome.command) {
+            pending.set(chatKey, { command: outcome.command, at: Date.now() });
+            reply = [outcome.reply, `→ ${outcome.command}`, "Confirm? /yes · /no"].filter(Boolean).join("\n");
+          } else {
+            reply = outcome.reply;
+          }
+        } else if (reply === null && text.startsWith("/")) {
+          // An unrecognised slash command gets a nudge; ordinary chatter on a surface with
+          // no assistant is left alone, so the bot is not a participant in every message.
+          reply = "Unknown command. /help lists what I can do.";
+        }
       }
     } catch (err) {
       reply = `Command failed: ${err instanceof Error ? err.message : String(err)}`;
@@ -165,10 +223,17 @@ export function startMessageBus(events: McEventBus, opts: MessageBusOptions): ()
 
   // ---- inbound -------------------------------------------------------------------
 
+  // Natural-language fallback. Telegram only — Slack is commands-only by request, so a
+  // stray Slack DM neither spends a generation call nor proposes a write.
+  const llm = opts.llm ?? createLlmCall(log);
   const handleMessage = makeInboundHandler({
     api,
     logger: log,
     send: (surface, target, text) => send(surface, readBusConfig(opts.mcHome), target, text),
+    assistant: {
+      ask: (question) => askAssistant(question, { api, llm, logger: log }),
+      enabled: (surface) => surface === "telegram" && readBusConfig(opts.mcHome).telegram.assistant,
+    },
   });
 
   let stopTelegram: (() => void) | null = null;

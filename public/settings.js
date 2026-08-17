@@ -98,6 +98,11 @@
             { value: "action", label: "Action needed + completions (recommended)" },
             { value: "all", label: "All — adds lifecycle chatter" },
           ] },
+        { key: "TELEGRAM_ASSISTANT", label: "Plain-text messages", type: "select", default: "on",
+          options: [
+            { value: "on", label: "Ask the assistant — answers questions, proposes commands to confirm" },
+            { value: "off", label: "Ignore — commands only" },
+          ] },
         { key: "__telegram_save", type: "action", action: "save_section" },
         { key: "__telegram_test", type: "action", action: "telegram_test" },
       ],

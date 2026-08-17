@@ -10,6 +10,7 @@ import { shouldSend, formatEvent } from "../src/messagebus/format.ts";
 import { linearKey, normalizeRef, takeRef, taskLabel, taskTitle } from "../src/messagebus/ref.ts";
 import { executeCommand, parseCommand, resolveTask } from "../src/messagebus/commands.ts";
 import { startMessageBus, makeInboundHandler } from "../src/messagebus/index.ts";
+import { askAssistant, boardSnapshot } from "../src/messagebus/assistant.ts";
 
 const SILENT = { info() {}, error() {} };
 
@@ -450,4 +451,155 @@ test("a reply that fails to send does not take the process down", async () => {
     send: async () => { throw new Error("Telegram 403: bot blocked"); },
   });
   await handle({ surface: "telegram", target: "555", userId: "42", text: "/status" });
+});
+
+// ── natural-language assistant (Telegram only) ────────────────────────────────
+
+// A stub model: returns whatever JSON the test wants, and records the prompt it saw.
+function stubLlm(responses) {
+  const queue = Array.isArray(responses) ? [...responses] : [responses];
+  const seen = [];
+  const fn = async ({ system, prompt }) => {
+    seen.push({ system, prompt });
+    const next = queue.length > 1 ? queue.shift() : queue[0];
+    if (next instanceof Error) throw next;
+    return typeof next === "string" ? next : JSON.stringify(next);
+  };
+  fn.seen = seen;
+  return fn;
+}
+
+const assistantFor = (api, llm) => ({
+  ask: (question) => askAssistant(question, { api, llm, logger: SILENT }),
+  enabled: (surface) => surface === "telegram",
+});
+
+test("assistant answers a question from the board snapshot, no command", async () => {
+  const api = stubApi(TASKS);
+  const llm = stubLlm({ reply: "MET-636 is the only one in review.", command: null });
+  const replies = [];
+  const handle = makeInboundHandler({
+    api, logger: SILENT,
+    send: async (s, t, text) => { replies.push(text); },
+    assistant: assistantFor(api, llm),
+  });
+
+  await handle({ surface: "telegram", target: "555", userId: "42", text: "what's in review?" });
+  assert.equal(replies[0], "MET-636 is the only one in review.");
+  // The snapshot must actually carry the board, or the model is guessing.
+  assert.match(llm.seen[0].prompt, /MET-639/);
+  assert.match(llm.seen[0].prompt, /Open tickets/);
+  assert.match(llm.seen[0].prompt, /what's in review\?/);
+});
+
+test("a read-only proposal runs straight away", async () => {
+  const api = stubApi(TASKS);
+  const llm = stubLlm({ reply: "Here's what needs you:", command: "/tasks" });
+  const replies = [];
+  const handle = makeInboundHandler({
+    api, logger: SILENT,
+    send: async (s, t, text) => { replies.push(text); },
+    assistant: assistantFor(api, llm),
+  });
+
+  await handle({ surface: "telegram", target: "555", userId: "42", text: "anything waiting on me?" });
+  assert.match(replies[0], /Here's what needs you:/);
+  assert.match(replies[0], /MET-639 · review/, "the command's own output is appended");
+});
+
+test("a write proposal is held until /yes, and /no drops it", async () => {
+  const api = stubApi(TASKS);
+  const llm = stubLlm({ reply: 'Post to MET-639 as feedback: "use UTC everywhere"', command: "/answer MET-639 use UTC everywhere" });
+  const replies = [];
+  const handle = makeInboundHandler({
+    api, logger: SILENT,
+    send: async (s, t, text) => { replies.push(text); },
+    assistant: assistantFor(api, llm),
+  });
+  const msg = (text) => handle({ surface: "telegram", target: "555", userId: "42", text });
+
+  await msg("tell 639 to use UTC everywhere");
+  assert.match(replies[0], /→ \/answer MET-639 use UTC everywhere/);
+  assert.match(replies[0], /Confirm\? \/yes · \/no/);
+  assert.equal(api.calls.filter((c) => c[0] === "POST").length, 0, "nothing may be written before /yes");
+
+  await msg("/yes");
+  const post = api.calls.find((c) => c[0] === "POST");
+  assert.equal(post[1], `/tasks/${TASKS[0].id}/activities`);
+  assert.equal(post[2].message, "use UTC everywhere");
+
+  // /no drops the next one without writing.
+  await msg("tell 639 to use UTC everywhere");
+  const before = api.calls.filter((c) => c[0] === "POST").length;
+  await msg("/no");
+  assert.match(replies.at(-1), /Dropped/);
+  assert.equal(api.calls.filter((c) => c[0] === "POST").length, before);
+
+  // A bare /yes with nothing pending must not resolve a stale proposal.
+  await msg("yes");
+  assert.match(replies.at(-1), /Nothing is waiting for confirmation/);
+});
+
+test("the assistant never reaches Slack", async () => {
+  const api = stubApi(TASKS);
+  const llm = stubLlm({ reply: "should not be called", command: null });
+  const replies = [];
+  const handle = makeInboundHandler({
+    api, logger: SILENT,
+    send: async (s, t, text) => { replies.push([s, text]); },
+    assistant: assistantFor(api, llm),
+  });
+
+  await handle({ surface: "slack", target: "D1", userId: "U1", text: "what's blocked?" });
+  assert.equal(llm.seen.length, 0, "no generation call may be spent on a Slack message");
+  assert.equal(replies.length, 0, "Slack stays commands-only");
+
+  // Commands still work on Slack.
+  await handle({ surface: "slack", target: "D1", userId: "U1", text: "/tasks" });
+  assert.match(replies[0][1], /needing attention/);
+});
+
+test("a hallucinated or unparseable proposal is dropped, not offered", async () => {
+  const api = stubApi(TASKS);
+  const invented = stubLlm({ reply: "Deleting the repo now.", command: "/rm-rf --all" });
+  let out = [];
+  let handle = makeInboundHandler({
+    api, logger: SILENT, send: async (s, t, text) => { out.push(text); }, assistant: assistantFor(api, invented),
+  });
+  await handle({ surface: "telegram", target: "555", userId: "42", text: "do something drastic" });
+  assert.doesNotMatch(out[0], /rm-rf/, "an unknown command must never be offered for confirmation");
+  assert.equal(api.calls.filter((c) => c[0] === "POST").length, 0);
+
+  // Garbage instead of JSON degrades to a pointer at /help.
+  out = [];
+  const garbage = stubLlm("I'm afraid I can't do that, Dave.");
+  handle = makeInboundHandler({
+    api, logger: SILENT, send: async (s, t, text) => { out.push(text); }, assistant: assistantFor(api, garbage),
+  });
+  await handle({ surface: "telegram", target: "555", userId: "42", text: "hello" });
+  assert.match(out[0], /\/help/);
+});
+
+test("a model that errors out reports as text, and writes nothing", async () => {
+  const api = stubApi(TASKS);
+  const llm = stubLlm(new Error("Gemini 429 rate limited"));
+  const out = [];
+  const handle = makeInboundHandler({
+    api, logger: SILENT, send: async (s, t, text) => { out.push(text); }, assistant: assistantFor(api, llm),
+  });
+  await handle({ surface: "telegram", target: "555", userId: "42", text: "what's blocked?" });
+  assert.match(out[0], /rate limited/);
+  assert.equal(api.calls.filter((c) => c[0] === "POST").length, 0);
+});
+
+test("commands still win over the assistant", async () => {
+  const api = stubApi(TASKS);
+  const llm = stubLlm({ reply: "should not be called", command: null });
+  const out = [];
+  const handle = makeInboundHandler({
+    api, logger: SILENT, send: async (s, t, text) => { out.push(text); }, assistant: assistantFor(api, llm),
+  });
+  await handle({ surface: "telegram", target: "555", userId: "42", text: "/status" });
+  assert.equal(llm.seen.length, 0, "an exact command must not pay for a model call");
+  assert.match(out[0], /Board:/);
 });
