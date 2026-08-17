@@ -559,6 +559,17 @@
   .dmem .src { margin-top: 8px; font-family: var(--mono); font-size: 9.5px; color: rgba(224,224,224,.3); }
   .drail-h .gn.set { color: var(--green); }
   .dnote { margin-top: 13px; font-size: 11px; line-height: 1.55; color: rgba(224,224,224,.4); }
+  /* Presets, not a matrix — one column of choices, the current one marked. */
+  .lvls { display: flex; flex-direction: column; gap: 2px; }
+  .lvl {
+    display: flex; align-items: center; gap: 8px; width: 100%; text-align: left;
+    font-family: inherit; font-size: 11.5px; padding: 7px 9px; border-radius: 6px;
+    border: 1px solid transparent; background: none; color: rgba(224,224,224,.6); cursor: pointer;
+  }
+  .lvl:hover { background: rgba(255,255,255,.035); color: var(--ink-2); }
+  .lvl.on { background: rgba(0,212,255,.08); border-color: rgba(0,212,255,.25); color: var(--cyan); }
+  .lvl .nm { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .lvl .tick { margin-left: auto; font-size: 10px; }
   .dlist2 { display: flex; flex-direction: column; gap: 9px; }
   .drow3 { display: flex; gap: 8px; align-items: baseline; font-size: 10.5px; color: rgba(224,224,224,.6); text-decoration: none; }
   a.drow3:hover .nm { color: var(--ink); }
@@ -1587,6 +1598,48 @@ function questionLabel(q) {
   return text.length > 58 ? text.slice(0, 58).replace(/\s\S*$/, "") + "…" : text;
 }
 
+/**
+ * Autonomy, per ticket (design 4a) — presets, not a permission matrix.
+ *
+ * The bridge assesses a level from what it already knows and this is where you
+ * disagree with it. `requires_confirmation` takes the override first, in both
+ * directions: marking a ticket careful keeps the gate when the rules would skip
+ * it, and marking it simple skips the gate — but deliberately, on a ticket, where
+ * it is visible. That visibility is the whole difference from the silent
+ * auto-dispatch this replaces.
+ *
+ * The design's matrix rows — push the branch, open the PR, install dependencies,
+ * migrations — are not here. Nothing enforces them: `no_pr` is a line in a prompt,
+ * and there is no mechanism behind "never touch migrations". Drawing them as
+ * switches would promise a guarantee the system cannot keep, which is worse than
+ * their absence.
+ */
+const LEVELS = [
+  ["", "Auto", "let the rules decide"],
+  ["simple", "Simple", "no confirmation — plan and build straight through"],
+  ["normal", "Normal", "confirm before anything is created"],
+  ["careful", "Careful", "confirm, and keep confirming"],
+];
+
+function renderAutonomy(triage) {
+  if (!triage) return "";
+  const chosen = triage.process_level || "";
+  const assessed = triage.assessed_level || "";
+  const why = triage.assessed_why || [];
+  const rows = LEVELS.map(([value, label, hint]) => {
+    const on = chosen === value;
+    const isAuto = value === "";
+    return `<button class="lvl ${on ? "on" : ""}" data-level="${esc(value)}" title="${esc(hint)}">
+      <span class="nm">${esc(label)}${isAuto && assessed ? ` · ${esc(assessed)}` : ""}</span>
+      ${on ? `<span class="tick">✓</span>` : ""}
+    </button>`;
+  }).join("");
+  return `<div class="dsec"><h2>Autonomy</h2>
+    <div class="lvls">${rows}</div>
+    ${why.length ? `<div class="dnote">${esc(why.join(" · "))}</div>` : ""}
+  </div>`;
+}
+
 function renderDecisions(questions, activeId, side = {}) {
   const recalled = side.recalled || null;
   const rows = (questions || []).map(q => {
@@ -1636,6 +1689,7 @@ function renderDecisions(questions, activeId, side = {}) {
       ${rows || `<p class="empty">No questions yet.</p>`}
       ${allSettled ? `<div class="dnote">Reopen one and it goes back to the agent as an open question.</div>` : ""}
     </div>
+    ${renderAutonomy(side.triage)}
     ${memory}
     ${renderActivity(side.activities)}
     ${deliverables}
@@ -1717,7 +1771,7 @@ function renderConversation(triage, activeId, side = {}) {
           assessedLevel: triage?.assessed_level || side.assessedLevel || "",
           assessedWhy: triage?.assessed_why || side.assessedWhy || [] })}
     </div>
-    ${renderDecisions(qs, active?.id, { ...side, needsConfirm })}`;
+    ${renderDecisions(qs, active?.id, { ...side, needsConfirm, triage })}`;
 }
 
 /**
@@ -1920,6 +1974,11 @@ function wireConversation(triage, keptScroll = null, openGroups = []) {
   document.querySelectorAll("[data-focus]").forEach(btn =>
     btn.addEventListener("click", () => { focusedQuestion = btn.dataset.focus; load({ force: true }); }));
 
+  // Choosing an autonomy preset. Written to the same triage state the bridge reads,
+  // so the next poll honours it — including turning a gate back on.
+  document.querySelectorAll("[data-level]").forEach(btn =>
+    btn.addEventListener("click", () => setProcessLevel(triage, btn.dataset.level)));
+
   // The plan card is a summary; the map is the shape. One switch between them.
   document.querySelectorAll("[data-planopen]").forEach(btn =>
     btn.addEventListener("click", () => { planOpen = !planOpen; load({ force: true }); }));
@@ -1979,6 +2038,22 @@ async function confirmTriage(triage, btn) {
   } catch (e) {
     if (btn) { btn.disabled = false; btn.textContent = "Confirm and start planning"; }
     const note = document.querySelector(".cactive");
+    if (note) note.textContent = String(e.message || e);
+  }
+}
+
+/** Choose how much process this ticket needs, overriding what was assessed. */
+async function setProcessLevel(triage, level) {
+  const next = JSON.parse(JSON.stringify(triage || {}));
+  next.process_level = level || "";
+  try {
+    const res = await fetch(`/api/tasks/${encodeURIComponent(taskId)}/triage-state`, {
+      method: "PUT", headers: { "Content-Type": "application/json" }, body: JSON.stringify(next),
+    });
+    if (!res.ok) throw new Error(`could not set level (${res.status})`);
+    load({ force: true });
+  } catch (e) {
+    const note = document.querySelector(".dnote");
     if (note) note.textContent = String(e.message || e);
   }
 }

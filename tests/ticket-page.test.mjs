@@ -1289,3 +1289,49 @@ test("quoting an error is not the same as being one", () => {
   assert.equal((rail.match(/class="cevent bad"/g) || []).length, 2, "the failure and the escalation");
   assert.match(rail, /class="cevent ">[\s\S]*?Planning wrote/, "a milestone that merely says 'could not' is not one");
 });
+
+// ─────────── autonomy presets (design 4a) ───────────
+
+test("the assessed level is shown, and can be disagreed with", () => {
+  const { renderConversation } = threadHelpers();
+  const out = renderConversation({
+    questions: SETTLED, assessed_level: "normal",
+    assessed_why: ["one repo", "can push, so a mistake leaves this machine"],
+  }, null, {});
+  const rail = out.split('<aside class="decisions">')[1];
+  assert.match(rail, /Autonomy/);
+  assert.match(rail, /Auto · normal/, "the machine's call, named");
+  for (const level of ["simple", "normal", "careful"]) {
+    assert.match(rail, new RegExp(`data-level="${level}"`), `${level} is choosable`);
+  }
+  assert.match(rail, /data-level=""/, "and so is handing it back to the rules");
+  assert.match(rail, /can push, so a mistake leaves this machine/, "with the reasoning");
+});
+
+test("an explicit choice is marked, and Auto is not the marked one", () => {
+  const { renderConversation } = threadHelpers();
+  const rail = renderConversation({ questions: SETTLED, process_level: "careful" }, null, {})
+    .split('<aside class="decisions">')[1];
+  assert.match(rail, /class="lvl on" data-level="careful"/);
+  assert.doesNotMatch(rail, /class="lvl on" data-level=""/);
+});
+
+test("no permission matrix is drawn, because nothing enforces one", () => {
+  // The design's rows — push the branch, open the PR, install dependencies,
+  // migrations — have no mechanism behind them: `no_pr` is a line in a prompt.
+  // Switches would promise a guarantee the system cannot keep.
+  const { renderConversation } = threadHelpers();
+  const rail = renderConversation({ questions: SETTLED }, null, {})
+    .split('<aside class="decisions">')[1];
+  for (const claim of [/Push the branch/, /Open the PR/, /Install dependencies/, /Migrations/]) {
+    assert.doesNotMatch(rail, claim);
+  }
+});
+
+test("choosing a level writes where the bridge reads it", () => {
+  const html = readFileSync(new URL("../public/ticket.html", import.meta.url), "utf8");
+  const fn = html.slice(html.indexOf("async function setProcessLevel("), html.indexOf("async function setProcessLevel(") + 700);
+  assert.match(fn, /process_level/);
+  assert.match(fn, /triage-state/, "the same state process_level.requires_confirmation consults");
+  assert.match(fn, /load\(\{ force: true \}\)/, "and the gate re-evaluates immediately");
+});
