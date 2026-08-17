@@ -42,7 +42,7 @@
   },
   "triage": {
     "triage_model": "gemini-2.5-flash",
-    "triage_model_deep": "gemini-2.5-pro",
+    "triage_model_deep": "gemini-2.5-flash",
     "embedding_model": "gemini-embedding-001"
   },
   "knowledge": {

@@ -318,7 +318,9 @@ def _load_triage_config() -> dict:
     """Load triage model config from swarm-config.json."""
     defaults = {
         "triage_model": "gemini-2.5-flash",
-        "triage_model_deep": "gemini-2.5-pro",
+        # Deep triage runs flash too, deliberately: Gemini is flash-only here, and a
+        # failed call falls back to OpenRouter rather than escalating to pro.
+        "triage_model_deep": "gemini-2.5-flash",
         "triage_provider": "gemini",          # gemini | openrouter
         "embedding_model": "gemini-embedding-001",
     }

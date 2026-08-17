@@ -580,7 +580,6 @@ BOT_COMMENT_MARKERS = [
 LIBRARIAN_DIR = MC_HOME / "librarian"
 GEMINI_FLASH = "gemini-2.5-flash"
 GEMINI_API_BASE = "https://generativelanguage.googleapis.com/v1beta"
-GEMINI_PRO = "gemini-2.5-pro"
 RESEARCH_DIR = MC_HOME / "swarm" / "research"
 SWARM_DIR = MC_HOME / "swarm"
 GITPROJECTS_DIR = Path.home() / "GitProjects"
@@ -611,7 +610,7 @@ def _resolve_thread_parent(comment: dict) -> Optional[str]:
 
 def _call_gemini(prompt: str, api_key: str, model: str = GEMINI_FLASH) -> Optional[str]:
     url = f"{GEMINI_API_BASE}/models/{model}:generateContent"
-    timeout = 120 if model == GEMINI_PRO else 60
+    timeout = 60
     payload = json.dumps({
         "contents": [{"parts": [{"text": prompt}]}],
         "generationConfig": {"temperature": 0.3, "maxOutputTokens": 2048},
@@ -1007,9 +1006,8 @@ Answer the question concisely and specifically. Reference actual files, director
 
 Keep the answer under 500 words. Use markdown formatting."""
 
-    answer = _call_gemini(prompt, api_key, model=GEMINI_PRO)
-    if not answer:
-        answer = _call_gemini(prompt, api_key)
+    # Flash only — the second call was a pro→flash retry, which is now the same call.
+    answer = _call_gemini(prompt, api_key, model=GEMINI_FLASH)
     if not answer:
         return False
 

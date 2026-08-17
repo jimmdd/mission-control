@@ -39,7 +39,8 @@ ENGINE = os.environ.get("PR_BOT_ENGINE", "codex").strip().lower()  # codex | llm
 CODEX_EFFORT = os.environ.get("PR_BOT_CODEX_EFFORT", "xhigh")
 WORKDIR = Path(os.environ.get("PR_BOT_WORKDIR", str(Path.home() / "pr-review-bot" / "repos")))
 PROVIDER = os.environ.get("PR_BOT_PROVIDER", "openrouter").strip().lower()  # llm engine only
-DEFAULT_MODEL = "google/gemini-2.5-pro" if PROVIDER == "openrouter" else "gemini-2.5-pro"
+# Gemini is flash-only here; a failed call falls back to OpenRouter rather than pro.
+DEFAULT_MODEL = "google/gemini-2.5-flash" if PROVIDER == "openrouter" else "gemini-2.5-flash"
 MODEL = os.environ.get("PR_BOT_MODEL", DEFAULT_MODEL)
 STATE_FILE = Path(os.environ.get("PR_BOT_STATE", str(Path.home() / ".pr-review-bot" / "state.json")))
 MAX_DIFF = int(os.environ.get("PR_BOT_MAX_DIFF", "120000"))
