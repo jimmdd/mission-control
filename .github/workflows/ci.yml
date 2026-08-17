@@ -14,6 +14,24 @@ jobs:
         with:
           node-version: "22"
           cache: npm
+      # Half the suite shells into python3 — the swarm is Python and the tests drive
+      # it directly. That was implicit before: the runner's incidental python3 was
+      # doing the work, and when `import bridge` started failing on it the log said
+      # "Command failed" sixty times with no cause. Pinned now, so the interpreter
+      # the tests run against is a decision rather than whatever the image ships.
+      #
+      # No pip install on purpose. Everything the suite touches must import on a
+      # bare interpreter — that is what tests/importable.test.mjs asserts, and
+      # adding dependencies here would hide the next hard import instead of
+      # catching it.
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Python imports on a bare interpreter
+        run: |
+          for m in bridge planner gsd_backend plan_stage process_level gsd_plan_import gsd_brief; do
+            python3 -c "import sys; sys.path.insert(0, 'swarm'); import $m" || exit 1
+          done
       - run: npm ci
       - name: Typecheck
         run: npm run build

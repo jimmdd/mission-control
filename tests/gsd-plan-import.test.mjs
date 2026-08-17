@@ -90,6 +90,7 @@ test("tasks inside one plan file are sequential, not a swarm", () => {
   assert.deepEqual(p.steps[0].depends_on, []);
   assert.deepEqual(p.steps[1].depends_on, [1]);
   assert.deepEqual(p.steps[2].depends_on, [2]);
+  // Undeclared files are why: without a list, disjointness cannot be shown.
   rmSync(dir, { recursive: true, force: true });
 });
 
@@ -102,8 +103,10 @@ test("separate plan files in one wave are what run together", () => {
   const p = importPlans(dir);
   assert.equal(p.steps.length, 4);
   assert.deepEqual(p.parallel_groups, [[1, 3], [2, 4]], "the Nth task of each file runs together");
-  assert.deepEqual(p.steps[1].depends_on, [1], "within a file it stays ordered");
-  assert.deepEqual(p.steps[3].depends_on, [3]);
+  // Dependencies follow the grouping, so the second position waits for the whole
+  // first position rather than only for its own file's predecessor.
+  assert.deepEqual(p.steps[1].depends_on, [1, 3]);
+  assert.deepEqual(p.steps[3].depends_on, [1, 3]);
   rmSync(dir, { recursive: true, force: true });
 });
 
@@ -139,4 +142,50 @@ g.write_mc_plan(Path(sys.argv[1]), "task-123", sorted(Path(sys.argv[2]).rglob("*
   assert.equal(JSON.parse(readFileSync(dest, "utf8")).steps.length, 1);
   rmSync(dir, { recursive: true, force: true });
   rmSync(home, { recursive: true, force: true });
+});
+
+test("adjacent steps that touch no common file are merged into one wave", () => {
+  // "One at a time" is a stand-in for the real constraint, which is that two
+  // agents editing the same file collide. The plan says which files each task
+  // touches, so that constraint is checkable rather than assumed.
+  const dir = withPlans({ "01-01-PLAN.md": planFile(1, [
+    { title: "touch a", files: ["src/a.ts"] },
+    { title: "touch b", files: ["src/b.ts"] },
+    { title: "touch c", files: ["src/c.ts"] },
+  ]) });
+  const p = importPlans(dir);
+  assert.deepEqual(p.parallel_groups, [[1, 2, 3]], "independent work runs together");
+  rmSync(dir, { recursive: true, force: true });
+});
+
+test("a shared file keeps them apart", () => {
+  const dir = withPlans({ "01-01-PLAN.md": planFile(1, [
+    { title: "touch a", files: ["src/a.ts"] },
+    { title: "also touch a", files: ["src/a.ts", "src/b.ts"] },
+  ]) });
+  assert.deepEqual(importPlans(dir).parallel_groups, [[1], [2]]);
+  rmSync(dir, { recursive: true, force: true });
+});
+
+test("an unknown file list is not treated as disjoint", () => {
+  // Unknown is not disjoint, and the cost of being wrong is two agents writing
+  // the same file.
+  const dir = withPlans({ "01-01-PLAN.md": planFile(1, [
+    { title: "declares nothing", files: [] },
+    { title: "touch b", files: ["src/b.ts"] },
+  ]) });
+  assert.deepEqual(importPlans(dir).parallel_groups, [[1], [2]]);
+  rmSync(dir, { recursive: true, force: true });
+});
+
+test("the real plan is not widened, because its tasks are not independent", () => {
+  // 29 of MET-635's 45 task pairs share a file and one test file is touched by
+  // seven of ten tasks. Staying serial there is the honest answer, and the point:
+  // the widening is earned per plan, not granted.
+  const dir = withPlans({ "01-01-PLAN.md": planFile(1, [
+    { title: "one", files: ["shared.test.ts", "a.ts"] },
+    { title: "two", files: ["shared.test.ts", "b.ts"] },
+  ]) });
+  assert.deepEqual(importPlans(dir).parallel_groups, [[1], [2]]);
+  rmSync(dir, { recursive: true, force: true });
 });

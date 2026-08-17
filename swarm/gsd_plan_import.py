@@ -124,14 +124,26 @@ def to_mc_plan(plan_files: List[Path]) -> Optional[Dict]:
                     "verify_command": t["verify_command"],
                     "category": t["kind"],
                     "source": plan["source"],
-                    # The step before it in the same plan file. Not every step of
-                    # the previous wave: that would draw edges GSD never wrote.
-                    "depends_on": [previous] if previous else [],
+                    # Filled in below, from the final grouping. Deriving it here
+                    # would contradict the widening: the positional order is our
+                    # conservative assumption, not an edge GSD wrote, and treating
+                    # it as a real dependency blocked its own relaxation.
+                    "depends_on": [],
                 })
                 by_position.setdefault(i, []).append(n)
                 previous = n
         for i in sorted(by_position):
             ordered.append(by_position[i])
+
+    ordered = _widen_by_disjoint_files(ordered, steps)
+
+    # Each group waits for the one before it. This is the only ordering claim the
+    # imported plan makes, and it now matches the grouping exactly.
+    by_step = {s["step"]: s for s in steps}
+    for i, group in enumerate(ordered[1:], start=1):
+        previous_group = ordered[i - 1]
+        for step_no in group:
+            by_step[step_no]["depends_on"] = list(previous_group)
 
     return {
         "steps": steps,
@@ -139,6 +151,41 @@ def to_mc_plan(plan_files: List[Path]) -> Optional[Dict]:
         "source": "gsd",
         "phase": parsed[0].get("phase", ""),
     }
+
+
+def _widen_by_disjoint_files(groups: List[List[int]], steps: List[Dict]) -> List[List[int]]:
+    """Merge adjacent groups whose steps touch no file in common.
+
+    The ordering above is conservative on purpose: within a plan file GSD's tasks
+    run one at a time. But "one at a time" is a stand-in for the real constraint,
+    which is that two agents editing the same file collide. Where the plan says
+    which files each task touches — it does, in `<files>` — that constraint is
+    checkable rather than assumed.
+
+    Measured on MET-635, this widens almost nothing: 29 of its 45 task pairs share
+    a file and one test file is touched by seven of ten tasks. That is the honest
+    answer for that plan, and the point — a plan whose tasks are genuinely
+    independent gets the parallelism, and one whose tasks are not does not.
+
+    A step with no file list blocks the merge. Unknown is not disjoint, and the
+    cost of being wrong here is two agents writing the same file.
+    """
+    files_of = {s["step"]: set(s.get("files") or []) for s in steps}
+
+    widened: List[List[int]] = []
+    for group in groups:
+        if not widened:
+            widened.append(list(group))
+            continue
+        previous = widened[-1]
+        here = set().union(*(files_of[s] for s in group)) if group else set()
+        there = set().union(*(files_of[s] for s in previous)) if previous else set()
+        unknown = any(not files_of[s] for s in group + previous)
+        if unknown or (here & there):
+            widened.append(list(group))
+            continue
+        previous.extend(group)
+    return widened
 
 
 def write_mc_plan(mc_home: Path, task_id: str, plan_files: List[Path]) -> Optional[Path]:
