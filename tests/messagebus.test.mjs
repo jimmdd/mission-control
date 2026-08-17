@@ -268,6 +268,20 @@ test("/followup validates the action against the canned set", async () => {
   assert.equal(post[2].action, "ci_lint");
 });
 
+test("/task shows the newest activities — the API returns them newest-first", async () => {
+  const api = stubApi(TASKS, {
+    activities: [
+      { activity_type: "manual_feedback", message: "NEWEST" },
+      { activity_type: "updated", message: "middle" },
+      { activity_type: "lease_claimed", message: "OLDEST" },
+      { activity_type: "created", message: "older still" },
+    ],
+  });
+  const reply = await executeCommand("/task 0e46593f", ctxFor(api));
+  assert.match(reply, /NEWEST/);
+  assert.doesNotMatch(reply, /older still/, "the tail of the list is stale history");
+});
+
 test("/status and /tasks summarise without needing a ref", async () => {
   const api = stubApi(TASKS, { checkpoints: [{ id: "c1", task_id: TASKS[0].id, prompt: "p" }] });
   const status = await executeCommand("/status", ctxFor(api));

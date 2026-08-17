@@ -191,8 +191,9 @@ async function cmdTasks(ctx: CommandContext, rest: string): Promise<string> {
 async function cmdTask(ctx: CommandContext, rest: string): Promise<string> {
   const { task, error } = await resolveTask(ctx.api, rest);
   if (!task) return error ?? "Not found.";
+  // listActivities returns newest first, so the head of the list is the recent end.
   const activities = asArray(await ctx.api.get(`/tasks/${str(task.id)}/activities`));
-  const latest = activities.slice(-3).map((a) => `  ${str(a.activity_type)}: ${str(a.message).slice(0, 160)}`);
+  const latest = activities.slice(0, 3).map((a) => `  ${str(a.activity_type)}: ${str(a.message).slice(0, 160)}`);
   return [describeTask(task), latest.length ? `recent:\n${latest.join("\n")}` : ""].filter(Boolean).join("\n");
 }
 
