@@ -167,7 +167,10 @@ test("the plan map draws steps, decisions and their dependency edges", async () 
   const svg = mod.planMap(plan, { steps: { "2": { status: "in_progress" } } }, triage);
 
   assert.equal((svg.match(/class="stepg/g) || []).length, 4, "one node per step");
-  assert.equal((svg.match(/class="flow"/g) || []).length, 4, "one edge per declared dependency");
+  // `flow`, `flow done` or `flow run` — the edge takes the state of the step it leads
+  // into, so the travelled part of the route reads green and the live part pulses.
+  assert.equal((svg.match(/class="flow[ "]/g) || []).length, 4, "one edge per declared dependency");
+  assert.match(svg, /class="flow run"/, "the edge into a running step is marked live");
   assert.match(svg, /class="dec set"/, "an answered decision renders as locked");
   assert.match(svg, /viewBox="0 0 \d+ \d+"/, "the map needs a viewBox to scale");
   // A verify_command is the gate; it belongs on the node, not hidden in a tooltip only.

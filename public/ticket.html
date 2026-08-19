@@ -17,8 +17,13 @@
     --line-soft: rgba(255,255,255,.05);
     --ink:       #e0e0e0;
     --ink-2:     rgba(224,224,224,.86);
-    --ink-3:     rgba(224,224,224,.44);
-    --ink-4:     rgba(224,224,224,.34);
+    /* Secondary and tertiary text. Measured against the three surfaces on this
+       page (main #0a0a0f, card #12121a, drawer #161622): at the old .44/.34 these
+       came out at 3.6:1 and 2.6:1, under the 4.5:1 WCAG AA floor for body text —
+       and nearly everything wearing them is 9.5-11px, which needs more contrast
+       than body text, not less. Now 7.1:1 and 5.3:1 at the worst surface. */
+    --ink-3:     rgba(224,224,224,.70);
+    --ink-4:     rgba(224,224,224,.58);
     --accent:    #00d4ff;
     --accent-bg: rgba(0,212,255,.06);
     --accent-line: rgba(0,212,255,.16);
@@ -86,7 +91,7 @@
   .tabs { display: flex; gap: 2px; min-width: 0; overflow: hidden; }
   .tab {
     display: flex; gap: 5px; padding: 6px 11px; border-radius: 5px; font-size: 10.5px;
-    color: rgba(224,224,224,.55); text-decoration: none; white-space: nowrap;
+    color: var(--ink-3); text-decoration: none; white-space: nowrap;
   }
   .tab:hover { color: var(--ink-2); background: rgba(255,255,255,.03); }
   .tab.on { background: rgba(0,212,255,.1); color: var(--cyan); }
@@ -104,7 +109,7 @@
   .navright .need { color: var(--amber); }
   .navright kbd {
     font-family: var(--mono); font-size: 10px; padding: 5px 10px;
-    border: 1px solid rgba(255,255,255,.12); border-radius: 5px; color: rgba(224,224,224,.55);
+    border: 1px solid rgba(255,255,255,.12); border-radius: 5px; color: var(--ink-3);
   }
   /* The breadcrumb the design puts before the ticket id — the rail is one list
      among several now, so the header says which. */
@@ -118,7 +123,7 @@
   .rail { display: flex; flex-direction: column; padding: 18px 0; overflow-y: auto; }
   .rgroup {
     padding: 14px 18px 12px; font-family: var(--mono); font-size: 9.5px;
-    letter-spacing: .14em; color: rgba(255,255,255,.3);
+    letter-spacing: .14em; color: var(--ink-3);
   }
   .rgroup:first-of-type { padding-top: 0; }
   .rlist { display: flex; flex-direction: column; gap: 2px; padding: 0 8px; }
@@ -127,28 +132,28 @@
   .rt:hover { background: rgba(255,255,255,.03); }
   .rt.on { background: rgba(255,255,255,.055); border-left-color: var(--cyan); }
   .rt.on.build { border-left-color: var(--green); }
-  .rt-top { display: flex; gap: 8px; font-family: var(--mono); font-size: 9.5px; color: rgba(224,224,224,.38); margin-bottom: 5px; }
-  .rt.on .rt-top { color: rgba(224,224,224,.42); }
+  .rt-top { display: flex; gap: 8px; font-family: var(--mono); font-size: 9.5px; color: var(--ink-3); margin-bottom: 5px; }
+  .rt.on .rt-top { color: var(--ink-3); }
   .rt-badge { margin-left: auto; }
   .rt-badge.q { color: var(--amber); }
   .rt-badge.now { color: var(--cyan); }
   .rt-badge.ok { color: var(--green); }
-  .rt-title { font-size: 11.5px; line-height: 1.4; color: rgba(224,224,224,.68);
+  .rt-title { font-size: 11.5px; line-height: 1.4; color: var(--ink-3);
               display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; }
   .rt.on .rt-title { color: #f4f4f6; }
   /* The active ticket carries its own state, because that is the one you are in. */
   .rt-live { margin-top: 9px; padding-top: 9px; border-top: 1px solid rgba(255,255,255,.07);
-             display: flex; flex-direction: column; gap: 6px; font-family: var(--mono); font-size: 9.5px; color: rgba(224,224,224,.5); }
+             display: flex; flex-direction: column; gap: 6px; font-family: var(--mono); font-size: 9.5px; color: var(--ink-3); }
   .rt-live .who { display: flex; align-items: center; gap: 7px; }
   .rt-live .who i { width: 4px; height: 4px; border-radius: 50%; background: var(--green); animation: mcpulse 2s ease-in-out infinite; flex: none; }
-  .rt-live .who .dim { color: rgba(224,224,224,.3); }
+  .rt-live .who .dim { color: var(--ink-4); }
   .rt-seg { display: flex; align-items: center; gap: 7px; }
   .rt-seg .bars { display: flex; gap: 3px; }
   .rt-seg .bars i { width: 9px; height: 2px; border-radius: 1px; background: rgba(255,255,255,.12); }
   .rt-seg .bars i.done { background: var(--green); }
   .rt-seg .bars i.now  { background: var(--cyan); }
-  .rt-seg .n { margin-left: auto; color: rgba(224,224,224,.4); font-variant-numeric: tabular-nums; }
-  .rail .foot { display: block; text-decoration: none; margin-top: auto; padding: 18px 18px 0; font-family: var(--mono); font-size: 10px; color: rgba(224,224,224,.3); }
+  .rt-seg .n { margin-left: auto; color: var(--ink-3); font-variant-numeric: tabular-nums; }
+  .rail .foot { display: block; text-decoration: none; margin-top: auto; padding: 18px 18px 0; font-family: var(--mono); font-size: 10px; color: var(--ink-4); }
 
   /* ─────────── the ticket header ─────────── */
   .thead { display: flex; align-items: center; gap: 12px; padding: 16px 26px; border-bottom: 1px solid var(--line-soft); }
@@ -176,23 +181,23 @@
      conversation. It opens on ▾ rather than scrolling in place. */
   .tk-brief { display: flex; align-items: baseline; gap: 12px; max-width: 660px; margin-bottom: 11px; }
   .tk-brief .lead {
-    font-size: 12.5px; line-height: 1.6; color: rgba(224,224,224,.6);
+    font-size: 12.5px; line-height: 1.6; color: var(--ink-3);
     min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
   }
   .tk-brief .more {
     flex: none; font-family: var(--mono); font-size: 10px; background: none; border: none;
-    padding: 0; color: rgba(224,224,224,.55); cursor: pointer;
+    padding: 0; color: var(--ink-3); cursor: pointer;
   }
   .tk-brief .more:hover { color: var(--ink-2); }
-  .tk-brief .files { flex: none; font-family: var(--mono); font-size: 10px; color: rgba(224,224,224,.3); }
+  .tk-brief .files { flex: none; font-family: var(--mono); font-size: 10px; color: var(--ink-4); }
   .tk-brief .ext { flex: none; font-family: var(--mono); font-size: 10px; color: var(--cyan); text-decoration: none; }
   .tk-desc.rest {
-    font-size: 12.5px; line-height: 1.65; color: rgba(224,224,224,.62); max-width: 74ch;
+    font-size: 12.5px; line-height: 1.65; color: var(--ink-3); max-width: 74ch;
     white-space: pre-wrap; margin: -4px 0 12px; max-height: 26vh; overflow-y: auto;
   }
   .tk-meta { display: flex; gap: 18px; font-family: var(--mono); font-size: 10px; color: var(--ink-4);
              margin-bottom: 16px; flex-wrap: wrap; }
-  .tk-meta b { color: rgba(224,224,224,.75); font-weight: 400; }
+  .tk-meta b { color: var(--ink-3); font-weight: 400; }
   .tk-meta .last { margin-left: auto; }
 
   /* ─────────── progress track ─────────── */
@@ -212,10 +217,10 @@
   .tk-bar.finished + .tk-labels .now .n, .tk-bar.finished .tk-dots i.now { border-color: var(--green); }
   .tk-labels { display: grid; grid-auto-flow: column; grid-auto-columns: 1fr; margin-top: 12px; text-align: center; }
   .tk-labels span { display: flex; flex-direction: column; gap: 3px; }
-  .tk-labels .n { font-size: 10.5px; color: rgba(224,224,224,.28); }
-  .tk-labels .done .n { color: rgba(224,224,224,.55); }
+  .tk-labels .n { font-size: 10.5px; color: var(--ink-4); }
+  .tk-labels .done .n { color: var(--ink-3); }
   .tk-labels .now .n { color: var(--cyan); }
-  .tk-labels .t { font-family: var(--mono); font-size: 9.5px; color: rgba(224,224,224,.3); }
+  .tk-labels .t { font-family: var(--mono); font-size: 9.5px; color: var(--ink-4); }
   .tk-labels .now .t { color: rgba(0,212,255,.7); }
 
   /* ─────────── cards ─────────── */
@@ -266,8 +271,32 @@
   svg.plan-map .wv.wait { fill: var(--amber); }
   svg.plan-map .ghost rect { fill: none; stroke: var(--line); stroke-width: 1.5; stroke-dasharray: 5 4; }
   svg.plan-map .ghost .stitle, svg.plan-map .ghost .srepo { opacity: .55; }
-  svg.plan-map .run rect.sbox { stroke: var(--cyan); stroke-width: 2; }
+  /* Read like a subway map: the station you are at pulses, the ones behind you are
+     green and solid, the ones ahead are quiet outlines. A static cyan outline for
+     "running" was indistinguishable from "selected" at a glance, which is the one
+     thing the map exists to answer. */
+  svg.plan-map .run rect.sbox {
+    stroke: var(--cyan); stroke-width: 2.5; fill: var(--cyan-bg);
+    animation: mcstation 1.6s ease-in-out infinite;
+  }
+  svg.plan-map .run .stitle { fill: var(--ink); }
+  svg.plan-map .run .snum { fill: var(--cyan); }
   svg.plan-map .done rect.sbox { fill: var(--green-bg); stroke: var(--green); }
+  svg.plan-map .done .snum { fill: var(--green); }
+  /* The line already travelled, so the eye can follow the route. */
+  svg.plan-map .flow.done { stroke: var(--green); opacity: .75; }
+  svg.plan-map .flow.run { stroke: var(--cyan); animation: mcstation 1.6s ease-in-out infinite; }
+  @keyframes mcstation {
+    0%, 100% { opacity: 1; }
+    50% { opacity: .45; }
+  }
+  /* The collapsed list is the same information; it should agree with the map. */
+  .prow.done .pm { color: var(--green); }
+  .prow.run .pm { color: var(--cyan); animation: mcstation 1.6s ease-in-out infinite; }
+  .prow.run .pt { color: var(--ink); }
+  @media (prefers-reduced-motion: reduce) {
+    svg.plan-map .run rect.sbox, svg.plan-map .flow.run, .prow.run .pm { animation: none; }
+  }
   svg.plan-map .blocked rect.sbox { stroke: var(--red); }
   svg.plan-map .blocked .snum { fill: var(--red); }
   .sd { background: var(--sunk); border: 1px solid var(--line); border-radius: 12px; padding: 16px 18px; margin-top: 14px; }
@@ -329,7 +358,7 @@
     border-radius: 0 7px 7px 0; padding: 11px 15px; margin-top: 13px;
   }
   .cfind .ft { font-size: 12.5px; font-weight: 600; color: #f4f4f6; margin-bottom: 5px; }
-  .cfind .fb { font-size: 12px; line-height: 1.6; color: rgba(224,224,224,.6); white-space: normal; }
+  .cfind .fb { font-size: 12px; line-height: 1.6; color: var(--ink-3); white-space: normal; }
 
   /* The id the answer will bind. Without it on the question, the receipt below
      says "Recorded as D-02" and nothing on screen ever said which one D-02 was. */
@@ -346,7 +375,7 @@
   .cpill {
     font-family: inherit; font-size: 12.5px; padding: 9px 14px; border-radius: 16px;
     border: 1px solid rgba(255,255,255,.12); background: transparent;
-    color: rgba(224,224,224,.72); cursor: pointer;
+    color: var(--ink-3); cursor: pointer;
   }
   .cpill:hover { border-color: rgba(255,255,255,.28); color: var(--ink); }
   .cpill.rec { border-color: rgba(0,212,255,.3); color: var(--cyan); }
@@ -367,9 +396,9 @@
     font-size: 10.5px; color: var(--ink-3);
   }
   .creceipt .ok { color: var(--green); }
-  .creceipt b { color: rgba(224,224,224,.75); font-weight: 400; }
+  .creceipt b { color: var(--ink-3); font-weight: 400; }
   .cdec .cbody { font-size: 12.5px; }
-  .creason { font-size: 12px; line-height: 1.6; color: rgba(224,224,224,.6); border-left: 2px solid rgba(255,255,255,.12); padding-left: 13px; }
+  .creason { font-size: 12px; line-height: 1.6; color: var(--ink-3); border-left: 2px solid rgba(255,255,255,.12); padding-left: 13px; }
 
   /* The thread's system half. An event is not somebody speaking, so it is a line
      rather than a message — no avatar, no bubble. Trouble is amber, which on this
@@ -384,15 +413,15 @@
     display: flex; gap: 8px; align-items: baseline; font-family: var(--mono);
     font-size: 10px; line-height: 1.5; color: var(--ink-4);
   }
-  .cevent .mk { flex: none; color: rgba(224,224,224,.28); }
-  .cevent .ts { flex: none; color: rgba(224,224,224,.3); font-variant-numeric: tabular-nums; }
+  .cevent .mk { flex: none; color: var(--ink-4); }
+  .cevent .ts { flex: none; color: var(--ink-4); font-variant-numeric: tabular-nums; }
   .cevent.bad .ts { color: rgba(245,158,11,.75); }
   .cevent .tx { min-width: 0; overflow-wrap: anywhere; }
   /* How many times the same thing happened. Reads as a count, not as part of the
      sentence. */
   .cevent .xn {
     margin-left: 6px; padding: 1px 5px; border-radius: 4px;
-    background: rgba(255,255,255,.07); color: rgba(224,224,224,.5);
+    background: rgba(255,255,255,.07); color: var(--ink-3);
   }
   .cevent.bad .xn { background: rgba(245,158,11,.14); color: var(--amber); }
   .cevent.bad { color: var(--amber); }
@@ -400,14 +429,17 @@
   /* Fifty repetitions of "heartbeat: running" is not a conversation, but silence
      is not honest either — the run becomes one line saying how many there were. */
   .cnoise {
-    font-family: var(--mono); font-size: 10px; color: rgba(224,224,224,.22);
+    font-family: var(--mono); font-size: 10px; color: var(--ink-4);
     padding-left: 18px;
   }
   /* Waiting on a reply. Three dots rather than a spinner: a spinner implies
      something is actively computing, and between polls nothing is. */
   .cthink { display: flex; align-items: center; gap: 5px; height: 24px; }
   .cthink i {
-    width: 5px; height: 5px; border-radius: 50%; background: rgba(224,224,224,.35);
+    /* A 5px dot at the old .35 came out at 2.7:1 — under the 3:1 floor for a
+       graphical indicator, so the one element whose whole job is to be noticed
+       was the hardest thing on the page to see. */
+    width: 5px; height: 5px; border-radius: 50%; background: var(--ink-3);
     animation: mcthink 1.3s ease-in-out infinite;
   }
   .cthink i:nth-child(2) { animation-delay: .18s; }
@@ -429,7 +461,7 @@
      moment the questions stopped, so what came after is legible as consequence. */
   .cmark { display: flex; align-items: center; gap: 12px; }
   .cmark .ln { flex: 1; height: 1px; background: rgba(255,255,255,.07); }
-  .cmark span:not(.ln) { font-family: var(--mono); font-size: 9.5px; letter-spacing: .13em; color: rgba(224,224,224,.35); }
+  .cmark span:not(.ln) { font-family: var(--mono); font-size: 9.5px; letter-spacing: .13em; color: var(--ink-3); }
 
   /* The plan, in the stream rather than on a page of its own. It arrives as a
      message because that is when it arrives, and the decisions it was built from
@@ -437,25 +469,25 @@
   .pcard { margin-top: 13px; border: 1px solid rgba(255,255,255,.1); border-radius: 9px; padding: 15px 17px; }
   .ph { display: flex; align-items: center; gap: 10px; margin-bottom: 13px; }
   .ph .pf { font-family: var(--mono); font-size: 11px; color: var(--cyan); }
-  .ph .pc { font-family: var(--mono); font-size: 10px; color: rgba(224,224,224,.35); }
+  .ph .pc { font-family: var(--mono); font-size: 10px; color: var(--ink-3); }
   .ph .popen {
     margin-left: auto; font-family: var(--mono); font-size: 10px; background: none;
-    border: none; padding: 0; color: rgba(224,224,224,.5); cursor: pointer;
+    border: none; padding: 0; color: var(--ink-3); cursor: pointer;
   }
   .ph .popen:hover { color: var(--ink-2); }
   .psteps { display: flex; flex-direction: column; gap: 9px; font-size: 11px; }
   .prow { display: flex; gap: 11px; align-items: baseline; }
-  .prow .pm { flex: none; color: rgba(224,224,224,.28); }
-  .prow .pt { color: rgba(224,224,224,.4); }
-  .prow .pn { margin-left: auto; font-family: var(--mono); font-size: 10px; color: rgba(224,224,224,.25); }
+  .prow .pm { flex: none; color: var(--ink-4); }
+  .prow .pt { color: var(--ink-3); }
+  .prow .pn { margin-left: auto; font-family: var(--mono); font-size: 10px; color: var(--ink-4); }
   .prow.done .pm { color: var(--green); }
-  .prow.done .pt { color: rgba(224,224,224,.55); }
-  .prow.done .pn { color: rgba(224,224,224,.3); }
+  .prow.done .pt { color: var(--ink-3); }
+  .prow.done .pn { color: var(--ink-4); }
   .prow.run .pm { color: var(--cyan); }
   .prow.run .pt { color: #f4f4f6; }
-  .prow.run .pn { color: rgba(224,224,224,.3); }
+  .prow.run .pn { color: var(--ink-4); }
   .prow.blocked .pm, .prow.blocked .pn { color: var(--red); }
-  .prow.blocked .pt { color: rgba(224,224,224,.55); }
+  .prow.blocked .pt { color: var(--ink-3); }
 
   /* A settled question is the record, not the conversation. One line, openable. */
   .csettled { border-left: 2px solid var(--green); padding-left: 11px; }
@@ -466,7 +498,7 @@
   .csettled > summary::-webkit-details-marker { display: none; }
   .csettled > summary:hover .cs-q { color: var(--ink); }
   .cs-tag { font-family: var(--mono); font-size: 10px; color: var(--green); }
-  .cs-q { font-size: 11.5px; line-height: 1.5; color: rgba(224,224,224,.6);
+  .cs-q { font-size: 11.5px; line-height: 1.5; color: var(--ink-3);
           overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   /* The outcome on a collapsed line is an identifier, not the answer in full — that
      is inside. Uncapped it ran off the column and got sliced mid-word by the edge. */
@@ -503,7 +535,7 @@
     flex: 1; min-width: 0; font-family: inherit; font-size: 13px; color: var(--ink);
     background: transparent; border: none; padding: 6px 0;
   }
-  .crow input::placeholder { color: rgba(224,224,224,.32); }
+  .crow input::placeholder { color: var(--ink-3); }
   .crow input:focus { outline: none; }
   .csend {
     width: 26px; height: 26px; border-radius: 8px; border: none; background: rgba(0,212,255,.9);
@@ -517,14 +549,14 @@
     border-radius: 6px; border: 1px solid transparent; background: none; color: var(--ink-4); cursor: pointer; flex: none;
   }
   .cbtn:hover { color: var(--cyan); border-color: rgba(0,212,255,.3); }
-  .cfoot { margin-top: 10px; font-family: var(--mono); font-size: 10px; color: rgba(224,224,224,.28); }
+  .cfoot { margin-top: 10px; font-family: var(--mono); font-size: 10px; color: var(--ink-4); }
 
   /* ─── decision rail ─── */
   .decisions { padding: 22px 20px; display: flex; flex-direction: column; gap: 20px; overflow-y: auto; }
   .dsec > h2, .drail-h {
     display: flex; align-items: baseline; gap: 8px; font-family: var(--mono); font-size: 9.5px;
     font-weight: 400; letter-spacing: .14em; text-transform: uppercase;
-    color: rgba(255,255,255,.38); margin: 0 0 13px;
+    color: var(--ink-3); margin: 0 0 13px;
   }
   .drail-h .gn { margin-left: auto; letter-spacing: 0; color: var(--ink-3); font-size: 10px; }
   .dsec + .dsec { border-top: 1px solid var(--line-soft); padding-top: 18px; }
@@ -542,43 +574,50 @@
   .drow2.agent { border-left-color: var(--amber); }
   .drow2 .dtag {
     display: flex; gap: 7px; font-family: var(--mono); font-size: 10px;
-    color: rgba(224,224,224,.4); margin-bottom: 4px;
+    color: var(--ink-3); margin-bottom: 4px;
   }
-  .drow2 .dtag b { font-weight: 400; color: rgba(224,224,224,.4); }
+  .drow2 .dtag b { font-weight: 400; color: var(--ink-3); }
   .drow2.set .dtag b { color: var(--green); }
   .drow2.on .dtag b { color: var(--cyan); }
   .drow2.agent .dtag b { color: var(--amber); }
-  .drow2 .dq2 { font-size: 11.5px; line-height: 1.45; color: rgba(224,224,224,.6); display: -webkit-box;
+  .drow2 .dq2 { font-size: 11.5px; line-height: 1.45; color: var(--ink-3); display: -webkit-box;
                 -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; }
-  .drow2.set .dq2 { color: rgba(224,224,224,.78); }
-  .drow2.on .dq2 { color: rgba(224,224,224,.6); }
-  .drow2:not(.set):not(.on):not(.agent) .dq2 { color: rgba(224,224,224,.45); }
+  .drow2.set .dq2 { color: var(--ink-3); }
+  .drow2.on .dq2 { color: var(--ink-3); }
+  .drow2:not(.set):not(.on):not(.agent) .dq2 { color: var(--ink-3); }
   /* Recalled knowledge: what this project already learned that bears on the ticket.
      Only rendered when the store actually returns something. */
-  .dmem { font-size: 11px; line-height: 1.55; color: rgba(224,224,224,.55); }
-  .dmem .src { margin-top: 8px; font-family: var(--mono); font-size: 9.5px; color: rgba(224,224,224,.3); }
+  .dmem { font-size: 11px; line-height: 1.55; color: var(--ink-3); }
+  .dmem .src { margin-top: 8px; font-family: var(--mono); font-size: 9.5px; color: var(--ink-4); }
   .drail-h .gn.set { color: var(--green); }
-  .dnote { margin-top: 13px; font-size: 11px; line-height: 1.55; color: rgba(224,224,224,.4); }
+  .dnote { margin-top: 13px; font-size: 11px; line-height: 1.55; color: var(--ink-3); }
   /* Presets, not a matrix — one column of choices, the current one marked. */
   .lvls { display: flex; flex-direction: column; gap: 2px; }
   .lvl {
     display: flex; align-items: center; gap: 8px; width: 100%; text-align: left;
     font-family: inherit; font-size: 11.5px; padding: 7px 9px; border-radius: 6px;
-    border: 1px solid transparent; background: none; color: rgba(224,224,224,.6); cursor: pointer;
+    border: 1px solid transparent; background: none; color: var(--ink-3); cursor: pointer;
   }
   .lvl:hover { background: rgba(255,255,255,.035); color: var(--ink-2); }
   .lvl.on { background: rgba(0,212,255,.08); border-color: rgba(0,212,255,.25); color: var(--cyan); }
   .lvl .nm { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   .lvl .tick { margin-left: auto; font-size: 10px; }
   .dlist2 { display: flex; flex-direction: column; gap: 9px; }
-  .drow3 { display: flex; gap: 8px; align-items: baseline; font-size: 10.5px; color: rgba(224,224,224,.6); text-decoration: none; }
+  .drow3 { display: flex; gap: 8px; align-items: baseline; font-size: 10.5px; color: var(--ink-3); text-decoration: none; }
   a.drow3:hover .nm { color: var(--ink); }
   .drow3 .ic { color: var(--cyan); flex: none; }
   .drow3 .nm { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   .drow3 .dot { width: 5px; height: 5px; border-radius: 50%; background: rgba(255,255,255,.2); flex: none; align-self: center; }
   .drow3 .dot.live { background: var(--green); animation: mcpulse 2.3s ease-in-out infinite; }
-  .pmap { border: 1px solid var(--line); border-radius: 9px; padding: 12px 14px; }
-  .dsum { margin-top: auto; padding-top: 18px; font-size: 10px; line-height: 1.6; color: rgba(224,224,224,.3); }
+  /* The map is as wide as the plan has rounds — MET-640's 22 steps across 10 rounds
+     draw ~3000px into a ~620px column. Without this it was simply cut off after the
+     second round, so eight of ten rounds existed but could not be reached. */
+  .pmap {
+    border: 1px solid var(--line); border-radius: 9px; padding: 12px 14px;
+    overflow-x: auto; overscroll-behavior-x: contain;
+  }
+  .pmap svg { display: block; }
+  .dsum { margin-top: auto; padding-top: 18px; font-size: 10px; line-height: 1.6; color: var(--ink-4); }
   .dsum b { color: var(--amber); font-weight: 400; }
   .dsum code { font-family: var(--mono); }
 
@@ -919,12 +958,63 @@ const BOX_W = 208, BOX_H = 74, GAP_Y = 20, GAP_X = 74, PAD = 14;
 // in full — the collapsed list above has the wording.
 const DEC_H = 30, DEC_GAP = 8;
 
-function planMap(plan, progress, triage) {
+/**
+ * What state a step is in, as a subway map reads it: done, running, or ahead.
+ *
+ * Per-step status is authoritative when it exists, but it only exists under
+ * multi-step dispatch, and that is off by default (`ENABLE_MULTI_STEP_PLANNING`) —
+ * one agent takes the whole plan, so nothing ever writes it. That left every node
+ * pending forever: MET-640 had step 01-01 written, verified and committed while the
+ * map said "0 of 22 done, nothing running".
+ *
+ * So fall back to the signal that does move. The agent reports which *plan* it is
+ * working as `step_label` ("01-02 Wire the canonical headers…"), and every step
+ * carries the plan it came from. Plans before it are finished, its own are running,
+ * later ones are ahead. Coarser than per-step — a plan's steps light up together —
+ * but it is true, and it moves.
+ */
+function stepStates(plan, progress, agentProgress) {
+  const perStep = (progress && progress.steps) || null;
+  const out = {};
+  const current = String(agentProgress?.step_label || "").match(/^(\d+-\d+)/);
+  const running = agentProgress?.state === "running" || agentProgress?.state === "waiting";
+  // The run finished, so nothing is still in flight and nothing is still ahead.
+  // Without this the plan the agent stopped on stayed drawn as unreached — MET-640
+  // sat at `state: done` with its last seven steps rendered pending, which reads as
+  // work outstanding on a ticket that has moved to review.
+  const finished = agentProgress?.state === "done";
+
+  for (const s of (plan && plan.steps) || []) {
+    const own = perStep && perStep[String(s.step)];
+    if (own && own.status) {
+      out[s.step] = own.status === "completed" ? "done"
+        : own.status === "in_progress" ? "run"
+        : (own.status === "blocked" || own.status === "failed") ? "blocked" : "";
+      continue;
+    }
+    if (finished) { out[s.step] = "done"; continue; }
+    if (!current || !s.plan) { out[s.step] = ""; continue; }
+    // Plan ids are zero-padded ("01-02"), so a string compare is the right order.
+    out[s.step] = s.plan < current[1] ? "done"
+      : s.plan === current[1] ? (running ? "run" : "")
+      : "";
+  }
+  return out;
+}
+
+function planMap(plan, progress, triage, agentProgress) {
   const stepById = Object.fromEntries(plan.steps.map(s => [s.step, s]));
+  const states = stepStates(plan, progress, agentProgress);
   const rounds = (plan.parallel_groups && plan.parallel_groups.length)
     ? plan.parallel_groups : plan.steps.map(s => [s.step]);
 
-  const decisions = (triage?.questions || []);
+  // What the plan was actually built on. A question set aside is not a decision the
+  // plan cites, and an escalation recorded as a pseudo-question is not a question at
+  // all — MET-640's map opened on "D-01 Planning failed: planner finished with a GSD
+  // project but…" drawn as an open decision, which is a failure notice wearing a
+  // decision's clothes.
+  const decisions = (triage?.questions || []).filter(q =>
+    !q.deferred && !String(q.id || "").startsWith("agent_escalation"));
   const anyNoGsd = Object.values(progress?.steps || {}).some(st => st.gsd_ran === false);
   const open = decisions.filter(q => !q.answer);
   const cols = [decisions.length ? decisions : null, ...rounds].filter(Boolean);
@@ -975,9 +1065,7 @@ function planMap(plan, progress, triage) {
       const st = (progress?.steps || {})[String(n)] || {};
       const y = centre(i, group.length, BOX_H);
       pos[`s${n}`] = { x, y, w: BOX_W, h: BOX_H };
-      const state = st.status === "completed" ? "done"
-        : st.status === "in_progress" ? "run"
-        : (st.status === "blocked" || st.status === "failed") ? "blocked" : "";
+      const state = states[n] || "";
       // Provisional while decisions are still open — the plan may yet change.
       const ghost = open.length > 0 && !state ? "ghost" : "";
       const sel = String(selectedStep) === String(n) ? "sel" : "";
@@ -1013,7 +1101,13 @@ function planMap(plan, progress, triage) {
     edges.push(`<path class="${cls}" d="M ${x1} ${y1} C ${x1 + dx} ${y1}, ${x2 - dx} ${y2}, ${x2} ${y2}"/>`);
   };
   for (const s of plan.steps) {
-    for (const dep of s.depends_on || []) link(pos[`s${dep}`], pos[`s${s.step}`], "flow");
+    // The edge takes the state of the step it leads into, so the travelled route is
+    // green up to the pulsing station and quiet after it.
+    for (const dep of s.depends_on || []) {
+      const into = states[s.step] || "";
+      const cls = into === "done" || into === "run" ? `flow ${into}` : "flow";
+      link(pos[`s${dep}`], pos[`s${s.step}`], cls);
+    }
   }
   if (hasDec) {
     const roots = plan.steps.filter(s => !(s.depends_on || []).length);
@@ -1247,8 +1341,11 @@ function renderChatEvent(ev) {
   // Amber on this page means one thing — a human is the blocker — so the reasoning
   // behind a settled decision is not amber. It is the record explaining itself.
   const reason = ev.q.reason ? `<div class="creason">${esc(ev.q.reason)}</div>` : "";
-  const undo = byAgent
-    ? `<button class="cbtn" data-act="reopen" data-q="${esc(ev.q.id)}">change it</button>` : "";
+  // Every recorded decision can be taken back, not just the ones the agent chose
+  // for you. This was gated on `byAgent`, so once you answered a question yourself
+  // the options were gone (a settled question stops offering them) and nothing
+  // offered them back — your own answer was the one kind that could not be changed.
+  const undo = `<button class="cbtn" data-act="reopen" data-q="${esc(ev.q.id)}">change it</button>`;
   return `<div class="cdec" data-for="${esc(ev.q.id)}">
     <div class="creceipt"><span class="ok">✓</span>Recorded as <b>${tag}</b> — the plan has to cite it${undo}</div>
     <div class="cbody">${esc(ev.q.answer)}${byAgent ? " · chosen for you" : ""}</div>
@@ -1281,7 +1378,7 @@ function renderSettledMark(questions) {
  * decisions were settled and passed to the planner. Whether the plan text cites
  * them is a claim about a document nobody here has read.
  */
-function renderPlanCard(plan, progress, questions, open = false) {
+function renderPlanCard(plan, progress, questions, open = false, agentProgress = null) {
   const steps = (plan && plan.steps) || [];
   if (!steps.length) return "";
   const waves = (plan.parallel_groups && plan.parallel_groups.length) || steps.length;
@@ -1292,8 +1389,9 @@ function renderPlanCard(plan, progress, questions, open = false) {
     return i < 0 ? 0 : i + 1;
   };
 
-  const done = steps.filter(s => st(s.step).status === "completed").length;
-  const running = steps.find(s => st(s.step).status === "in_progress");
+  const states = stepStates(plan, progress, agentProgress);
+  const done = steps.filter(s => states[s.step] === "done").length;
+  const running = steps.find(s => states[s.step] === "run");
   const lead = running
     ? `The plan is in — ${steps.length} steps, ${waves} ${waves === 1 ? "wave" : "waves"}. Step ${running.step} is running.`
     : done === steps.length
@@ -1306,9 +1404,7 @@ function renderPlanCard(plan, progress, questions, open = false) {
 
   const rows = steps.map(s => {
     const p = st(s.step);
-    const state = p.status === "completed" ? "done"
-      : p.status === "in_progress" ? "run"
-      : (p.status === "blocked" || p.status === "failed") ? "blocked" : "";
+    const state = states[s.step] || "";
     const mark = state === "done" ? "✓" : state === "run" ? "▸" : state === "blocked" ? "!" : "○";
     const note = state === "done" ? (p.agent_profile || "done")
       : state === "run" ? "running"
@@ -1393,7 +1489,23 @@ const TROUBLE_TYPES = ["step_escalated", "step_retry", "checkpoint_raised", "nee
 const MILESTONE_TYPES = ["step_dispatched", "step_completed", "step_escalated", "step_retry",
   "plan_created", "checkpoint_raised", "checkpoint_resolved", "spawned", "status_changed", "needs_human"];
 
-function classifyActivity(a) {
+/**
+ * When the run currently in progress began.
+ *
+ * Taken from the newest spawn in the activity list, because that is the moment a
+ * previous attempt's troubles stopped being about anything live. Self-contained on
+ * purpose: no extra fetch, and it works on whatever history the page already has.
+ */
+function currentRunStart(activities) {
+  const stamps = (activities || [])
+    .filter(a => /agent spawned|spawned agents/i.test(a.message || ""))
+    .map(a => a.created_at || "")
+    .filter(Boolean)
+    .sort();
+  return stamps.length ? stamps[stamps.length - 1] : "";
+}
+
+function classifyActivity(a, since = "") {
   const msg = a.message || "";
   const meta = typeof a.metadata === "string" ? a.metadata : JSON.stringify(a.metadata || "");
   if (!msg.trim()) return null;
@@ -1403,14 +1515,23 @@ function classifyActivity(a) {
   // Noise is tested first: a heartbeat is routine even when its wording overlaps
   // whatever a failure would say. Nothing that repeats every 60 seconds is news.
   if (NOISE.test(msg) || NOISE_TYPES.includes(a.activity_type)) return "noise";
-  if (TROUBLE_TYPES.includes(a.activity_type) || TROUBLE.test(msg.trim())) return "trouble";
+  if (TROUBLE_TYPES.includes(a.activity_type) || TROUBLE.test(msg.trim())) {
+    // Trouble from before the current run is history, not a problem. MET-640 kept
+    // showing "Escalated to human: Planning failed: planner finished with a GSD
+    // project but no plan and no question" in amber, at the top of the column, while
+    // a later run had planned successfully and its agent was committing code. Still
+    // listed — the record matters — but as an ordinary entry, not as an alarm.
+    if (since && (a.created_at || "") < since) return "event";
+    return "trouble";
+  }
   if (MILESTONE_TYPES.includes(a.activity_type)) return "event";
   return "noise";
 }
 
 function ticketNotes(activities) {
+  const since = currentRunStart(activities);
   return (activities || [])
-    .map(a => ({ a, kind: classifyActivity(a) }))
+    .map(a => ({ a, kind: classifyActivity(a, since) }))
     .filter(x => x.kind)
     .sort((x, y) => (x.a.created_at || "").localeCompare(y.a.created_at || ""));
 }
@@ -1758,14 +1879,14 @@ function renderConversation(triage, activeId, side = {}) {
   // Between the last answer and the plan landing there is a real wait — planning
   // took 18 minutes on the run this was built against. The thread says so rather
   // than ending on a rule with nothing under it.
-  const planCard = renderPlanCard(side.plan, side.progress, qs, side.planOpen)
+  const planCard = renderPlanCard(side.plan, side.progress, qs, side.planOpen, side.agentProgress)
     || (settledMark ? `<div class="cmsg"><span class="cav">${esc(AVATAR)}</span>
         <div><div class="cbody">${needsConfirm
           ? "That is everything. Confirm below and I will branch, set up a worktree and write the plan."
           : "That is everything. Writing the plan next — it lands here."}</div>
         ${needsConfirm ? "" : `<div class="cwait"><i></i>planning<span class="el">no plan on disk yet</span></div>`}</div></div>` : "");
   const map = (side.planOpen && side.plan)
-    ? `<div class="pmap">${planMap(side.plan, side.progress, triage)}</div>` : "";
+    ? `<div class="pmap">${planMap(side.plan, side.progress, triage, side.agentProgress)}</div>` : "";
 
   // Two flat siblings, not a box inside a box: the shell places the stream in the
   // middle column and the record in the right rail, and each runs its own height.
@@ -1866,6 +1987,20 @@ function wireQuestionActions() {
 // Which question the composer points at. Held outside the render so a poll cannot
 // move it under someone mid-sentence.
 let focusedQuestion = null;
+// Set when a click needs the composer's cursor after the next render — choosing
+// "Other (please specify)" is a request to type, so the box should be ready.
+let pendingComposerFocus = false;
+
+/**
+ * Options that ask for prose instead of standing for an answer.
+ *
+ * Triage always appends "Other (please specify)" so none of its choices is a dead
+ * end. It is a placeholder: binding it verbatim records a decision that says
+ * nothing, and the plan then has to cite it.
+ */
+function isFreeTextOption(option) {
+  return /please specify|^\s*other\s*$/i.test(String(option || ""));
+}
 // Whether the plan card has the full map open under it.
 let planOpen = false;
 
@@ -1875,7 +2010,7 @@ let planOpen = false;
  * Read off progress rather than status, because "in_progress" on the ticket and a
  * step actually running are different claims and only one of them is checkable.
  */
-function runStatus(task, plan, progress, questions = []) {
+function runStatus(task, plan, progress, questions = [], agentProgress = null) {
   const steps = (plan && plan.steps) || [];
   const st = n => (progress && progress.steps && progress.steps[String(n)]) || {};
   if (!steps.length) {
@@ -1885,9 +2020,13 @@ function runStatus(task, plan, progress, questions = []) {
       ? "everything is settled · the planner runs next"
       : "planning starts when the questions are settled";
   }
-  const running = steps.filter(s => st(s.step).status === "in_progress").length;
-  const done = steps.filter(s => st(s.step).status === "completed").length;
-  const stuck = steps.filter(s => ["blocked", "failed"].includes(st(s.step).status)).length;
+  // Same derivation the map and the card use, so the footer cannot disagree with the
+  // picture above it — it said "0 of 22 done" beside a plan whose first steps were
+  // committed.
+  const states = stepStates(plan, progress, agentProgress);
+  const running = steps.filter(s => states[s.step] === "run").length;
+  const done = steps.filter(s => states[s.step] === "done").length;
+  const stuck = steps.filter(s => states[s.step] === "blocked").length;
   if (stuck) return `nothing needs you yet · ${stuck} step${stuck > 1 ? "s" : ""} stopped`;
   if (running) return `nothing needs you · ${done} of ${steps.length} done, ${running} running`;
   if (done === steps.length) return `every step is done · next stop is review`;
@@ -1951,6 +2090,13 @@ function wireConversation(triage, keptScroll = null, openGroups = []) {
   const composer = document.querySelector("[data-active]");
   const activeId = composer?.dataset.active || null;
 
+  // Someone asked to type — put them in the box. Only once, so the next poll does
+  // not steal the cursor back mid-sentence.
+  if (pendingComposerFocus) {
+    pendingComposerFocus = false;
+    say?.focus();
+  }
+
   const noteKind = document.querySelector("[data-note]")?.dataset.note || "";
 
   const send = async (mode) => {
@@ -1972,7 +2118,21 @@ function wireConversation(triage, keptScroll = null, openGroups = []) {
   });
 
   document.querySelectorAll("[data-answer]").forEach(btn =>
-    btn.addEventListener("click", () => recordAnswer(triage, btn.dataset.q, btn.dataset.answer)));
+    btn.addEventListener("click", () => {
+      // "Other (please specify)" is a prompt for an answer, not an answer. Triage
+      // appends it to every multiple_choice question (`bridge.py:5293`), and this
+      // handler bound it like any other option — so choosing it recorded the
+      // literal string "Other (please specify)" as the decision and settled the
+      // question, with no way to say what you actually meant. It has to point the
+      // composer at the question instead and let what you type be the answer.
+      if (isFreeTextOption(btn.dataset.answer)) {
+        focusedQuestion = btn.dataset.q;
+        pendingComposerFocus = true;
+        load({ force: true });
+        return;
+      }
+      recordAnswer(triage, btn.dataset.q, btn.dataset.answer);
+    }));
 
   // Confirm is the only write on this page that causes anything to be created —
   // branch, worktree, tmux session. It says so, and it asks once.
@@ -2185,6 +2345,11 @@ async function load({ force = false } = {}) {
     const planData = await getJson(`/api/tasks/${encodeURIComponent(taskId)}/plan`).catch(() => ({}));
     // Activity history is what dates the tracker; never let it hide the ticket.
     const activities = await getJson(`/api/tasks/${encodeURIComponent(taskId)}/activities`).catch(() => []);
+    // The task-level progress record. In single-PR mode — the default — one agent
+    // works the whole plan and nothing writes per-step status, so `planData.progress`
+    // stays empty and the map read "0 of 22 done" while step 01-01 was committed.
+    // This is the one signal that does move: `step_label` names the plan being worked.
+    const agentProgress = await getJson(`/api/tasks/${encodeURIComponent(taskId)}/progress`).catch(() => ({}));
     const triage = parseTriage(task);
     const qs = (triage?.questions || []);
 
@@ -2219,8 +2384,9 @@ async function load({ force = false } = {}) {
       deliverables: sideData.deliverables,
       plan: planData.plan,
       progress: planData.progress,
+      agentProgress,
       planOpen,
-      status: runStatus(task, planData.plan, planData.progress, qs),
+      status: runStatus(task, planData.plan, planData.progress, qs, agentProgress),
       // How much process the bridge assessed this ticket needs, and why. Shown at
       // the gate so the call can be argued with rather than merely obeyed.
       assessedLevel: triage?.assessed_level || "",

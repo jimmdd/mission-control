@@ -1089,7 +1089,13 @@
                 if (!isDone && task.triage_state) {
                     try {
                         const ts = typeof task.triage_state === 'string' ? JSON.parse(task.triage_state) : task.triage_state;
-                        const open = (ts?.questions || []).filter(q => !q.answer && (q.source === 'planner' || q.round > 1));
+                        // Deferred means consciously set aside and explicitly not
+                        // blocking — the ticket page's own `blockingQuestions` has
+                        // always excluded them, this did not. So a question deferred
+                        // as not-a-question kept the board showing "PLANNING BLOCKED"
+                        // on MET-640 while its agent was executing step 01-02.
+                        const open = (ts?.questions || []).filter(q => !q.answer && !q.deferred
+                            && (q.source === 'planner' || q.round > 1));
                         if (open.length) {
                             followUpBadge = `<a href="/ticket?id=${encodeURIComponent(task.id)}" onclick="event.stopPropagation()" class="badge" title="Planning is blocked on ${open.length} unanswered question(s) — no code should be written until they are settled" style="background: rgba(255,176,32,0.2); color:#ffb020; font-size:9px; padding:1px 6px; font-weight:600; text-decoration:none;">⚠ PLANNING BLOCKED (${open.length})</a>`;
                         }
