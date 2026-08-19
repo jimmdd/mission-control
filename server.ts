@@ -5,6 +5,7 @@ import { McEventBus } from "./src/events.js";
 import { startLivenessReaper } from "./src/reaper.js";
 import { startNotifier } from "./src/notifier.js";
 import { startMessageBus } from "./src/messagebus/index.js";
+import { isInternalSchedulerEnabled, startJobScheduler } from "./src/scheduler.js";
 
 // Config
 const PORT = parseInt(process.env.MC_PORT ?? "18900", 10);
@@ -60,6 +61,14 @@ const stopReaper = REAPER_DISABLED
       intervalMs: Number.parseInt(process.env.MISSION_CONTROL_REAPER_INTERVAL_MS ?? "30000", 10),
       staleHeartbeatMs: Number.parseInt(process.env.MISSION_CONTROL_STALE_HEARTBEAT_MS ?? "300000", 10),
     });
+
+// Drive the periodic Python jobs from here when launchd cannot. Opt-in, because
+// with a healthy launchd these are already running on their plists and two
+// schedulers on linear-sync means duplicate comments written back to Linear.
+// See src/scheduler.ts for the failure this exists for.
+const stopScheduler = isInternalSchedulerEnabled()
+  ? startJobScheduler(db, { logger })
+  : () => {};
 
 // Push notifications for events that need a human (escalations, approval gates,
 // dead/stalled agents) via an optional notify.sh hook and/or a webhook.
@@ -135,6 +144,7 @@ function shutdown(signal: string) {
   stopReaper();
   stopNotifier();
   stopMessageBus();
+  stopScheduler();
   server.close(() => {
     db.close();
     console.log("[mc] stopped");
