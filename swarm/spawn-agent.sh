@@ -178,8 +178,33 @@ WORKTREE_BASE_REF="${BASE_BRANCH:-origin/main}"
 # Remove any leftover worktree/branch from a previous failed attempt so a retry
 # doesn't abort on "already exists".
 git worktree remove --force "$WORKTREE_PATH" 2>/dev/null || true
-git branch -D "$BRANCH_NAME" 2>/dev/null || true
+# ...and any worktree elsewhere that still has this branch checked out. Removing only
+# the path we are about to use was not enough: `git branch -D` refuses while a branch
+# is checked out anywhere, that refusal is swallowed by `|| true`, and the add then
+# dies on "fatal: a branch named 'feature/MET-642-backend' already exists" — which it
+# did for MET-642, on every retry, because a previous attempt left the branch checked
+# out under a different path. Found by ref, since the stale path is not knowable from
+# the one we want.
+git worktree list --porcelain 2>/dev/null \
+  | awk -v ref="refs/heads/$BRANCH_NAME" '
+      /^worktree /{wt = substr($0, 10)}
+      /^branch /{if (substr($0, 8) == ref && wt != "") print wt}' \
+  | while IFS= read -r stale; do
+      [ -n "$stale" ] || continue
+      # The main clone is a worktree too and cannot be removed. If the branch is
+      # checked out there, say so plainly rather than logging a release that git
+      # will refuse — the add below then fails with a reason someone can act on.
+      if [ "$stale" = "$REPO_PATH" ]; then
+        echo "  WARNING: $BRANCH_NAME is checked out in the main clone ($stale)."
+        echo "           Switch it off that branch, or the worktree cannot be created."
+        continue
+      fi
+      echo "  Releasing stale worktree holding $BRANCH_NAME: $stale"
+      git worktree remove --force "$stale" 2>/dev/null || true
+    done
 git worktree prune 2>/dev/null || true
+# Only now can this succeed: nothing has the branch checked out any more.
+git branch -D "$BRANCH_NAME" 2>/dev/null || true
 git worktree add "$WORKTREE_PATH" -b "$BRANCH_NAME" "$WORKTREE_BASE_REF"
 
 # A worktree carries tracked files only, so local `.env` config does not come with
