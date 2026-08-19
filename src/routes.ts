@@ -416,8 +416,20 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 
 const PROGRESS_STATES = ["running", "blocked", "waiting", "delegating", "done"] as const;
 
+/** An unrecognised progress state, or null when the input is acceptable. */
+export function invalidProgressState(body: Record<string, unknown>): string | null {
+  if (typeof body.state !== "string" || (PROGRESS_STATES as readonly string[]).includes(body.state)) {
+    return null;
+  }
+  return body.state;
+}
+
 function sanitizeProgressInput(body: Record<string, unknown>): UpsertProgressInput {
   const out: UpsertProgressInput = {};
+  // A state outside the set used to be dropped in silence, so the write "succeeded"
+  // and left the old state in place. Writing `planning` (a task status, not a
+  // progress state) therefore looked like it had worked while the task stayed
+  // blocked. The route rejects it now; this stays defensive for other callers.
   if (typeof body.state === "string" && (PROGRESS_STATES as readonly string[]).includes(body.state)) {
     out.state = body.state as AgentProgressState;
   }
@@ -1449,6 +1461,14 @@ async function handleApiRequest(
                 const body = await parseBody(req);
                 if (!isRecord(body)) {
                   sendJson(res, 400, { error: "Invalid request body" });
+                  return;
+                }
+                const badState = invalidProgressState(body);
+                if (badState !== null) {
+                  sendJson(res, 400, {
+                    error: `Unknown progress state: ${badState}`,
+                    allowed: PROGRESS_STATES,
+                  });
                   return;
                 }
                 const progress = db.upsertProgress(taskId, sanitizeProgressInput(body));

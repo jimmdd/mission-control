@@ -171,3 +171,31 @@ test("the agent-completion webhook announces a completion only once", async () =
   });
 });
 
+test("an unknown progress state is rejected, not silently dropped", async () => {
+  await withDb(async (db) => {
+    const handler = createHandler(db, SILENT, new McEventBus());
+    const ws = db.listWorkspaces?.()?.[0];
+    const task = db.createTask({ title: "t", workspace_id: ws?.id ?? undefined, status: "in_progress" });
+
+    const post = async (bodyIn) => {
+      const res = mockRes();
+      await handler(mockReq({ url: `/api/tasks/${task.id}/progress`, method: "POST", body: bodyIn }), res);
+      return res;
+    };
+
+    await post({ state: "blocked", blocked_reason: "waiting on a human" });
+    assert.equal(db.getProgress(task.id).state, "blocked");
+
+    // "planning" is a task status, not a progress state. Dropping it left the task
+    // blocked while the write reported success — which cost a debugging cycle.
+    const bad = await post({ state: "planning", phase: "planning" });
+    assert.equal(bad.statusCode, 400, "an unknown state must be refused");
+    assert.match(bad.body, /Unknown progress state: planning/);
+    assert.equal(db.getProgress(task.id).state, "blocked", "and must not be written");
+
+    const good = await post({ state: "running", phase: "planning" });
+    assert.ok(good.statusCode < 400);
+    assert.equal(db.getProgress(task.id).state, "running");
+  });
+});
+

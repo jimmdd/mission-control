@@ -638,6 +638,41 @@
 const $ = (s, el = document) => el.querySelector(s);
 const esc = s => String(s ?? "").replace(/[&<>"']/g, c =>
   ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
+/**
+ * Message text as the writer meant it, not as raw source.
+ *
+ * Everything on this page ran through `esc` and stopped there, so a Linear reply
+ * arrived reading `**Nick** replied on Linear:` with the asterisks intact and its
+ * links as bare URLs — the markdown that Linear, the bridge and the agents all
+ * write was displayed rather than rendered.
+ *
+ * Escaping happens FIRST and the patterns are matched against the escaped text, so
+ * there is no path from message content to markup: a `<script>` in a comment is
+ * already `&lt;script&gt;` before any of this runs. Deliberately just the inline
+ * marks that actually appear here — bold, italic, code, links — because a general
+ * markdown parser is a much larger surface than this page needs.
+ */
+function mdInline(text) {
+  let out = esc(text);
+  // Code first: its contents must not then be read as emphasis.
+  const code = [];
+  out = out.replace(/`([^`\n]+)`/g, (_, body) => {
+    code.push(body);
+    return `\u0000${code.length - 1}\u0000`;
+  });
+  // [label](url) — only http(s), so `javascript:` cannot be smuggled in.
+  out = out.replace(/\[([^\]\n]+)\]\((https?:&#x2F;&#x2F;[^\s)]+|https?:\/\/[^\s)]+)\)/g,
+    (_, label, href) => `<a href="${href}" target="_blank" rel="noopener noreferrer">${label}</a>`);
+  // Bare URLs, so a pasted link is still clickable.
+  out = out.replace(/(^|[\s(])(https?:\/\/[^\s<)]+)/g,
+    (_, pre, href) => `${pre}<a href="${href}" target="_blank" rel="noopener noreferrer">${href}</a>`);
+  out = out.replace(/\*\*([^*\n]+)\*\*/g, "<b>$1</b>");
+  out = out.replace(/(^|[^*])\*([^*\n]+)\*/g, "$1<i>$2</i>");
+  out = out.replace(/\u0000(\d+)\u0000/g, (_, i) => `<code>${code[Number(i)]}</code>`);
+  // Newlines are meaningful in these messages; they were collapsing to one line.
+  return out.replace(/\n/g, "<br>");
+}
+
 // Which ticket the page is showing. Not a constant: the rail switches between
 // tickets in place, so a full document load — refetching the page, the rail and
 // every ticket in it just to change one column — is work nobody asked for.
@@ -1212,9 +1247,6 @@ function renderFound(triage, activities) {
 }
 
 /** Questions raised by the planner, not by triage. Deferred ones no longer block. */
-function followUps(qs) {
-  return qs.filter(q => !q.answer && !q.deferred && (q.source === "planner" || q.round > 1));
-}
 
 /** The conversation about a question, plus the box to add to it. */
 /** Questions raised by the planner, not by triage. Deferred ones no longer block. */
@@ -1320,13 +1352,13 @@ function renderChatEvent(ev) {
 
   if (ev.kind === "said") {
     if (ev.role === "you") {
-      return `<div class="cmsg me" data-for="${esc(ev.q.id)}"><div class="cbody">${esc(ev.text)}</div></div>`;
+      return `<div class="cmsg me" data-for="${esc(ev.q.id)}"><div class="cbody">${mdInline(ev.text)}</div></div>`;
     }
     // Which model said it, so an answer can be weighed rather than just read.
     const by = ev.model ? ` · ${esc(ev.model)}` : "";
     return `<div class="cmsg" data-for="${esc(ev.q.id)}">
       <span class="cav">${esc(AVATAR)}</span>
-      <div><span class="crole">${esc(role)}${by}</span><div class="cbody">${esc(ev.text)}</div></div></div>`;
+      <div><span class="crole">${esc(role)}${by}</span><div class="cbody">${mdInline(ev.text)}</div></div></div>`;
   }
 
   if (ev.kind === "deferred") {
@@ -1348,7 +1380,7 @@ function renderChatEvent(ev) {
   const undo = `<button class="cbtn" data-act="reopen" data-q="${esc(ev.q.id)}">change it</button>`;
   return `<div class="cdec" data-for="${esc(ev.q.id)}">
     <div class="creceipt"><span class="ok">✓</span>Recorded as <b>${tag}</b> — the plan has to cite it${undo}</div>
-    <div class="cbody">${esc(ev.q.answer)}${byAgent ? " · chosen for you" : ""}</div>
+    <div class="cbody">${mdInline(ev.q.answer)}${byAgent ? " · chosen for you" : ""}</div>
     ${reason}</div>`;
 }
 
@@ -1551,9 +1583,9 @@ function renderNotes(activities) {
   const rows = ticketNotes(activities).filter(x => x.kind === "human" || x.kind === "agent");
   if (!rows.length) return "";
   const out = rows.map(({ a, kind }) => kind === "human"
-    ? `<div class="cmsg me"><div class="cbody">${esc(a.message)}</div></div>`
+    ? `<div class="cmsg me"><div class="cbody">${mdInline(a.message)}</div></div>`
     : `<div class="cmsg"><span class="cav">${esc(AVATAR)}</span>
-        <div><span class="crole">agent</span><div class="cbody">${esc(a.message)}</div></div></div>`);
+        <div><span class="crole">agent</span><div class="cbody">${mdInline(a.message)}</div></div></div>`);
   // You said something and nothing has come back. Without this the message just
   // sits there and the page looks broken — the reply is a poll away at best, and
   // on a busy bridge a minute or more.
