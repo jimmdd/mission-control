@@ -25,6 +25,12 @@ fi
 
 BUDGET=${MAX_BUDGET_USD:-}
 TURNS=${MAX_TURNS:-}
+# The budget this attempt actually runs with. Raised when an attempt stops ON the
+# turn limit, because that is direct evidence the ticket needs more turns than the
+# default — retrying the same ceiling just walks into the same wall. Capped so a
+# genuinely looping agent still terminates.
+EFFECTIVE_TURNS=${TURNS:-200}
+TURN_CEILING=${MAX_TURNS_CEILING:-800}
 FALLBACK=${FALLBACK_MODEL:-$CFG_FALLBACK}
 AGENTS_DEF=${AGENTS_JSON:-}
 
@@ -60,7 +66,7 @@ CRITICAL: You are running in FULLY AUTONOMOUS mode. There is NO human to respond
 - COMPLETE ALL STEPS before stopping.'
 
 run_claude() {
-  local cmd=(claude -p --model "$MODEL" --dangerously-skip-permissions --max-turns "${TURNS:-200}")
+  local cmd=(claude -p --model "$MODEL" --dangerously-skip-permissions --max-turns "$EFFECTIVE_TURNS")
 
   [ -n "$BUDGET" ] && cmd+=(--max-budget-usd "$BUDGET")
   [ -n "$FALLBACK" ] && cmd+=(--fallback-model "$FALLBACK")
@@ -111,10 +117,13 @@ exit_code=1
 while [ "$attempt" -lt "$MAX_RETRIES" ]; do
   attempt=$((attempt + 1))
   echo "=== Claude Agent starting: $TASK_NAME | Profile: ${AGENT_PROFILE:-claude} | Model: $MODEL | Attempt: $attempt/$MAX_RETRIES | $(date) ===" | tee -a "$LOG"
-  [ -n "$BUDGET" ] && echo "  Budget: \$${BUDGET} | Turns: ${TURNS:-unlimited} | Fallback: ${FALLBACK:-none}" | tee -a "$LOG"
+  [ -n "$BUDGET" ] && echo "  Budget: \$${BUDGET} | Turns: ${EFFECTIVE_TURNS} | Fallback: ${FALLBACK:-none}" | tee -a "$LOG"
   update_registry "retryCount" "$attempt"
   update_registry "lastAttemptAt" "$(date +%s)000"
   update_registry_json '{"completionSyncedAt": null}'
+
+  # Where this attempt's output starts, so the checks below read only its own log.
+  log_mark=$(wc -c < "$LOG" 2>/dev/null || echo 0)
 
   set +e
   start_heartbeat
@@ -122,6 +131,33 @@ while [ "$attempt" -lt "$MAX_RETRIES" ]; do
   exit_code=$?
   stop_heartbeat
   set -e
+
+  # `claude -p` exits 0 when it stops because it ran out of turns, printing
+  # "Error: Reached max turns (200)" and nothing else. Reading that as success is how
+  # MET-640 was declared "completed successfully" mid-plan: two of its three plans
+  # committed, the third's work left uncommitted, nothing pushed, no PR, no
+  # deliverables — and the ticket moved on to review as though it were finished.
+  #
+  # An interrupted run is not a finished one. Failing it here puts the attempt on the
+  # retry ladder (the repo keeps the commits already made, so a retry resumes rather
+  # than restarts) and, if the ladder runs out, leaves the agent marked `failed`
+  # instead of complete — which is the state a human can act on.
+  attempt_output=$(tail -c "+$((log_mark + 1))" "$LOG" 2>/dev/null || true)
+  if [ "$exit_code" -eq 0 ] && printf '%s' "$attempt_output" | grep -q "Reached max turns"; then
+    echo "  Stopped on the turn limit ($EFFECTIVE_TURNS) with work still in progress — not a completion" | tee -a "$LOG"
+    update_registry "lastError" '"max_turns_reached"'
+    exit_code=75
+    # The ladder escalates the model on retry; escalate the limit that actually
+    # stopped it too. MET-640 needed three plans and 200 turns covered two, so a
+    # same-ceiling retry would have stopped in the same place.
+    if [ "$EFFECTIVE_TURNS" -lt "$TURN_CEILING" ]; then
+      EFFECTIVE_TURNS=$(( EFFECTIVE_TURNS * 2 ))
+      [ "$EFFECTIVE_TURNS" -gt "$TURN_CEILING" ] && EFFECTIVE_TURNS=$TURN_CEILING
+      echo "  Next attempt gets $EFFECTIVE_TURNS turns" | tee -a "$LOG"
+    else
+      echo "  Already at the turn ceiling ($TURN_CEILING) — not raising further" | tee -a "$LOG"
+    fi
+  fi
 
   if [ "$exit_code" -eq 0 ]; then
     echo "=== Claude Agent completed successfully: $TASK_NAME | Attempt: $attempt | $(date) ===" | tee -a "$LOG"
