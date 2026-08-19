@@ -1801,14 +1801,25 @@ async function handleApiRequest(
               ? body.status
               : "review") as TaskStatus;
 
-            if (!["review", "done"].includes(task.status)) {
+            // Whether this call is the one that finished the task. The status update
+            // was already guarded, but the announcement below was not — so every
+            // repeat call re-emitted `task_completed` for a task that had completed
+            // long ago. Anything that re-posts the webhook (a completion sync that
+            // has not recorded `completionSyncedAt`, a retried agent) turned into a
+            // stream of "✅ task_completed" alerts, and on MET-640 they were also
+            // untrue: the run had stopped on its turn limit with work unfinished.
+            const alreadyFinished = ["review", "done"].includes(task.status);
+            if (!alreadyFinished) {
               db.updateTask(task.id, { status: newStatus });
             }
 
             if (TERMINAL_TASK_STATUSES.has(newStatus)) {
               rollUpDelegation(db, task.id, events);
             }
-            events.emit("task_completed", { taskId: task.id, status: newStatus });
+            // Announce a transition, not a re-notification.
+            if (!alreadyFinished) {
+              events.emit("task_completed", { taskId: task.id, status: newStatus });
+            }
 
             db.createEvent({
               type: "task_completed",

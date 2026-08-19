@@ -126,3 +126,48 @@ test("liveness reaper flags an exited agent once and emits an event", async () =
     assert.ok(db.listActivities(task.id).some((a) => a.activity_type === "liveness"));
   });
 });
+
+// ─────────── a completion is announced once, on the transition ───────────
+// The agent-completion webhook guarded the status update but not the event, so
+// every repeat call re-emitted `task_completed`. Anything that re-posts it — a
+// completion sync that has not recorded `completionSyncedAt`, a retried agent —
+// became a stream of "✅ task_completed" alerts on a task that finished long ago.
+
+test("the agent-completion webhook announces a completion only once", async () => {
+  await withDb(async (db) => {
+    const events = new McEventBus();
+    const seen = [];
+    events.subscribe((e) => { if (e.type === "task_completed") seen.push(e); });
+    const handler = createHandler(db, SILENT, events);
+
+    const ws = db.listWorkspaces?.()?.[0];
+    const task = db.createTask({
+      title: "navbar",
+      workspace_id: ws?.id ?? undefined,
+      status: "in_progress",
+    });
+
+    const post = async () => {
+      const res = mockRes();
+      await handler(mockReq({
+        url: "/api/webhooks/agent-completion",
+        method: "POST",
+        body: { task_id: task.id, status: "review", summary: "done" },
+      }), res);
+      return res;
+    };
+
+    const first = await post();
+    assert.ok(first.statusCode < 400, `first call failed: ${first.statusCode} ${first.body}`);
+    assert.equal(seen.length, 1, "the transition into review is announced");
+    assert.equal(db.getTask(task.id).status, "review");
+
+    // The same webhook again: the task is already finished, so there is no new
+    // completion to announce.
+    await post();
+    await post();
+    assert.equal(seen.length, 1, "repeat calls must not re-announce");
+    assert.equal(db.getTask(task.id).status, "review", "and must not churn the status");
+  });
+});
+

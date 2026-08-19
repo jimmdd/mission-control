@@ -1407,6 +1407,17 @@ export class MissionControlDB {
       detail: data.detail !== undefined ? data.detail : existing?.detail ?? null,
     };
 
+    // A reason for being blocked outlives being blocked, unless something clears it.
+    // Writers report forward progress by sending state/phase/step_label and nothing
+    // else, so a stale reason rode along indefinitely: MET-640 sat at
+    // `state: running, phase: execute, step_label: "01-01 Vendor the …"` while still
+    // carrying "Planning failed: planner finished with a GSD project but no plan",
+    // from a run two attempts earlier. The page reads both and believes the reason.
+    // Only blocked and waiting states can hold one.
+    if (data.blocked_reason === undefined && !["blocked", "waiting"].includes(merged.state)) {
+      merged.blocked_reason = null;
+    }
+
     this.db
       .prepare(
         `INSERT INTO agent_progress (task_id, state, phase, step_label, step_index, step_total, blocked_reason, detail, updated_at)

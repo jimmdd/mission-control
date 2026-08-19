@@ -9,6 +9,7 @@
 // a token is pasted into Settings, and a Settings edit takes effect within a tick —
 // no restart, which matters because restarting the server drops in-flight agent work.
 import type { McEvent, McEventBus } from "../events.js";
+import { createAlertThrottle } from "../alert-throttle.js";
 import { createLocalApiClient } from "./api.js";
 import type { ApiClient } from "./commands.js";
 import {
@@ -157,7 +158,9 @@ export function startMessageBus(events: McEventBus, opts: MessageBusOptions): ()
   const now = opts.now ?? (() => Date.now());
   const log = opts.logger;
   const api = createLocalApiClient(opts.apiBaseUrl);
-  const lastSent = new Map<string, number>();
+  // Content-aware with backoff, shared with notifier.ts so both channels throttle
+  // one condition the same way.
+  const throttle = createAlertThrottle({ cooldownMs, now });
 
   const send = async (surface: SurfaceKind, cfg: BusConfig, target: string, text: string): Promise<void> => {
     const override = opts.senders?.[surface];
@@ -199,23 +202,16 @@ export function startMessageBus(events: McEventBus, opts: MessageBusOptions): ()
 
     for (const { surface, targets, scope } of surfaces) {
       if (!shouldSend(event.type, scope)) continue;
-      const key = `${surface}:${event.type}:${taskId}`;
-      const at = now();
-      const previous = lastSent.get(key);
-      if (previous !== undefined && at - previous < cooldownMs) continue;
-      lastSent.set(key, at);
       text ??= formatEvent(event, context);
+      // Keyed on the rendered text, so a condition repeating every tick backs off
+      // instead of arriving once a minute forever. See src/alert-throttle.ts.
+      const key = `${surface}:${event.type}:${taskId}`;
+      if (!throttle.allow(key, text)) continue;
       for (const target of targets) {
         void send(surface, cfg, target, text).catch((err) =>
           log?.error(`[messagebus] ${surface} send failed: ${err instanceof Error ? err.message : String(err)}`),
         );
       }
-    }
-
-    // Keep the dedup ledger from growing without bound in a long-lived process.
-    if (lastSent.size > 500) {
-      const cutoff = now() - cooldownMs * 10;
-      for (const [key, at] of lastSent) if (at < cutoff) lastSent.delete(key);
     }
   };
 

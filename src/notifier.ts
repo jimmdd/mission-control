@@ -1,5 +1,6 @@
 import { execFile } from "node:child_process";
 import { existsSync } from "node:fs";
+import { createAlertThrottle } from "./alert-throttle.js";
 import type { McEvent, McEventBus } from "./events.js";
 
 export interface Notification {
@@ -93,20 +94,17 @@ function buildDefaultSinks(opts: NotifierOptions): NotificationSink[] {
 // rate-limited per (type, task) so a flapping condition cannot spam.
 export function startNotifier(events: McEventBus, opts: NotifierOptions = {}): () => void {
   const types = opts.types ?? HUMAN_RELEVANT;
-  const cooldownMs = opts.cooldownMs ?? 60_000;
   const sinks = opts.sinks ?? buildDefaultSinks(opts);
-  const lastSent = new Map<string, number>();
+  // Content-aware, with backoff: repeating the same alert every tick is what made
+  // a single stuck ticket unreadable. See src/alert-throttle.ts.
+  const throttle = createAlertThrottle({ cooldownMs: opts.cooldownMs ?? 60_000 });
 
   const unsubscribe = events.subscribe((event: McEvent) => {
     if (!types.has(event.type)) return;
 
     const key = `${event.type}:${typeof event.taskId === "string" ? event.taskId : ""}`;
-    const now = Date.now();
-    const prev = lastSent.get(key);
-    if (prev !== undefined && now - prev < cooldownMs) return;
-    lastSent.set(key, now);
-
     const { title, message } = describe(event);
+    if (!throttle.allow(key, message)) return;
     const notification: Notification = {
       type: event.type,
       taskId: typeof event.taskId === "string" ? event.taskId : undefined,
