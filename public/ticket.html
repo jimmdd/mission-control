@@ -63,7 +63,7 @@
   #root { height: 100dvh; }
   .shell {
     display: grid; height: 100dvh;
-    grid-template-columns: 206px minmax(0, 1fr) 296px;
+    grid-template-columns: 232px minmax(0, 1fr) 296px;
     grid-template-rows: 46px auto minmax(0, 1fr);
   }
   .topnav    { grid-column: 1 / 4; grid-row: 1; border-bottom: 1px solid var(--line-soft); }
@@ -132,9 +132,13 @@
   .rt:hover { background: rgba(255,255,255,.03); }
   .rt.on { background: rgba(255,255,255,.055); border-left-color: var(--cyan); }
   .rt.on.build { border-left-color: var(--green); }
-  .rt-top { display: flex; gap: 8px; font-family: var(--mono); font-size: 9.5px; color: var(--ink-3); margin-bottom: 5px; }
+  .rt-top {
+    display: flex; gap: 8px; align-items: baseline;
+    font-family: var(--mono); font-size: 9.5px; color: var(--ink-3); margin-bottom: 5px;
+  }
+  .rt-top .rt-ref { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   .rt.on .rt-top { color: var(--ink-3); }
-  .rt-badge { margin-left: auto; }
+  .rt-badge { margin-left: auto; white-space: nowrap; flex: none; }
   .rt-badge.q { color: var(--amber); }
   .rt-badge.now { color: var(--cyan); }
   .rt-badge.ok { color: var(--green); }
@@ -973,7 +977,7 @@ function renderRail(tasks, current, triage, planData = {}) {
           ? `<div class="rt-live">${bars}<div class="who"><span class="dim">updated ${esc(since(t.updated_at) || "just now")} ago</span></div></div>`
           : "";
         return `<a class="rt ${on ? (building ? "on build" : "on") : ""}" href="/ticket?id=${encodeURIComponent(t.id)}">
-          <div class="rt-top">${esc(t.external_id || t.id.slice(0, 8))}${badge}</div>
+          <div class="rt-top"><span class="rt-ref">${esc(taskRef(t))}</span>${badge}</div>
           <div class="rt-title">${esc(t.title || "")}</div>${live}</a>`;
       }).join("");
     return `<div class="rgroup">${esc(g.label.toUpperCase())} · ${g.tasks.length}</div>
@@ -1035,6 +1039,26 @@ function stepStates(plan, progress, agentProgress) {
       : "";
   }
   return out;
+}
+
+/**
+ * The short reference to print on a card.
+ *
+ * `external_id` was preferred, but for a Linear-sourced ticket that field holds
+ * Linear's own UUID — 36 characters of it — so the card showed a full uuid wrapped
+ * over two lines and squeezed the "1 q" badge into a vertical stack of single
+ * characters. The human reference ("MET-597") is already in the title, so this
+ * prefers a real ticket key where one exists and otherwise shows eight characters
+ * of the internal id, which is enough to match against a log line.
+ */
+function taskRef(t) {
+  const key = /\[([A-Z]{2,6}-\d+)\]/.exec(t.title || "");
+  if (key) return key[1];
+  const ext = String(t.external_id || "");
+  // A uuid is not a reference anybody reads; anything shorter probably is one.
+  const isUuid = /^[0-9a-f]{8}-[0-9a-f]{4}-/i.test(ext);
+  if (ext && !isUuid && ext.length <= 16) return ext;
+  return String(t.id || "").slice(0, 8);
 }
 
 function planMap(plan, progress, triage, agentProgress) {
