@@ -200,6 +200,29 @@ def plan_step_text(provider: str = "", mode: str = "", brief: str = "") -> str:
         f"  skip ahead to writing code when that happens.\n"
         f"- Then run `{plan_command(mode=mode, brief=brief)}`."
     )
+    # The output contract, said out loud. It used to be implicit in the slash
+    # commands — but they are Claude Code skills, and they do not resolve under
+    # `claude -p`. An agent that cannot run them still has a full mission
+    # description, so it improvises: on MET-640 it wrote three genuinely good plans
+    # as `01-01-vendor-navbar-slice.md` with `### T1 —` headings, reported success
+    # honestly, and MC reported "finished with a GSD project but no plan and no
+    # question" — because `gsd_plan_import` builds the step map by parsing
+    # `<task>` blocks out of `*PLAN.md`. Both were telling the truth about
+    # different contracts. Naming it here is what makes the run conform either way.
+    text += (
+        "\n\nWhichever route you take, the plan has to land in the form Mission Control\n"
+        "reads. It builds the ticket's step map by parsing the files themselves, not by\n"
+        "taking your word that a plan exists:\n"
+        f"- One file per wave under `{planning_dir_name()}/`, named `NN-NN-PLAN.md` — e.g.\n"
+        f"  `{planning_dir_name()}/phases/phase-1-<slug>/01-01-PLAN.md`. The name must end in\n"
+        "  `-PLAN.md`; a descriptive slug in its place is not read.\n"
+        "- YAML frontmatter carrying `phase:` and `wave:` (an integer). Files sharing a\n"
+        "  wave are the ones meant to run together; tasks inside one file are sequential.\n"
+        "- Every task as a `<task type=\"...\">` block containing `<name>`, `<files>` and\n"
+        "  `<verify>`. Markdown headings such as `### T1 — …` are not tasks and import as\n"
+        "  nothing, however well written they are.\n"
+        "\nA plan file with no `<task>` blocks counts as no plan at all."
+    )
     if brief:
         # Said plainly as well as passed as a flag. The decisions are already in
         # this prompt as prose; the file is what makes them binding, and an agent

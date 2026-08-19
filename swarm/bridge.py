@@ -228,9 +228,18 @@ def mc_log_activity(task_id: str, activity_type: str, message: str, agent_id: Op
 
 def mc_set_progress(task_id: str, state: str = "", phase: str = "", step_label: str = "",
                     step_index: Optional[int] = None, step_total: Optional[int] = None,
-                    blocked_reason: str = ""):
+                    blocked_reason: Optional[str] = None):
     """Best-effort structured progress report. Never raises into the bridge loop —
-    progress is telemetry, not control flow."""
+    progress is telemetry, not control flow.
+
+    `blocked_reason=""` clears a previous reason; omitting it leaves the stored one
+    alone. It defaulted to `""` and was sent only when truthy, so there was no way to
+    say "this is no longer blocked" — two callers already tried to clear it that way
+    and silently did nothing, leaving a superseded failure stamped on a task that had
+    moved on. The API distinguishes the two correctly (`db.ts:1406` writes an empty
+    string and only falls back to the existing value when the field is absent); this
+    is the side that could not express it.
+    """
     body: dict = {}
     if state:
         body["state"] = state
@@ -242,7 +251,7 @@ def mc_set_progress(task_id: str, state: str = "", phase: str = "", step_label: 
         body["step_index"] = step_index
     if step_total is not None:
         body["step_total"] = step_total
-    if blocked_reason:
+    if blocked_reason is not None:
         body["blocked_reason"] = blocked_reason
     if not body:
         return
@@ -3082,19 +3091,47 @@ def release_planning_worktree(task_id: str, repo_path: Path):
     logging.info(f"  Released planning worktree for {task_id[:8]}")
 
 
+def _planning_worktree_path(task: dict, repo_path: Path) -> Path:
+    """Where a task's planning worktree lives. Pure — creates and destroys nothing.
+
+    Split out so a caller that only needs to *name* the directory cannot end up
+    rebuilding it as a side effect. See `_planning_worktree`.
+    """
+    return Path(str(repo_path).rstrip("/")).parent / "worktrees" / f"planning-{task['id'][:8]}"
+
+
 def _planning_worktree(task: dict, repo_path: Path) -> Optional[Path]:
     """A worktree at the base branch to plan in, with the environment a build needs.
 
     Reused across attempts: `.planning/` written by a previous run is what lets the
     init stage be skipped, so a retry costs only the plan.
+
+    Only safe to call when no planning job is in flight for this task — it can delete
+    the directory, and a running planner is writing into it. `run_staged_planning`
+    enforces that ordering; the guard below is in case a future caller forgets.
     """
     base = _resolve_base_branch(task, repo_path)
-    path = Path(str(repo_path).rstrip("/")).parent / "worktrees" / f"planning-{task['id'][:8]}"
+    path = _planning_worktree_path(task, repo_path)
     if path.is_dir():
         # A directory is not proof of a usable worktree: it survives a `git worktree
         # remove` that half-failed, and it goes stale as the base branch moves. Keep
         # it only while git still owns it and it is not behind the base.
         if _worktree_is_current(repo_path, path, base):
+            return path
+        # Never rebuild under a live planner. A rebuild is `rmtree`, and the planning
+        # subprocess writes its whole output — `.planning/`, the roadmap, every phase
+        # plan — into this directory over minutes. Deleting it mid-run destroyed a
+        # plan that had been written and validated, and the verdict, computed by
+        # looking for that plan on disk, then reported "planner finished with a GSD
+        # project but no plan and no question": MC blaming the planner for output MC
+        # had just deleted. Any commit landing on the base branch during a run was
+        # enough to trigger it, so on an active repo this was routine.
+        job = _planning_job_path(task["id"])
+        live = _read_planning_job(job)
+        if live is not None and (live.get("state") == "running" or live.get("verdict")):
+            logging.info(
+                f"  Planning worktree at {path} is stale, but a planning job is in "
+                f"flight — leaving it alone; it rebuilds once the verdict is collected")
             return path
         logging.info(f"  Planning worktree at {path} is stale — rebuilding it")
         subprocess.run(["git", "worktree", "remove", "--force", str(path)],
@@ -3190,6 +3227,17 @@ def _start_planning_job(task: dict, worktree: Path, job: Path):
         payload["pid"] = proc.pid
         job.write_text(json.dumps(payload))
         logging.info(f"  Started planning for {task_id[:8]} as pid {proc.pid}")
+        # Clear the last attempt's verdict. A failed run leaves the task `blocked`
+        # with its reason (`route_plan_stage_outcome`), and nothing used to take that
+        # off when the next run started — so a ticket being actively planned still
+        # read as blocked, citing a failure from a run that had already been
+        # superseded. The ticket page believed it, which is how a healthy run looked
+        # stuck. Planning again is the claim that the old reason no longer holds.
+        # `running`, not `planning`: the progress states are a fixed set
+        # (`routes.ts:417` — running | blocked | waiting | delegating | done) and an
+        # unrecognised one is dropped without complaint, which would leave the task
+        # blocked. `phase` is where "planning" belongs.
+        mc_set_progress(task_id, state="running", phase="planning", blocked_reason="")
         mc_log_activity(task_id, "updated",
                         "Planning started as its own run — the plan is written before "
                         "any agent is spawned.")
@@ -3224,18 +3272,25 @@ def stage_planning(task: dict, repos: List[dict]) -> Tuple[bool, str]:
                                          "reason": "no repo path"})
         return True, ""
 
-    worktree = _planning_worktree(task, repo_path)
-    if not worktree:
-        record_step_attempt(task_id, 0, {"outcome": "plan_stage_skipped", "attempt": 0,
-                                         "reason": "no planning worktree"})
-        return True, ""
-
+    # Read the job before touching the worktree. Resolving the worktree can rebuild
+    # it, and rebuilding is destructive — so it must only happen when we are actually
+    # about to start a run, never on a cycle that is just polling a live one.
     job = _planning_job_path(task_id)
     state = _read_planning_job(job)
 
     if state is None:
+        worktree = _planning_worktree(task, repo_path)
+        if not worktree:
+            record_step_attempt(task_id, 0, {"outcome": "plan_stage_skipped", "attempt": 0,
+                                             "reason": "no planning worktree"})
+            return True, ""
         _start_planning_job(task, worktree, job)
         return False, ""
+
+    # A job exists, so the worktree that matters is the one the job was actually
+    # given — recorded in its payload when it started. Taken from there rather than
+    # recomputed, so the plan is carried from where the planner really wrote it.
+    worktree = state.get("worktree") or str(_planning_worktree_path(task, repo_path))
 
     if state.get("state") == "running":
         if _pid_alive(state.get("pid")):
@@ -3433,10 +3488,25 @@ def _dispatch_next_steps(task: dict, plan: dict, repos: List[dict]):
                 break
 
         if not target_repo and repos:
-            r = repos[0]
+            # The step named a repo that is not on the task. Falling straight through
+            # to repos[0] made that a silent choice, so a step meant for one repo got
+            # dispatched into whichever happened to be listed first — an agent working
+            # the wrong tree with nothing in the log saying so. Prefer the configured
+            # default (MC_DEFAULT_REPO, "backend" unless set) when it is one of the
+            # task's repos, and say out loud that a guess was made either way.
+            default_name = (os.environ.get("MC_DEFAULT_REPO", "") or "backend").strip()
+            r = next((x for x in repos if x["repo"] == default_name), repos[0])
             target_repo = find_repo_path(r["project"], r["repo"])
             target_project = r["project"]
             target_repo_name = r["repo"]
+            if step_repo_str:
+                on_task = ", ".join(x["repo"] for x in repos)
+                logging.warning(
+                    f"  Step {step_num} asked for repo '{step_repo_str}', which is not on this task "
+                    f"({on_task}) — falling back to '{target_repo_name}'"
+                )
+            else:
+                logging.info(f"  Step {step_num} named no repo — using '{target_repo_name}'")
 
         if not target_repo:
             logging.warning(f"  No repo found for step {step_num} — skipping")
@@ -5303,7 +5373,15 @@ def process_planning_tasks():
             logging.info(f"  Posted repo-selection follow-up for {task_id[:8]}")
             continue
 
-        mc_log_activity(task_id, "updated", f"All questions answered — dispatching for {len(repos)} repo(s)")
+        # Once, not once a minute. Planning runs for many minutes and the poll loop
+        # keeps arriving back here, so this re-announced "dispatching" every tick:
+        # all ten of the newest ten activities on MET-640 were this one sentence,
+        # which pushed the ticket's real history out of view and left a failure from
+        # half an hour earlier as the last thing anybody could see. A planning job
+        # already in flight means nothing new is happening on this tick.
+        if _read_planning_job(_planning_job_path(task_id)) is None:
+            mc_log_activity(task_id, "updated",
+                            f"All questions answered — dispatching for {len(repos)} repo(s)")
         task_type = task.get("task_type", "implementation")
         use_planner = os.environ.get("ENABLE_PLANNER", "1") == "1"
         if use_planner and task_type == "implementation":
@@ -5841,6 +5919,38 @@ def process_review_tasks():
         _auto_review_monitor(task)
 
 
+def _activity_epoch(act: dict) -> Optional[float]:
+    """An activity's timestamp as epoch seconds, or None if unreadable.
+
+    Compared numerically rather than as strings: the API stamps `...771Z` while
+    Python's `isoformat()` writes `+00:00`, and `"Z" > "+"` lexicographically — so a
+    string comparison between the two gets the order backwards.
+    """
+    raw = str(act.get("created_at") or "")
+    if not raw:
+        return None
+    try:
+        return datetime.fromisoformat(raw.replace("Z", "+00:00")).timestamp()
+    except ValueError:
+        return None
+
+
+def _escalation_floor(task_id: str) -> Optional[float]:
+    """When the agent currently working this task started, in epoch seconds.
+
+    None when no agent is registered as running — then there is no run to be newer
+    than, and every unhandled escalation is fair game.
+    """
+    entry = _find_agent_registry_entry(task_id) or {}
+    if entry.get("status") != "running":
+        return None
+    started = entry.get("startedAt")
+    if not isinstance(started, (int, float)):
+        return None
+    # The registry stamps milliseconds.
+    return float(started) / 1000.0
+
+
 def process_human_escalations():
     """Detect needs_human activities on in-progress tasks and move them back to planning."""
     in_progress = fetch_tasks_by_status("in_progress")
@@ -5851,11 +5961,24 @@ def process_human_escalations():
         task_id = task["id"]
         activities = fetch_task_activities(task_id)
 
+        # An escalation raised before the current agent started cannot be about it.
+        # The scan had no such floor, so it re-detected superseded failures forever:
+        # MET-640's "planner finished with a GSD project but no plan and no question"
+        # had already been replaced by a successful plan, an imported step map and a
+        # spawned agent — and the moment the task went in_progress this found the old
+        # activity, escalated it, and pulled the ticket back to planning underneath
+        # its own running agent. It also re-sent the alert, which is why the same
+        # failure kept arriving after it had been fixed.
+        agent_started = _escalation_floor(task_id)
+
         # Find unhandled needs_human activities
         has_escalation = False
         escalation_msg = ""
         for act in activities:
             if act.get("activity_type") == "needs_human":
+                if agent_started is not None and _activity_epoch(act) is not None \
+                        and _activity_epoch(act) < agent_started:
+                    continue
                 # Check if we already handled this (look for our ack)
                 ack_exists = any(
                     a.get("activity_type") == "updated"

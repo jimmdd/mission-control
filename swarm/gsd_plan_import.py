@@ -67,7 +67,11 @@ def parse_plan_file(path: Path) -> Dict:
         title = (name.group(1) if name else "").strip()
         # "Task 3: Do the thing" — the number is the position, which the step
         # already carries. Keeping it would print it twice on every node.
-        title = re.sub(r"^task\s*\d+\s*[:.\-–]\s*", "", title, flags=re.I)
+        # Also the `T1 — …` form, and em dashes. The number is the step's position,
+        # which the map already prints beside the node, so leaving it in shows it
+        # twice. This covered `Task 3:` only — real plans write `T1 — Copy the slice`
+        # and an em dash, so every node on MET-640's map read "T1 — …".
+        title = re.sub(r"^(?:task|t)\s*\d+\s*[:.\-–—]\s*", "", title, flags=re.I)
         verify = VERIFY.search(block)
         tasks.append({
             "title": title or "(untitled task)",
@@ -75,7 +79,15 @@ def parse_plan_file(path: Path) -> Dict:
             "files": _files_of(block),
             "verify_command": (verify.group(1).strip().splitlines() or [""])[0] if verify else "",
         })
-    return {"wave": wave, "phase": front.get("phase", ""), "tasks": tasks, "source": str(path)}
+    # The plan's own id ("01-02"). Frontmatter first, file name as the fallback —
+    # it is what `progress.step_label` names when the agent reports which plan it is
+    # on, and therefore the only thing that ties a live agent to these steps.
+    plan_id = (front.get("plan") or "").strip()
+    if not plan_id:
+        m = re.match(r"(\d+-\d+)", path.name)
+        plan_id = m.group(1) if m else ""
+    return {"wave": wave, "phase": front.get("phase", ""), "plan": plan_id,
+            "tasks": tasks, "source": str(path)}
 
 
 def to_mc_plan(plan_files: List[Path]) -> Optional[Dict]:
@@ -124,6 +136,9 @@ def to_mc_plan(plan_files: List[Path]) -> Optional[Dict]:
                     "verify_command": t["verify_command"],
                     "category": t["kind"],
                     "source": plan["source"],
+                    # Which plan file this task came from, so the board can mark a
+                    # whole plan's steps done once the agent moves past it.
+                    "plan": plan.get("plan", ""),
                     # Filled in below, from the final grouping. Deriving it here
                     # would contradict the widening: the positional order is our
                     # conservative assumption, not an edge GSD wrote, and treating

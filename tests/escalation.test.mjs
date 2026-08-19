@@ -381,3 +381,56 @@ print(json.dumps([s["step"] for s in bridge._enforce_gates({"id": "t"}, {}, [], 
 `);
   assert.deepEqual(r, [1, 2]);
 });
+
+// ─────────── a superseded escalation is not an escalation ───────────
+// process_human_escalations scanned every needs_human activity ever recorded and
+// re-raised any without an ack. So a failure that had since been fixed kept coming
+// back: MET-640's "planner finished with a GSD project but no plan and no question"
+// was replaced by a successful plan, an imported step map and a spawned agent — and
+// the moment the task went in_progress the old activity was re-detected, pulled the
+// ticket back to planning underneath its own running agent, and re-sent the alert.
+
+test("an escalation older than the running agent is ignored", () => {
+  const r = python(`
+import json, bridge
+bridge._find_agent_registry_entry = lambda t: {"status": "running", "startedAt": 1787100371000}
+floor = bridge._escalation_floor("t1")
+# 00:38:13Z is before the agent's 00:46:11Z start.
+old = bridge._activity_epoch({"created_at": "2026-08-19T00:38:13.500Z"})
+new = bridge._activity_epoch({"created_at": "2026-08-19T00:50:00.000Z"})
+print(json.dumps({"floor": floor, "old_suppressed": old < floor, "new_kept": new > floor}))
+`);
+  assert.equal(r.old_suppressed, true, "the superseded failure must not re-escalate");
+  assert.equal(r.new_kept, true, "a genuine escalation from this run still counts");
+});
+
+test("with no agent running there is no floor, so nothing is suppressed", () => {
+  const r = python(`
+import json, bridge
+bridge._find_agent_registry_entry = lambda t: None
+a = bridge._escalation_floor("t1")
+bridge._find_agent_registry_entry = lambda t: {"status": "done", "startedAt": 1787100371000}
+b = bridge._escalation_floor("t1")
+print(json.dumps({"none": a, "finished": b}))
+`);
+  assert.equal(r.none, null);
+  assert.equal(r.finished, null, "a finished agent is not a floor for a new escalation");
+});
+
+test("timestamps are compared numerically, not as strings", () => {
+  // The API stamps "...Z" and Python's isoformat writes "+00:00"; "Z" > "+", so a
+  // string comparison between the two orders them backwards.
+  const r = python(`
+import json, bridge
+print(json.dumps({
+    "z": bridge._activity_epoch({"created_at": "2026-08-19T00:38:13.500Z"}),
+    "offset": bridge._activity_epoch({"created_at": "2026-08-19T00:38:13.500+00:00"}),
+    "junk": bridge._activity_epoch({"created_at": "nonsense"}),
+    "missing": bridge._activity_epoch({}),
+}))
+`);
+  assert.equal(r.z, r.offset, "both stampings mean the same instant");
+  assert.equal(r.junk, null, "an unreadable stamp must not throw");
+  assert.equal(r.missing, null);
+});
+

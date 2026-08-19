@@ -84,16 +84,42 @@ def question_protocol() -> str:
     )
 
 
+# The runtimes this stage can actually drive, as CLI processes. Deliberately not the
+# same vocabulary as planner.py's `*_provider` keys (anthropic | ollama | gemini |
+# openrouter), which name HTTP APIs for its plain question-and-answer calls. This
+# stage needs a tool-using agent with write access to a worktree, so an API provider
+# is not a substitute for it.
+DRIVABLE_PLANNING_PROVIDERS = {"claude", "claude-cli", "codex", "codex-cli"}
+
+
 def _planning_provider() -> str:
-    """Which runtime plans. `planning_provider` in swarm-config.json; claude by default."""
+    """Which runtime plans. `planning_provider` in swarm-config.json; claude by default.
+
+    Validated rather than trusted, because `planning_provider` lives in the same
+    config block as planner.py's API-provider keys and reads like one of them. A
+    sweep that set every `*_provider` to "gemini" caught this one too, and because
+    an unknown value only failed deep inside `build_command`, every planning tick
+    raised `unknown planning provider: 'gemini'` — which surfaced as a "needs you"
+    alert per tick rather than as a config error anybody could act on.
+    """
     raw = (os.environ.get("MC_PLANNING_PROVIDER") or "").strip()
-    if raw:
-        return raw
-    try:
-        from planner import _get_config
-        return str(_get_config().get("planning_provider", "") or "claude")
-    except Exception:
+    if not raw:
+        try:
+            from planner import _get_config
+            raw = str(_get_config().get("planning_provider", "") or "").strip()
+        except Exception:
+            raw = ""
+    if not raw:
         return "claude"
+    if raw.lower() not in DRIVABLE_PLANNING_PROVIDERS:
+        logging.warning(
+            f"planning_provider={raw!r} is not a runtime this stage can drive "
+            f"({', '.join(sorted(DRIVABLE_PLANNING_PROVIDERS))}) — planning with 'claude' instead. "
+            f"If you meant an API provider, that is a different setting: planner.py's "
+            f"routing/verification/scope/explore/synthesize/gapcheck providers."
+        )
+        return "claude"
+    return raw.lower()
 
 
 def _planning_effort() -> str:
@@ -485,6 +511,39 @@ def _run_cli(worktree: str, prompt: str, transcript: Path, timeout: int,
             "duration_s": round(time.time() - started, 1), "failed": None}
 
 
+# Things a CLI says when it refused the invocation itself rather than the work. Each
+# of these can accompany exit status 0, so the exit code cannot be trusted to
+# distinguish them from an agent that ran and produced nothing.
+_CLI_REFUSALS = [
+    (r"unrecognized_model|issue with the selected model",
+     "the CLI rejected the configured model — check planning_model"),
+    (r"Invalid API key|authentication_error|Please run .?/?login",
+     "the CLI is not authenticated — log the planning runtime in"),
+    (r"rate_limit_error|429 Too Many Requests",
+     "the CLI was rate limited"),
+    (r"credit balance is too low|insufficient_quota",
+     "the planning runtime is out of credit"),
+]
+
+
+def _cli_refusal(transcript: Path) -> str:
+    """A specific reason from the transcript, when the CLI refused the invocation.
+
+    Scans the raw transcript rather than the extracted assistant text: the most
+    useful line on the run this was written for was a bare
+    `[claude-code:unrecognized_model]` marker, which is not assistant output and
+    does not survive `text_from_stream`.
+    """
+    try:
+        raw = transcript.read_text(errors="replace")
+    except OSError:
+        return ""
+    for pattern, explanation in _CLI_REFUSALS:
+        if re.search(pattern, raw, re.IGNORECASE):
+            return f"{explanation} (see {transcript.name})"
+    return ""
+
+
 def run_init_stage(worktree: str, task: Dict, context: str = "", provider: str = "",
                    timeout: int = INIT_TIMEOUT, model: str = "") -> Dict:
     """Create the GSD project. Verdict is `initialised` or `prerequisite_missing`.
@@ -514,7 +573,12 @@ def run_init_stage(worktree: str, task: Dict, context: str = "", provider: str =
     elif run["timed_out"]:
         outcome, reason = "prerequisite_missing", f"project setup timed out after {timeout}s"
     else:
+        # A CLI that rejects its arguments can still exit 0 with a polite sentence,
+        # which lands here looking like an agent that just declined to do the work.
+        # Name the real cause when the transcript admits to one.
+        refusal = _cli_refusal(transcript)
         outcome, reason = "prerequisite_missing", (
+            refusal or
             f"project setup finished without creating "
             f"{gsd_backend.planning_dir_name()}/ ({detail})")
 
@@ -583,6 +647,49 @@ def _configured_model(role: str) -> str:
         return ""
 
 
+# Model families that demonstrably belong to somebody else, per CLI. A blocklist
+# rather than a whitelist on purpose: `planning_model` is meant to be a setting, so
+# an unfamiliar name has to reach the CLI and be allowed to work. Whitelisting the
+# families we happen to know today would silently drop the next model to ship, and
+# would already drop legitimate gateway ids like `us.anthropic.claude-*`.
+_FOREIGN_MODELS = {
+    "claude": ("gemini", "gpt", "codex", "llama", "mistral", "deepseek", "qwen",
+               "grok", "command", "gemma", "phi"),
+    "codex": ("claude", "anthropic", "gemini", "llama", "mistral", "deepseek",
+              "qwen", "grok", "command", "gemma", "phi"),
+}
+
+
+def _model_for_provider(provider: str, model: str) -> str:
+    """Drop a model that demonstrably belongs to a different provider.
+
+    The same config sweep that set `planning_provider` to an API provider also set
+    `planning_model` to that provider's model, and this stage passed it straight
+    through to `--model`. So the claude CLI was launched with
+    `--model gemini-2.5-flash`, answered "[claude-code:unrecognized_model] … it may
+    not exist or you may not have access to it" — and *exited 0*. A zero exit with
+    no `.planning/` is indistinguishable from an agent that simply declined, so the
+    stage reported "project setup finished without creating .planning/" every tick
+    and the real cause never appeared anywhere.
+
+    Only names matching a known foreign family are dropped; anything else is passed
+    through, because the CLI is the authority on what it accepts and this setting
+    exists to be honoured. Returning "" accepts the CLI's own default.
+    """
+    if not model:
+        return ""
+    foreign = _FOREIGN_MODELS.get(provider.replace("-cli", ""), ())
+    name = model.lower()
+    if not any(fam in name for fam in foreign):
+        return model
+    logging.warning(
+        f"planning_model={model!r} is not a {provider!r} model — ignoring it and using "
+        f"the {provider} CLI default. A model name only means something to the provider "
+        f"it belongs to; set planning_model to a {provider} model to pin one."
+    )
+    return ""
+
+
 def plan_in_worktree(worktree: str, task: Dict, context: str = "",
                      model: str = "", provider: str = "", mode: str = "",
                      questions: Optional[List[Dict]] = None) -> Dict:
@@ -600,6 +707,9 @@ def plan_in_worktree(worktree: str, task: Dict, context: str = "",
     model = model or _configured_model("planning")
 
     provider = provider or _planning_provider()
+    # Resolve the model against the provider actually being driven, not the one the
+    # config named — `_planning_provider()` may have fallen back.
+    model = _model_for_provider(provider, model)
     init = run_init_stage(worktree, task, context, provider=provider, model=model)
     stages.append(init)
     if init["outcome"] != "initialised":

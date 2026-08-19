@@ -470,7 +470,10 @@ bridge.route_plan_stage_outcome = lambda task, v: v["outcome"] == "plan_written"
 
 out = {}
 for outcome in ("plan_written", "questions_raised", "error"):
+    # A real job payload always carries the worktree it was given (set by
+    # _start_planning_job), and that is where the plan is carried from.
     bridge._read_planning_job = (lambda o: lambda path: {"state": "done",
+        "worktree": "/tmp/planning-x",
         "verdict": {"outcome": o, "stages": []}})(outcome)
     out[outcome] = bridge.stage_planning({"id": "t1"}, [{"project": "p", "repo": "r"}])
 print(json.dumps(out))
@@ -581,6 +584,92 @@ bridge._start_planning_job = explode
   assert.deepEqual(r.metrics, [], "waiting is not an outcome worth recording");
 });
 
+// ─────────── a live planner's worktree is not the daemon's to delete ───────────
+// stage_planning resolved the worktree at the top of every tick, and resolving it
+// rebuilds it (`git worktree remove --force` + rmtree) whenever the base branch has
+// moved on. So a commit landing on the base during a planning run deleted the
+// directory the planner was writing into. The plan had been written and validated;
+// the verdict, computed by looking for it on disk, reported "planner finished with a
+// GSD project but no plan and no question" — MC blaming the planner for output MC
+// had just deleted. Routine on an active repo.
+
+test("a tick polling a live job never resolves the worktree", () => {
+  const r = asyncStage(`
+def explode(task, repo_path):
+    raise AssertionError("resolving the worktree can rebuild it — not under a live planner")
+bridge._planning_worktree = explode
+bridge._read_planning_job = lambda path: {"state": "running", "pid": 4242, "worktree": "/tmp/planning-x"}
+bridge._pid_alive = lambda pid: True
+`);
+  assert.equal(r.proceed, false, "still waiting on the planner");
+});
+
+test("a tick collecting a verdict never resolves the worktree", () => {
+  const r = asyncStage(`
+import pathlib
+def explode(task, repo_path):
+    raise AssertionError("the plan is on disk — a rebuild here destroys it")
+bridge._planning_worktree = explode
+bridge._planning_job_path = lambda tid: pathlib.Path("/tmp/nonexistent-job.json")
+bridge._read_planning_job = lambda path: {"state": "done", "worktree": "/tmp/planning-x",
+    "verdict": {"outcome": "plan_written", "stages": []}}
+`);
+  assert.equal(r.routed, "plan_written");
+  assert.equal(r.carry, "/tmp/planning-x", "and the plan is carried from where it was written");
+});
+
+test("a stale worktree is left alone while a job is in flight", () => {
+  const r = python(`
+import json, pathlib, tempfile, bridge
+calls = {"touched": False}
+# A directory that really exists and is judged stale — exactly the trap.
+wt = tempfile.mkdtemp()
+bridge._planning_worktree_path = lambda task, repo_path: pathlib.Path(wt)
+bridge._resolve_base_branch = lambda task, repo: "main"
+bridge._worktree_is_current = lambda repo, path, base: False
+bridge._read_planning_job = lambda path: {"state": "running", "pid": 4242}
+bridge._planning_job_path = lambda tid: pathlib.Path("/tmp/whatever.json")
+def no_touch(*a, **k):
+    calls["touched"] = True
+    raise AssertionError("must not remove a worktree a planner is writing into")
+bridge.subprocess.run = no_touch
+bridge.shutil.rmtree = no_touch
+kept = bridge._planning_worktree({"id": "t1"}, pathlib.Path("/tmp/repo"))
+print(json.dumps({"touched": calls["touched"], "kept": str(kept) == wt}))
+`);
+  assert.equal(r.touched, false, "nothing was deleted or re-added");
+  assert.equal(r.kept, true, "and the existing worktree is reused as-is");
+});
+
+test("a stale worktree IS rebuilt once no job is in flight", () => {
+  const r = python(`
+import json, pathlib, tempfile, bridge
+calls = {"git": [], "rmtree": 0}
+wt = tempfile.mkdtemp()
+bridge._planning_worktree_path = lambda task, repo_path: pathlib.Path(wt)
+bridge._resolve_base_branch = lambda task, repo: "main"
+bridge._worktree_is_current = lambda repo, path, base: False
+# No job: the invalidation is real and must still happen.
+bridge._read_planning_job = lambda path: None
+bridge._planning_job_path = lambda tid: pathlib.Path("/tmp/whatever.json")
+bridge.seed_worktree_env = lambda a, b: {}
+bridge.describe = lambda r: ""
+class Done:
+    returncode = 0
+    stdout = ""
+def fake_run(cmd, **k):
+    calls["git"].append(" ".join(cmd[:3]))
+    return Done()
+bridge.subprocess.run = fake_run
+bridge.shutil.rmtree = lambda *a, **k: calls.__setitem__("rmtree", calls["rmtree"] + 1)
+bridge._planning_worktree({"id": "t1"}, pathlib.Path("/tmp/repo"))
+print(json.dumps(calls))
+`);
+  assert.ok(r.git.some((c) => c.includes("worktree remove")), "the stale one is removed");
+  assert.equal(r.rmtree, 1);
+  assert.ok(r.git.some((c) => c.includes("worktree add")), "and a fresh one is created");
+});
+
 test("a job that died with its daemon fails open rather than wedging the task", () => {
   const r = asyncStage(`
 import pathlib
@@ -596,6 +685,7 @@ test("a finished job is routed and its plan handed on", () => {
   const r = asyncStage(`
 import pathlib
 bridge._read_planning_job = lambda path: {"state": "done",
+    "worktree": "/tmp/planning-x",
     "verdict": {"outcome": "plan_written", "stages": [{"stage": "plan", "outcome": "plan_written",
                                                        "duration_s": 12, "reason": "ok"}]}}
 bridge._planning_job_path = lambda tid: pathlib.Path("/tmp/nonexistent-job.json")
@@ -628,6 +718,27 @@ print(json.dumps(json.load(open(job))))
 // can follow one — so a runtime without the skill is handed the document instead.
 // The verdict never reads the transcript to decide whether a plan exists, so a plan
 // written by codex counts exactly as much as one written by claude.
+
+test("the prompt states the output contract, not just the commands to run", () => {
+  // The slash commands are Claude Code skills and do not resolve under `claude -p`.
+  // An agent that cannot run them still plans — it just picks its own file names and
+  // task markup, which imports as nothing. MET-640 wrote three good plans as
+  // `01-01-vendor-navbar-slice.md` with `### T1 —` headings and was reported as
+  // "a GSD project but no plan and no question". The contract has to be in the prompt
+  // so the run conforms whether the skills resolve or not.
+  const r = python(`
+import json, gsd_backend
+print(json.dumps({"text": gsd_backend.plan_step_text(mode="mvp", brief="/tmp/B.md")}))
+`);
+  const t = r.text;
+  assert.match(t, /-PLAN\.md/, "the file name pattern the importer reads");
+  assert.match(t, /<task/, "tasks are blocks, not headings");
+  assert.match(t, /<name>/);
+  assert.match(t, /<verify>/);
+  assert.match(t, /wave:/, "the field that decides what runs together");
+  // And it must say what does NOT count, since that is the mistake actually made.
+  assert.match(t, /### T1|headings/, "names the improvised form as not a plan");
+});
 
 test("each runtime gets an invocation it can actually run", () => {
   const r = python(`
