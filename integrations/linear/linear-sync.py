@@ -444,10 +444,16 @@ def sync_status_back(mc_task: dict, issue_id: str):
           }
         }
         """
-        linear_query(mutation, {
+        result = linear_query(mutation, {
             "issueId": issue_id,
             "body": f"✅ Completed by {LINEAR_BOT_NAME} agent swarm.\n\nMission Control task: `{mc_task['id']}`",
         })
+        # `linear_query` returns {} when the interaction level suppressed the write.
+        # Logging success regardless said "Synced completion back to Linear" for a
+        # comment that was never sent — which reads, in a log being used to check
+        # that posting has stopped, as posting that has not stopped.
+        if not result:
+            return
         logging.info(f"  Synced completion back to Linear for {issue_id[:8]}")
     except Exception as e:
         logging.warning(f"  Failed to sync back to Linear: {e}")
@@ -587,6 +593,46 @@ GITPROJECTS_DIR = Path.home() / "GitProjects"
 
 def _is_bot_comment(body: str) -> bool:
     return any(marker in body for marker in BOT_COMMENT_MARKERS)
+
+
+# Boilerplate third-party integrations post into a Linear thread. It is written by
+# an app rather than said by anybody, so it is not part of the conversation MC is
+# mirroring — the Slack notice in particular is posted under the name of whoever
+# linked the channel, which made it read as that person talking.
+INTEGRATION_NOISE_PATTERNS = [
+    r"This comment thread is synced to a corresponding \[thread in Slack\]",
+    r"All replies are displayed in both locations",
+    r"^\s*Created issue \[[A-Z]+-\d+\]",
+]
+
+
+def _is_integration_comment(comment: dict) -> bool:
+    """Whether a Linear comment was written by an app rather than a person.
+
+    Two signals, because neither alone is enough. `botActor` is what Linear sets
+    for anything posted through an integration or OAuth app, and those comments
+    carry `user: null` — which is also why they used to crash the sync and then
+    show up in the ticket thread as "**Unknown** replied on Linear". The pattern
+    list catches integration boilerplate that is attributed to a real user, like
+    the Slack thread-sync notice.
+    """
+    if comment.get("botActor"):
+        return True
+    if comment.get("user") is None:
+        return True
+    body = comment.get("body", "") or ""
+    return any(re.search(p, body, re.IGNORECASE | re.MULTILINE) for p in INTEGRATION_NOISE_PATTERNS)
+
+
+def _comment_author(comment: dict, default: str = "Unknown") -> str:
+    """Author name for a Linear comment.
+
+    Linear returns `user: null` for comments made by integrations/bots and for
+    users who have since been removed from the workspace, so `.get("user", {})`
+    is not safe here — the key exists, it is just None.
+    """
+    user = comment.get("user") or {}
+    return user.get("name") or default
 
 
 def _has_mention_tag(body: str) -> bool:
@@ -964,7 +1010,7 @@ def answer_question(issue_id: str, comment: dict, issue_title: str,
         return False
 
     question = comment.get("body", "")
-    author = comment.get("user", {}).get("name", "someone")
+    author = _comment_author(comment, "someone")
     comment_id = comment.get("id", "")
     thread_parent_id = _resolve_thread_parent(comment) or ""
     logging.info(f"  Answering {LINEAR_MENTION_TAG} question from {author}: {question[:80]}...")
@@ -1044,6 +1090,7 @@ def fetch_issue_comments(issue_id: str) -> List[dict]:
             body
             createdAt
             user { name }
+            botActor { name type }
             parent { id }
           }
         }
@@ -1067,7 +1114,7 @@ def _fetch_triage_state(mc_task_id: str) -> Optional[dict]:
 
 
 def _add_comment_to_triage(mc_task_id: str, triage_state: dict, comment: dict) -> bool:
-    author = comment.get("user", {}).get("name", "Unknown")
+    author = _comment_author(comment)
     body = comment.get("body", "")
     comment_id = comment["id"]
     created_at = comment.get("createdAt", datetime.now(timezone.utc).isoformat())
@@ -1506,7 +1553,10 @@ def sync_comments_to_mc(issue: dict, mc_task: dict, state: dict) -> int:
         comment_id = comment["id"]
         body = comment.get("body", "")
 
-        if _is_bot_comment(body) or comment_id in question_comment_ids:
+        # `_is_bot_comment` only recognises MC's own comments. An app's comment is
+        # not conversation either: mirrored into the thread it reads as a person
+        # speaking, and it is never something to answer or triage against.
+        if _is_bot_comment(body) or _is_integration_comment(comment) or comment_id in question_comment_ids:
             synced_comment_ids.add(comment_id)
             continue
 
@@ -1514,7 +1564,7 @@ def sync_comments_to_mc(issue: dict, mc_task: dict, state: dict) -> int:
         if parent_id and parent_id in question_comment_ids:
             q = question_comment_ids[parent_id]
             if not q.get("answer"):
-                author = comment.get("user", {}).get("name", "Unknown")
+                author = _comment_author(comment)
                 q_label = q.get("id", "?")
                 logging.info(f"  Thread reply from {author} on question {q_label} — auto-answering")
                 try:
@@ -1553,11 +1603,11 @@ def sync_comments_to_mc(issue: dict, mc_task: dict, state: dict) -> int:
                 if unanswered:
                     retry_answered = _try_auto_answer_triage(mc_task_id, triage_state, comment)
                     if retry_answered:
-                        logging.info(f"  Retried auto-answer: matched {retry_answered} question(s) from {comment.get('user',{}).get('name','?')}")
+                        logging.info(f"  Retried auto-answer: matched {retry_answered} question(s) from {_comment_author(comment, '?')}")
                         triage_state = _fetch_triage_state(mc_task_id)
             continue
 
-        author = comment.get("user", {}).get("name", "Unknown")
+        author = _comment_author(comment)
         message = f"**{author}** replied on Linear:\n\n{body}"
 
         if triage_state and isinstance(triage_state, dict) and "questions" in triage_state:
