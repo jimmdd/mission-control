@@ -143,6 +143,33 @@ while [ "$attempt" -lt "$MAX_RETRIES" ]; do
   # than restarts) and, if the ladder runs out, leaves the agent marked `failed`
   # instead of complete — which is the state a human can act on.
   attempt_output=$(tail -c "+$((log_mark + 1))" "$LOG" 2>/dev/null || true)
+
+  # The same exit-0 trap, for the account rather than the run. MET-642 printed
+  # "You've hit your session limit · resets 3pm" and exited 0 after seven seconds,
+  # and was logged "completed successfully" with an empty worktree, no commits, no
+  # PR — the ticket then moved to review as finished work.
+  #
+  # Unlike the turn limit this is not worth retrying: it resets at a wall-clock time,
+  # so three attempts thirty seconds apart just spend the ladder and log the same
+  # sentence three times. Fail out immediately with a reason naming the reset.
+  if [ "$exit_code" -eq 0 ] && printf '%s' "$attempt_output" \
+       | grep -qiE "hit your (session|usage) limit|usage limit reached|rate limit reached"; then
+    limit_line=$(printf '%s' "$attempt_output" | grep -iEm1 "hit your (session|usage) limit|usage limit reached|rate limit reached" | tr -d '\r')
+    echo "  Stopped by the account limit, not by finishing: ${limit_line}" | tee -a "$LOG"
+    echo "  Not retrying — this resets on a clock, so a retry now would fail the same way." | tee -a "$LOG"
+    update_registry "lastError" '"session_limit_reached"'
+    update_registry "status" '"failed"'
+    update_registry "failedAt" "$(date +%s)000"
+    if [ -n "$MC_TASK_ID" ]; then
+      msg="Agent stopped: ${limit_line:-account limit reached}. No code was written. Re-dispatch after it resets."
+      curl -s -X POST "$MC_URL/api/tasks/$MC_TASK_ID/activities" \
+        -H "Content-Type: application/json" \
+        -d "{\"activity_type\":\"needs_human\",\"message\":$(printf '%s' "$msg" | jq -Rs .)}" \
+        > /dev/null 2>&1 || true
+    fi
+    exit 75
+  fi
+
   if [ "$exit_code" -eq 0 ] && printf '%s' "$attempt_output" | grep -q "Reached max turns"; then
     echo "  Stopped on the turn limit ($EFFECTIVE_TURNS) with work still in progress — not a completion" | tee -a "$LOG"
     update_registry "lastError" '"max_turns_reached"'
