@@ -431,9 +431,35 @@ def create_mc_task(issue: dict) -> Optional[dict]:
         return None
 
 
-def sync_status_back(mc_task: dict, issue_id: str):
-    """When MC task is done, add a comment to Linear issue."""
+def sync_status_back(mc_task: dict, issue_id: str, state: dict):
+    """When an MC task is done, say so on the Linear issue — once.
+
+    This posted on every cycle for as long as the task stayed done, with nothing
+    recording that it had already spoken. At a five-minute cadence that is 288
+    identical "Completed by … agent swarm" comments a day per finished ticket:
+    MET-634 collected 163, MET-475 563, and MET-403 reached Linear's hard ceiling of
+    2000 comments, after which every further write on that issue failed outright.
+
+    Tracked in the sync state, the same way `triage_finalized` is. When there is no
+    record — every ticket already spammed, and any ticket whose state file was lost —
+    the issue's existing comments are read once and an existing completion note counts
+    as already posted, so cleaning up the backlog cannot start it over.
+    """
     if mc_task.get("status") != "done":
+        return
+
+    posted = state.setdefault("completion_posted", {})
+    if posted.get(issue_id):
+        return
+
+    marker = f"Completed by {LINEAR_BOT_NAME}"
+    try:
+        if any(marker in (c.get("body") or "") for c in fetch_issue_comments(issue_id)):
+            posted[issue_id] = True
+            logging.info(f"  Completion already noted on {issue_id[:8]} — not posting again")
+            return
+    except Exception:
+        # An unreadable thread must not become a reason to post a duplicate.
         return
 
     try:
@@ -454,6 +480,7 @@ def sync_status_back(mc_task: dict, issue_id: str):
         # that posting has stopped, as posting that has not stopped.
         if not result:
             return
+        posted[issue_id] = True
         logging.info(f"  Synced completion back to Linear for {issue_id[:8]}")
     except Exception as e:
         logging.warning(f"  Failed to sync back to Linear: {e}")
@@ -1770,7 +1797,7 @@ def sync():
             if _check_description_changed(issue, mc_task, state):
                 skipped += 1
                 continue
-            sync_status_back(mc_task, issue_id)
+            sync_status_back(mc_task, issue_id, state)
             comments_synced += sync_comments_to_mc(issue, mc_task, state)
             skipped += 1
             continue
