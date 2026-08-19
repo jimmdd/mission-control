@@ -108,17 +108,27 @@ test("the two gates guard different things, so they judge differently", () => {
   assert.equal(assess({ ...SIMPLE, stage: "plan", triage_ready: false }).level, "careful");
 });
 
-test("only `simple` skips the gate, and an explicit choice outranks the rules", () => {
+test("Auto runs it; the gate is something you ask for", () => {
+  // Auto is the default and is written "", so there is no way to tell "unset" from
+  // "the operator chose Auto" — they are the same state. It was labelled Auto while
+  // meaning "let the assessment decide", so a ticket showing Auto still stopped
+  // whenever the rules said normal or careful, waiting on a confirmation nobody
+  // knew was owed. Auto now means run it.
+  assert.equal(needsConfirm("normal"), false, "Auto does not stop to ask");
+  assert.equal(needsConfirm("careful"), false, "not even when the rules are cautious");
+  assert.equal(needsConfirm("careful", "auto"), false, "the same choice, stated");
   assert.equal(needsConfirm("simple"), false);
-  assert.equal(needsConfirm("normal"), true);
-  assert.equal(needsConfirm("careful"), true);
-  // Both directions: someone who marks a ticket careful gets the gate anyway, and
-  // someone who marks it simple has said so deliberately, on a ticket, visibly —
-  // which is the whole difference from the silent auto-dispatch this replaces.
+
+  // The assessment is advisory now, so the gate has to be requested — per ticket,
+  // where the choice is visible, which is still the difference from silent dispatch.
+  assert.equal(needsConfirm("simple", "normal"), true, "asked for the gate");
   assert.equal(needsConfirm("simple", "careful"), true);
-  assert.equal(needsConfirm("careful", "simple"), false);
-  // A typo must not silently disable the gate.
+  assert.equal(needsConfirm("normal", "careful"), true);
+  assert.equal(needsConfirm("careful", "simple"), false, "waived it deliberately");
+
+  // A typo is not a choice: it must not read as either level.
   assert.equal(needsConfirm("careful", "sImPle!"), true);
+  assert.equal(needsConfirm("careful", "carefull"), true);
 });
 
 test("settled questions still allow simple, and say so", () => {

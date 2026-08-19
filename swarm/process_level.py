@@ -35,6 +35,10 @@ import re
 from typing import Dict, List, Optional
 
 LEVELS = ("simple", "normal", "careful")
+# Choices that mean "do not stop to ask me". "" is Auto, the default; `simple` is the
+# same intent stated explicitly. Neither is an assessment outcome, which is why Auto
+# is not in LEVELS.
+AUTONOMOUS = ("", "auto", "simple")
 
 # Paths whose change is not undone by reverting a commit. A migration that has run
 # has already altered something the git history does not describe.
@@ -140,5 +144,15 @@ def requires_confirmation(level: str, override: str = "") -> bool:
     ticket, where it is visible — which is the whole difference from the silent
     auto-dispatch this replaces.
     """
+    # Auto — the default, written as "" — means run it. It read as "autonomous" in
+    # the UI while meaning "let the assessment decide", so a ticket showing Auto
+    # still stopped at the gate whenever the rules said normal or careful, and the
+    # thread sat waiting on a confirmation nobody knew was owed.
+    #
+    # The assessment still runs and its reasons are still recorded and shown; it no
+    # longer blocks. Anyone wanting the gate asks for it per ticket with Normal or
+    # Careful, which is a visible choice on the ticket rather than a silent default.
+    if override in AUTONOMOUS:
+        return False
     effective = override if override in LEVELS else level
     return effective != "simple"
