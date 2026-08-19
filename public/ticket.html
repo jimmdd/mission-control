@@ -1339,9 +1339,21 @@ function renderChatEvent(ev) {
     const escapePill = settled ? "" : `<button class="cpill esc" data-act="delegate" data-q="${esc(ev.q.id)}">You decide</button>`;
     const rec = ev.q.recommended
       ? `<div class="crec">research suggests <b>${esc(ev.q.recommended)}</b> — still your call</div>` : "";
-    const owed = (ev.q.thread || []).length && ev.q.thread[ev.q.thread.length - 1].role === "you";
-    const waiting = owed
-      ? `<div class="cwait"><i></i>working it out<span class="el">read-only</span></div>` : "";
+    // "Working it out" is a claim about right now, so it expires. The last word
+    // being yours was the only condition, which meant any question the agent never
+    // came back to pulsed away indefinitely — and a synced Linear comment landing in
+    // the thread as something you said started that clock without anything actually
+    // running. The bridge polls once a minute; past a few of those, nothing is being
+    // worked out and the honest line says when it was last said instead.
+    const last = (ev.q.thread || [])[(ev.q.thread || []).length - 1];
+    const owed = !!last && last.role === "you";
+    const saidAt = owed ? Date.parse(last.at || "") : NaN;
+    const fresh = owed && Number.isFinite(saidAt) && (Date.now() - saidAt) < 5 * 60_000;
+    const waiting = !owed ? ""
+      : fresh
+        ? `<div class="cwait"><i></i>working it out<span class="el">read-only</span></div>`
+        : `<div class="cwait"><span class="el">no reply yet${
+            Number.isFinite(saidAt) ? ` · asked ${esc(shortTime(last.at))}` : ""}</span></div>`;
     return `<div class="cmsg" data-for="${esc(ev.q.id)}">
       <span class="cav">${esc(AVATAR)}</span>
       <div>${ev.role === "planner" ? `<span class="crole">${esc(role)}</span>` : ""}

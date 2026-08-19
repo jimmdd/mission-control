@@ -630,6 +630,14 @@ INTEGRATION_NOISE_PATTERNS = [
     r"This comment thread is synced to a corresponding \[thread in Slack\]",
     r"All replies are displayed in both locations",
     r"^\s*Created issue \[[A-Z]+-\d+\]",
+    # Anything addressed to the Linear agent. These are instructions TO the
+    # integration — "@Linear create a ticket for @jinglun to …" is the comment that
+    # made the ticket exist, not a remark about it — so mirroring them into the
+    # thread showed the ticket's own origin back as a reply, attributed to whoever
+    # typed it. Worse, arriving as the newest thing said by a person, it left the
+    # question card waiting on an answer that had already been given by the ticket
+    # existing at all: "working it out", forever.
+    r"@\s*Linear\b",
 ]
 
 
