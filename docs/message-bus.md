@@ -96,6 +96,28 @@ Linear key and title, and every ref the bot suggests can be typed back verbatim.
 | `/done <ref> [reason]` | close a ticket |
 | `/agents` | roster and status |
 
+### Direct one-shot work (Telegram only)
+
+`/run <claude|codex> <repo> <instruction>` launches the named agent directly in an
+isolated worktree. For example:
+
+```
+/run codex backend fix the flaky mobile-wallet reconnect integration test
+/run claude staging-dashboard review PR 740 and report critical findings
+```
+
+The repository must be in `REPO_WATCH_REPOS`. The command creates no Mission Control or
+Linear ticket, acknowledges immediately, and a detached worker posts the final agent
+report back to the originating Telegram chat. Delivery retries reuse the same job id,
+so one Telegram update cannot launch duplicate work.
+
+This command is outside the transport-agnostic command table on purpose. It is private-
+Telegram-DM-only: Telegram groups, Slack DMs, and Slack channels have no route to the
+runner; Slack `/help` does not advertise it, and a Slack `/run` receives the ordinary
+unknown-command response. The coding-agent child process
+also has Telegram, Slack, Mission Control, and Linear control credentials removed from
+its environment; only the detached reporter retains the Telegram token.
+
 `/answer` is one verb on purpose: in chat you type your input and expect the system to
 know where it belongs. The status decides — that mirrors the dashboard's note box exactly.
 
@@ -207,6 +229,9 @@ the internet. Socket Mode is an outbound WebSocket — no tunnel, no inbound por
 - **Allowlist is the authorization.** Telegram chat ids / Slack user ids on the list can
   command; Slack channel behavior additionally requires an exact channel id allowlist.
   Everything else is dropped silently (a reply would confirm the bot exists).
+- **Direct execution is private-Telegram-DM-only.** `/run` is gated before the shared command layer,
+  is limited to the repository execution allowlist and the exact `claude|codex` agent
+  set, and reports only to its originating Telegram chat. Slack cannot invoke it.
 - Inbound only runs at `interaction=command`; `notify` is outbound-only, `off` is silent.
 - Slack commands are accepted from DMs. Public channels have the narrower ticket-thread
   contract above: an allowlisted user's mention creates or addresses a ticket, and only

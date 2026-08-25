@@ -13,6 +13,8 @@ export interface IncomingChatMessage {
   surface: SurfaceKind;
   /** Where a reply goes: Telegram chat id, or Slack DM channel/user id. */
   target: string;
+  /** Telegram supplies this so privileged commands can fail closed outside a private DM. */
+  chatType?: "private" | "group" | "supergroup" | "channel";
   /** Who sent it, for attribution in the activity trail. */
   userId: string;
   userName?: string;

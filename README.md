@@ -223,13 +223,18 @@ Enable it in ⚙ SETTINGS: paste a bot token, add your chat id (Telegram) or use
 runs until a token is present, and Settings edits apply live — no restart.
 
 `/status`, `/create`, `/tasks`, `/search`, `/task`, `/answer`, `/confirm`, `/checkpoints`,
-`/approve`, `/deny`, `/followup`, `/preview`, `/hold`, `/unhold`, `/done`, `/agents`. Tickets are named by
+`/approve`, `/deny`, `/followup`, `/preview`, `/hold`, `/unhold`, `/done`, `/agents`. Telegram also has
+`/run <claude|codex> <repo> <instruction>` for an independent, no-ticket one-shot job. Tickets are named by
 Linear key throughout — typed loosely (`met 639`) or searched by keyword. Full setup,
 scopes, event routing, and the security model:
 [`docs/message-bus.md`](docs/message-bus.md).
 
 Slack inbound uses **Socket Mode** (an outbound WebSocket) because Mission Control binds
 to `127.0.0.1` and must not be exposed to the internet.
+
+The one-shot `/run` command is intentionally unavailable on Slack and in Telegram groups.
+It is recognized only after a private Telegram message has passed the chat allowlist, and
+completion is sent back only to that originating Telegram chat.
 
 In an explicitly allowlisted public channel, mention the bot with a request to create a
 ticket. Mission Control replies in a thread, links that thread to the ticket, and routes

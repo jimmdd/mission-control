@@ -48,7 +48,7 @@ interface TelegramUpdate {
   message?: {
     message_id?: number;
     text?: string;
-    chat?: { id?: number | string };
+    chat?: { id?: number | string; type?: "private" | "group" | "supergroup" | "channel" };
     from?: { id?: number | string; username?: string; is_bot?: boolean };
   };
 }
@@ -126,6 +126,7 @@ export function startTelegramListener(opts: TelegramListenerOptions): () => void
           await opts.onMessage({
             surface: "telegram",
             target: String(chatId),
+            chatType: message?.chat?.type,
             userId: message?.from?.id === undefined ? "" : String(message.from.id),
             userName: message?.from?.username,
             messageId: String(update.update_id),

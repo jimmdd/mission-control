@@ -24,6 +24,7 @@ import {
 import { executeCommand } from "./commands.js";
 import { askAssistant, createLlmCall, type AssistantOutcome, type LlmCall } from "./assistant.js";
 import { formatEvent, shouldSend, type TaskContext } from "./format.js";
+import { createOneShotRunner, parseOneShotCommand, type OneShotRunner } from "./one-shot.js";
 import { taskLabel, taskTitle } from "./ref.js";
 import { createSlackChannelHandler } from "./slack-channel.js";
 import { sendSlackMessage, sendSlackThreadMessage, startSlackListener } from "./slack.js";
@@ -81,6 +82,8 @@ export interface InboundHandlerDeps {
     /** Live gate, re-read per message, so it can be switched off without a restart. */
     enabled: (surface: SurfaceKind) => boolean;
   };
+  /** Telegram-only direct execution. It is intentionally absent from the shared command layer. */
+  oneShot?: OneShotRunner;
 }
 
 // A write the assistant proposed, waiting on /yes. Keyed per chat, single-slot: a second
@@ -116,8 +119,25 @@ export function makeInboundHandler(deps: InboundHandlerDeps): (message: Incoming
     let reply: string | null;
 
     try {
+      // This branch is the security boundary: `/run` is recognized only after the
+      // transport has positively identified an allowlisted Telegram message. Slack
+      // never reaches the runner and the transport-agnostic command set does not know
+      // this command exists.
+      const oneShot = message.surface === "telegram" && message.chatType === "private" && deps.oneShot
+        ? parseOneShotCommand(text)
+        : null;
+      if (oneShot) {
+        const started = await deps.oneShot!.start({
+          ...oneShot,
+          target: message.target,
+          actor,
+          requestId: ctx.requestId,
+        });
+        reply = started.alreadyStarted
+          ? `${started.jobId} is already running or finished; its report will arrive here.`
+          : `Started ${started.jobId}: ${started.agent} on ${started.repo}. I’ll report back here when it finishes.`;
       // Confirmation of a proposed write, before anything else can claim the message.
-      if (spoken === "yes" || spoken === "no") {
+      } else if (spoken === "yes" || spoken === "no") {
         const held = pending.get(chatKey);
         pending.delete(chatKey);
         if (!held || Date.now() - held.at > PENDING_TTL_MS) {
@@ -150,6 +170,9 @@ export function makeInboundHandler(deps: InboundHandlerDeps): (message: Incoming
           // no assistant is left alone, so the bot is not a participant in every message.
           reply = "Unknown command. /help lists what I can do.";
         }
+      }
+      if (message.surface === "telegram" && message.chatType === "private" && /^\/(?:help|start)(?:@[\w_]+)?(?:\s|$)/i.test(text)) {
+        reply = `${reply ?? ""}\n\nTelegram only\n/run <claude|codex> <repo> <instruction> — run a no-ticket sidecar job and report back here`;
       }
     } catch (err) {
       reply = `Command failed: ${err instanceof Error ? err.message : String(err)}`;
@@ -231,6 +254,7 @@ export function startMessageBus(events: McEventBus, opts: MessageBusOptions): ()
   // Natural-language fallback. Telegram only — Slack is commands-only by request, so a
   // stray Slack DM neither spends a generation call nor proposes a write.
   const llm = opts.llm ?? createLlmCall(log);
+  const oneShot = createOneShotRunner({ mcHome: opts.mcHome, api });
   const handleMessage = makeInboundHandler({
     api,
     logger: log,
@@ -239,6 +263,7 @@ export function startMessageBus(events: McEventBus, opts: MessageBusOptions): ()
       ask: (question) => askAssistant(question, { api, llm, logger: log }),
       enabled: (surface) => surface === "telegram" && readBusConfig(opts.mcHome).telegram.assistant,
     },
+    oneShot,
   });
   const handleSlackChannelMessage = createSlackChannelHandler({
     api,

@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
@@ -11,6 +11,8 @@ import { linearKey, normalizeRef, takeRef, taskLabel, taskTitle } from "../src/m
 import { executeCommand, parseCommand, resolveTask } from "../src/messagebus/commands.ts";
 import { startMessageBus, makeInboundHandler } from "../src/messagebus/index.ts";
 import { askAssistant, boardSnapshot } from "../src/messagebus/assistant.ts";
+import { createOneShotRunner, parseOneShotCommand, resolveOneShotRepo } from "../src/messagebus/one-shot.ts";
+import { agentEnvironment } from "../src/messagebus/one-shot-worker.ts";
 
 const SILENT = { info() {}, error() {} };
 
@@ -529,6 +531,177 @@ test("inbound: a command is run and answered on the same surface and target", as
   assert.equal(replies.length, 2, "the bot does not answer non-commands");
   await handle({ surface: "telegram", target: "555", userId: "42", text: "/nope" });
   assert.match(replies[2][2], /Unknown command/);
+});
+
+test("Telegram can launch a no-ticket one-shot with an explicitly selected agent", async () => {
+  const api = stubApi(TASKS);
+  const replies = [];
+  const starts = [];
+  const handle = makeInboundHandler({
+    api,
+    logger: SILENT,
+    send: async (surface, target, text) => { replies.push([surface, target, text]); },
+    oneShot: {
+      start: async (request) => {
+        starts.push(request);
+        return { jobId: "once-123", agent: request.agent, repo: request.repo };
+      },
+    },
+  });
+
+  await handle({
+    surface: "telegram",
+    target: "555",
+    chatType: "private",
+    userId: "42",
+    userName: "jinglun",
+    messageId: "991",
+    text: "/run codex backend fix the mobile wallet integration test",
+  });
+
+  assert.deepEqual(starts, [{
+    agent: "codex",
+    repo: "backend",
+    instruction: "fix the mobile wallet integration test",
+    target: "555",
+    actor: "telegram:@jinglun",
+    requestId: "telegram:555:991",
+  }]);
+  assert.equal(api.calls.some((call) => call[0] === "POST"), false, "one-shot work must not create or update a ticket");
+  assert.deepEqual(replies[0].slice(0, 2), ["telegram", "555"]);
+  assert.match(replies[0][2], /Started once-123/);
+  assert.match(replies[0][2], /report back here/);
+});
+
+test("Slack has no one-shot route or help entry", async () => {
+  const starts = [];
+  const replies = [];
+  const handle = makeInboundHandler({
+    api: stubApi(TASKS),
+    logger: SILENT,
+    send: async (surface, target, text) => { replies.push([surface, target, text]); },
+    oneShot: {
+      start: async (request) => {
+        starts.push(request);
+        return { jobId: "unsafe", agent: request.agent, repo: request.repo };
+      },
+    },
+  });
+
+  await handle({ surface: "slack", target: "D1", userId: "U1", text: "/run claude backend do anything" });
+  assert.equal(starts.length, 0, "Slack must never reach the one-shot runner");
+  assert.match(replies[0][2], /Unknown command/);
+
+  await handle({ surface: "slack", target: "D1", userId: "U1", text: "/help" });
+  assert.doesNotMatch(replies[1][2], /\/run/);
+
+  await handle({ surface: "telegram", target: "555", chatType: "private", userId: "42", text: "/help" });
+  assert.match(replies[2][2], /Telegram only/);
+  assert.match(replies[2][2], /\/run <claude\|codex>/);
+
+  await handle({ surface: "telegram", target: "group-1", chatType: "group", userId: "42", text: "/run codex backend do anything" });
+  assert.equal(starts.length, 0, "Telegram group chats must not reach the one-shot runner");
+  assert.match(replies[3][2], /Unknown command/);
+});
+
+test("one-shot parsing is explicit and repo resolution stays inside the execution allowlist", async () => {
+  assert.deepEqual(parseOneShotCommand("/run@mc_bot Claude external/mission-control review PR 740"), {
+    agent: "claude",
+    repo: "external/mission-control",
+    instruction: "review PR 740",
+  });
+  assert.throws(() => parseOneShotCommand("/run gemini backend investigate"), /claude or codex/);
+  assert.throws(() => parseOneShotCommand("/run codex backend"), /Usage/);
+  assert.equal(parseOneShotCommand("run codex backend do work"), null, "a slash is required to prevent accidental launches");
+
+  const api = {
+    get: async () => ({
+      root: "/srv/GitProjects",
+      repos: [
+        { project: "GitProjects", repo: "backend", domain: "GitProjects/backend" },
+        { project: "external", repo: "mission-control", domain: "external/mission-control" },
+      ],
+    }),
+    post: async () => ({}),
+    patch: async () => ({}),
+  };
+  assert.deepEqual(await resolveOneShotRepo(api, "backend"), {
+    label: "GitProjects/backend",
+    path: "/srv/GitProjects/backend",
+  });
+  assert.deepEqual(await resolveOneShotRepo(api, "external/mission-control"), {
+    label: "external/mission-control",
+    path: "/srv/GitProjects/external/mission-control",
+  });
+  await assert.rejects(() => resolveOneShotRepo(api, "not-allowed"), /not in Mission Control's repository allowlist/);
+});
+
+test("one-shot launch persists the Telegram return target and deduplicates a delivery retry", async () => {
+  const home = mkdtempSync(join(tmpdir(), "mc-one-shot-"));
+  const launched = [];
+  const api = {
+    get: async () => ({
+      root: "/srv/GitProjects",
+      repos: [{ project: "GitProjects", repo: "backend", domain: "GitProjects/backend" }],
+    }),
+    post: async () => { throw new Error("one-shot must not write to the task API"); },
+    patch: async () => { throw new Error("one-shot must not write to the task API"); },
+  };
+  const runner = createOneShotRunner({ mcHome: home, api, launchWorker: (path) => { launched.push(path); } });
+  const request = {
+    agent: "claude",
+    repo: "backend",
+    instruction: "review the wallet integration test",
+    target: "555",
+    actor: "telegram:@jinglun",
+    requestId: "telegram:555:991",
+  };
+
+  try {
+    const first = await runner.start(request);
+    const second = await runner.start(request);
+    assert.equal(launched.length, 1, "the same Telegram update starts only one worker");
+    assert.equal(second.alreadyStarted, true);
+    assert.equal(second.jobId, first.jobId);
+    const config = JSON.parse(readFileSync(launched[0], "utf-8"));
+    assert.equal(config.telegramChatId, "555");
+    assert.equal(config.agent, "claude");
+    assert.equal(config.repoPath, "/srv/GitProjects/backend");
+    assert.equal("taskId" in config, false);
+  } finally {
+    rmSync(home, { recursive: true, force: true });
+  }
+});
+
+test("the one-shot coding agent never receives chat or Mission Control control credentials", () => {
+  const sensitive = {
+    TELEGRAM_BOT_TOKEN: "telegram-secret",
+    SLACK_BOT_TOKEN: "slack-secret",
+    SLACK_APP_TOKEN: "slack-app-secret",
+    MISSION_CONTROL_ACCESS_TOKEN: "mc-secret",
+    MISSION_CONTROL_ADMIN_TOKEN: "mc-admin-secret",
+    MISSION_CONTROL_READ_ACCESS_TOKEN: "mc-read-secret",
+    MISSION_CONTROL_READ_TOKEN: "mc-scoped-read-secret",
+    MISSION_CONTROL_WRITE_TOKEN: "mc-write-secret",
+    LINEAR_API_KEY: "linear-secret",
+  };
+  const previous = Object.fromEntries(Object.keys(sensitive).map((key) => [key, process.env[key]]));
+  Object.assign(process.env, sensitive);
+  try {
+    const env = agentEnvironment({
+      MC_AGENT_GIT_NAME: "MetaDAO Bot",
+      MC_AGENT_GIT_EMAIL: "bot@example.com",
+      MC_AGENT_GH_TOKEN: "github-bot-token",
+    });
+    for (const key of Object.keys(sensitive)) assert.equal(env[key], undefined, `${key} must be stripped`);
+    assert.equal(env.GH_TOKEN, "github-bot-token");
+    assert.equal(env.GIT_AUTHOR_NAME, "MetaDAO Bot");
+  } finally {
+    for (const [key, value] of Object.entries(previous)) {
+      if (value === undefined) delete process.env[key];
+      else process.env[key] = value;
+    }
+  }
 });
 
 test("inbound: the actor is attributed in the activity metadata", async () => {
