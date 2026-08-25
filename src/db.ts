@@ -994,6 +994,15 @@ export class MissionControlDB {
              WHERE task_id = ? AND status = 'pending'`,
           )
           .run(now, id);
+        // Status is authoritative. Keep an existing progress row from claiming a
+        // completed ticket is still running or blocked after Linear/API reconciliation.
+        this.db
+          .prepare(
+            `UPDATE agent_progress
+             SET state = 'done', blocked_reason = NULL, updated_at = ?
+             WHERE task_id = ?`,
+          )
+          .run(now, id);
       }
 
       return this.getTask(id);

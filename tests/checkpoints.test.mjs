@@ -232,6 +232,11 @@ test("task stays paused until ALL its checkpoints are resolved", async () => {
 test("completing a task cancels obsolete pending checkpoints", async () => {
   await withHandler(async (handler, db) => {
     const task = db.createTask({ title: "already shipped", status: "in_progress" });
+    db.upsertProgress(task.id, {
+      state: "blocked",
+      phase: "execute",
+      blocked_reason: "stale agent state",
+    });
     const create = mockRes();
     await handler(mockReq({
       url: `/api/tasks/${task.id}/checkpoints`, method: "POST",
@@ -250,6 +255,8 @@ test("completing a task cancels obsolete pending checkpoints", async () => {
     assert.equal(checkpoint.status, "cancelled");
     assert.equal(checkpoint.response, "Cancelled because the task was completed.");
     assert.ok(checkpoint.resolved_at);
+    assert.equal(db.getProgress(task.id).state, "done");
+    assert.equal(db.getProgress(task.id).blocked_reason, null);
   });
 });
 
@@ -257,6 +264,7 @@ test("idempotent completion repairs stale checkpoints and completed tasks reject
   await withHandler(async (handler, db) => {
     const task = db.createTask({ title: "closed elsewhere", status: "done" });
     const stale = db.createCheckpoint({ task_id: task.id, prompt: "Old approval" });
+    db.upsertProgress(task.id, { state: "running", phase: "review" });
 
     const done = mockRes();
     await handler(mockReq({
@@ -267,6 +275,7 @@ test("idempotent completion repairs stale checkpoints and completed tasks reject
     assert.equal(JSON.parse(done.body).alreadyDone, true);
     assert.equal(db.getCheckpoint(stale.id).status, "cancelled");
     assert.equal(db.countPendingCheckpoints(task.id), 0);
+    assert.equal(db.getProgress(task.id).state, "done");
 
     const create = mockRes();
     await handler(mockReq({
