@@ -111,6 +111,13 @@ Linear ticket, acknowledges immediately, and a detached worker posts the final a
 report back to the originating Telegram chat. Delivery retries reuse the same job id,
 so one Telegram update cannot launch duplicate work.
 
+When the instruction names an existing GitHub PR (`PR 732`, `PR #732`, or a PR URL), the
+worker fetches that PR head into a detached worktree. The agent may commit locally but
+cannot publish a sidecar branch; after a successful run, the worker pushes only to the
+PR's original head ref with a force-with-lease tied to the fetched SHA. A concurrent PR
+update therefore stops publication instead of being overwritten. Non-PR work continues
+to use a dedicated `mc/one-shot/*` branch.
+
 This command is outside the transport-agnostic command table on purpose. It is private-
 Telegram-DM-only: Telegram groups, Slack DMs, and Slack channels have no route to the
 runner; Slack `/help` does not advertise it, and a Slack `/run` receives the ordinary

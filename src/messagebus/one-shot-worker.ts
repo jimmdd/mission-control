@@ -12,6 +12,22 @@ interface CommandResult {
   output: string;
 }
 
+export interface BranchTarget {
+  kind: "branch";
+  branch: string;
+  baseRef: string;
+}
+
+export interface PullRequestTarget {
+  kind: "pull_request";
+  number: number;
+  headRefName: string;
+  baseRefName: string;
+  initialHeadSha: string;
+}
+
+export type OneShotWorkTarget = BranchTarget | PullRequestTarget;
+
 const MAX_REPORT_OUTPUT = 2_500;
 
 function writeJsonAtomic(path: string, value: unknown): void {
@@ -51,8 +67,8 @@ function runCommand(
   });
 }
 
-async function git(repo: string, args: string[]): Promise<CommandResult> {
-  return runCommand("git", ["-C", repo, ...args]);
+async function git(repo: string, args: string[], env?: NodeJS.ProcessEnv): Promise<CommandResult> {
+  return runCommand("git", ["-C", repo, ...args], { env });
 }
 
 async function defaultBase(repo: string): Promise<string> {
@@ -129,20 +145,108 @@ export function agentEnvironment(envFile: Record<string, string>): NodeJS.Proces
   return env;
 }
 
-function promptFor(config: OneShotJobConfig, branch: string): string {
+export function extractPullRequestNumber(instruction: string): number | null {
+  const url = /https?:\/\/github\.com\/[^\s/]+\/[^\s/]+\/pull\/(\d+)\b/i.exec(instruction);
+  if (url) return Number(url[1]);
+  const prose = /(?:^|\s)(?:pr|pull\s+request)\s*#\s*(\d+)\b/i.exec(instruction)
+    ?? /(?:^|\s)(?:pr|pull\s+request)\s+(\d+)\b/i.exec(instruction);
+  return prose ? Number(prose[1]) : null;
+}
+
+export function worktreeAddArgs(target: OneShotWorkTarget, worktree: string): string[] {
+  return target.kind === "pull_request"
+    ? ["worktree", "add", "--detach", worktree, target.initialHeadSha]
+    : ["worktree", "add", worktree, "-b", target.branch, target.baseRef];
+}
+
+export function pullRequestPushArgs(target: PullRequestTarget): string[] {
+  const ref = `refs/heads/${target.headRefName}`;
+  return ["push", `--force-with-lease=${ref}:${target.initialHeadSha}`, "origin", `HEAD:${ref}`];
+}
+
+export function promptFor(config: OneShotJobConfig, target: OneShotWorkTarget): string {
+  const targetInstructions = target.kind === "pull_request"
+    ? [
+        `This job targets existing PR #${target.number}: ${target.headRefName} -> ${target.baseRefName}.`,
+        "The worktree is detached at the existing PR head; no sidecar branch exists.",
+        "If code changes are needed, commit them locally but Do not push any branch and do not create another PR.",
+        "The worker will publish only to the existing PR head after validation, using a lease that prevents overwriting concurrent updates.",
+      ]
+    : [
+        `Dedicated branch: ${target.branch}`,
+        "If the request calls for code changes, make the smallest correct change, run relevant tests, commit, push, and create or update a PR unless the request explicitly says otherwise.",
+      ];
   return [
     "You are a one-shot sidecar agent launched directly by the operator from Telegram.",
     `Repository: ${config.repoLabel}`,
-    `Dedicated branch: ${branch}`,
+    ...targetInstructions,
     "There is no Mission Control or Linear ticket for this job. Do not create one and do not report to Mission Control.",
     "Work autonomously to completion; do not stop to ask questions. Inspect current repository guidance before acting.",
-    "If the request calls for code changes, make the smallest correct change, run relevant tests, commit, push, and create or update a PR unless the request explicitly says otherwise.",
     "If the request is read-only (for example a review), do not modify files merely to produce a deliverable.",
     "End with a concise FINAL REPORT containing the outcome, validation, links/branch, and any remaining risk.",
     "",
     "OPERATOR REQUEST:",
     config.instruction,
   ].join("\n");
+}
+
+async function resolvePullRequestTarget(repo: string, instruction: string): Promise<PullRequestTarget | null> {
+  const number = extractPullRequestNumber(instruction);
+  if (!number) return null;
+
+  const viewed = await runCommand("gh", [
+    "pr", "view", String(number),
+    "--json", "number,headRefName,headRefOid,headRepository,baseRefName",
+  ], { cwd: repo });
+  if (viewed.code !== 0) throw new Error(viewed.output.trim() || `Could not resolve PR #${number}`);
+
+  const pr = JSON.parse(viewed.output) as Record<string, unknown>;
+  const headRepository = pr.headRepository && typeof pr.headRepository === "object"
+    ? pr.headRepository as Record<string, unknown>
+    : {};
+  const currentRepo = await runCommand("gh", ["repo", "view", "--json", "nameWithOwner"], { cwd: repo });
+  if (currentRepo.code !== 0) throw new Error(currentRepo.output.trim() || "Could not resolve the current GitHub repository");
+  const currentName = String((JSON.parse(currentRepo.output) as Record<string, unknown>).nameWithOwner ?? "").toLowerCase();
+  const headName = String(headRepository.nameWithOwner ?? "").toLowerCase();
+  if (!currentName || !headName || currentName !== headName) {
+    throw new Error(`PR #${number} comes from a fork; one-shot PR publication currently supports same-repository heads only`);
+  }
+
+  const headRefName = String(pr.headRefName ?? "").trim();
+  const baseRefName = String(pr.baseRefName ?? "").trim();
+  if (!headRefName || !baseRefName) throw new Error(`PR #${number} returned incomplete branch metadata`);
+  const fetched = await git(repo, ["fetch", "origin", `pull/${number}/head`]);
+  if (fetched.code !== 0) throw new Error(fetched.output.trim() || `Could not fetch PR #${number}`);
+  const head = await git(repo, ["rev-parse", "FETCH_HEAD"]);
+  const initialHeadSha = head.output.trim();
+  if (head.code !== 0 || !/^[0-9a-f]{40}$/i.test(initialHeadSha)) {
+    throw new Error(`Could not resolve PR #${number}'s fetched head`);
+  }
+  return { kind: "pull_request", number, headRefName, baseRefName, initialHeadSha };
+}
+
+async function publishPullRequestHead(
+  repo: string,
+  target: PullRequestTarget,
+  env: NodeJS.ProcessEnv,
+): Promise<void> {
+  const local = await git(repo, ["rev-parse", "HEAD"]);
+  const localHead = local.output.trim();
+  if (local.code !== 0 || !localHead) throw new Error("Could not resolve the completed PR worktree head");
+  if (localHead === target.initialHeadSha) return;
+
+  const pushed = await git(repo, pullRequestPushArgs(target), env);
+  if (pushed.code === 0) return;
+
+  // If the agent ignored the no-push instruction but updated the exact intended ref,
+  // accept that state. Any other lease failure means someone changed the PR while the
+  // job ran, and must fail closed rather than overwrite their work.
+  const remote = await git(repo, ["ls-remote", "origin", `refs/heads/${target.headRefName}`]);
+  const remoteHead = remote.output.trim().split(/\s+/)[0] ?? "";
+  if (remote.code === 0 && remoteHead === localHead) return;
+  throw new Error(
+    `Could not publish PR #${target.number} without overwriting a concurrent update: ${pushed.output.trim()}`,
+  );
 }
 
 function cleanOutput(output: string): string {
@@ -176,17 +280,23 @@ export async function runOneShotWorker(configPath: string): Promise<void> {
   const logPath = join(jobDir, "agent.log");
   const envFile = parseEnvFile(join(config.mcHome, ".env"));
   const telegramToken = (process.env.TELEGRAM_BOT_TOKEN ?? envFile.TELEGRAM_BOT_TOKEN ?? "").trim();
-  const branch = `mc/one-shot/${config.jobId.replace(/^once-/, "")}`;
+  const sidecarBranch = `mc/one-shot/${config.jobId.replace(/^once-/, "")}`;
   const worktree = join(dirname(config.repoPath), "worktrees", config.jobId);
 
-  writeJsonAtomic(statusPath, { status: "starting", jobId: config.jobId, branch, worktree, updatedAt: new Date().toISOString() });
+  writeJsonAtomic(statusPath, { status: "starting", jobId: config.jobId, worktree, updatedAt: new Date().toISOString() });
 
   try {
     if (!existsSync(join(config.repoPath, ".git"))) throw new Error(`Repository does not exist: ${config.repoPath}`);
     const fetched = await git(config.repoPath, ["fetch", "origin"]);
     if (fetched.code !== 0) throw new Error(fetched.output.trim() || "Could not fetch the repository");
-    const base = await defaultBase(config.repoPath);
-    const created = await git(config.repoPath, ["worktree", "add", worktree, "-b", branch, base]);
+    const pullRequest = await resolvePullRequestTarget(config.repoPath, config.instruction);
+    const target: OneShotWorkTarget = pullRequest ?? {
+      kind: "branch",
+      branch: sidecarBranch,
+      baseRef: await defaultBase(config.repoPath),
+    };
+    const branch = target.kind === "pull_request" ? target.headRefName : target.branch;
+    const created = await git(config.repoPath, worktreeAddArgs(target, worktree));
     if (created.code !== 0) throw new Error(created.output.trim() || "Could not create the isolated worktree");
 
     const workerConfig = readAgentConfig(config);
@@ -198,13 +308,18 @@ export async function runOneShotWorker(configPath: string): Promise<void> {
       repo: config.repoLabel,
       branch,
       worktree,
+      pullRequest: target.kind === "pull_request" ? target.number : null,
       updatedAt: new Date().toISOString(),
     });
-    const result = await runCommand(command, agentArgs(config.agent, promptFor(config, branch), workerConfig), {
+    const childEnv = agentEnvironment(envFile);
+    const result = await runCommand(command, agentArgs(config.agent, promptFor(config, target), workerConfig), {
       cwd: worktree,
-      env: agentEnvironment(envFile),
+      env: childEnv,
       log: logPath,
     });
+    if (result.code === 0 && target.kind === "pull_request") {
+      await publishPullRequestHead(worktree, target, childEnv);
+    }
     const success = result.code === 0;
     const summary = cleanOutput(result.output) || "The agent exited without a textual report.";
     writeJsonAtomic(statusPath, {
@@ -215,6 +330,7 @@ export async function runOneShotWorker(configPath: string): Promise<void> {
       repo: config.repoLabel,
       branch,
       worktree,
+      pullRequest: target.kind === "pull_request" ? target.number : null,
       summary,
       updatedAt: new Date().toISOString(),
     });
@@ -235,6 +351,7 @@ export async function runOneShotWorker(configPath: string): Promise<void> {
         repo: config.repoLabel,
         branch,
         worktree,
+        pullRequest: target.kind === "pull_request" ? target.number : null,
         summary,
         reportError: detail,
         updatedAt: new Date().toISOString(),
@@ -250,7 +367,6 @@ export async function runOneShotWorker(configPath: string): Promise<void> {
       jobId: config.jobId,
       agent: config.agent,
       repo: config.repoLabel,
-      branch,
       worktree,
       error: detail,
       updatedAt: new Date().toISOString(),

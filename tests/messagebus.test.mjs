@@ -12,7 +12,13 @@ import { executeCommand, parseCommand, resolveTask } from "../src/messagebus/com
 import { startMessageBus, makeInboundHandler } from "../src/messagebus/index.ts";
 import { askAssistant, boardSnapshot } from "../src/messagebus/assistant.ts";
 import { createOneShotRunner, parseOneShotCommand, resolveOneShotRepo } from "../src/messagebus/one-shot.ts";
-import { agentEnvironment } from "../src/messagebus/one-shot-worker.ts";
+import {
+  agentEnvironment,
+  extractPullRequestNumber,
+  promptFor,
+  pullRequestPushArgs,
+  worktreeAddArgs,
+} from "../src/messagebus/one-shot-worker.ts";
 
 const SILENT = { info() {}, error() {} };
 
@@ -702,6 +708,48 @@ test("the one-shot coding agent never receives chat or Mission Control control c
       else process.env[key] = value;
     }
   }
+});
+
+test("existing-PR one-shots use the PR head and never publish a sidecar branch", () => {
+  assert.equal(extractPullRequestNumber("fix pr 732 conflicts"), 732);
+  assert.equal(extractPullRequestNumber("review PR #740 critically"), 740);
+  assert.equal(extractPullRequestNumber("fix https://github.com/metaDAOproject/backend/pull/736"), 736);
+  assert.equal(extractPullRequestNumber("review our PR strategy for 2027"), null);
+
+  const target = {
+    kind: "pull_request",
+    number: 732,
+    headRefName: "codex/project-info-selector-20260824",
+    baseRefName: "master",
+    initialHeadSha: "abc123",
+  };
+  assert.deepEqual(worktreeAddArgs(target, "/tmp/worktree"), [
+    "worktree", "add", "--detach", "/tmp/worktree", "abc123",
+  ]);
+  assert.deepEqual(pullRequestPushArgs(target), [
+    "push",
+    "--force-with-lease=refs/heads/codex/project-info-selector-20260824:abc123",
+    "origin",
+    "HEAD:refs/heads/codex/project-info-selector-20260824",
+  ]);
+
+  const prompt = promptFor({
+    version: 1,
+    jobId: "once-test",
+    agent: "codex",
+    repoLabel: "GitProjects/backend",
+    repoPath: "/srv/GitProjects/backend",
+    instruction: "fix pr 732 conflicts",
+    telegramChatId: "555",
+    actor: "telegram:@tester",
+    mcHome: "/tmp/mc",
+    createdAt: "2026-08-25T00:00:00.000Z",
+  }, target);
+  assert.match(prompt, /existing PR #732/);
+  assert.match(prompt, /codex\/project-info-selector-20260824/);
+  assert.match(prompt, /Do not push any branch/);
+  assert.match(prompt, /worker will publish only to the existing PR head/);
+  assert.doesNotMatch(prompt, /Dedicated branch: mc\/one-shot/);
 });
 
 test("inbound: the actor is attributed in the activity metadata", async () => {
