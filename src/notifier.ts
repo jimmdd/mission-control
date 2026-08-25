@@ -46,6 +46,8 @@ export function describe(event: McEvent, taskLabel?: string): { title: string; m
       return { title: `Agent stalled on ${id}`, message: detail || "The agent stopped sending heartbeats." };
     case "new_triage_question":
       return { title: `New question on ${id}`, message: detail || "Triage has a new question that needs your answer." };
+    case "task_completed":
+      return { title: `Task ${id} is done`, message: detail };
     default:
       return { title: `Mission Control: ${event.type} (${id})`, message: detail };
   }

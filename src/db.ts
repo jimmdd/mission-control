@@ -84,7 +84,31 @@ export interface TaskActivityRecord {
   activity_type: string;
   message: string;
   metadata: string | null;
+  expects_reply: number;
+  reply_to_activity_id: string | null;
   created_at: string;
+}
+
+export interface PendingChatMessageRecord extends TaskActivityRecord {
+  task_title: string;
+  task_description: string | null;
+  task_status: TaskStatus;
+}
+
+export interface SurfaceThreadRecord {
+  task_id: string;
+  surface: string;
+  channel_id: string;
+  thread_ts: string;
+  created_by_external_id: string | null;
+  created_at: string;
+}
+
+export interface CreateSurfaceThreadTaskInput extends CreateTaskInput {
+  surface: string;
+  channel_id: string;
+  thread_ts: string;
+  created_by_external_id?: string;
 }
 
 export interface TaskDeliverableRecord {
@@ -211,6 +235,8 @@ export interface CreateActivityInput {
   activity_type: string;
   message: string;
   metadata?: string;
+  expects_reply?: boolean;
+  reply_to_activity_id?: string;
 }
 
 export interface CreateDeliverableInput {
@@ -439,7 +465,19 @@ CREATE TABLE IF NOT EXISTS task_activities (
   activity_type TEXT NOT NULL,
   message TEXT NOT NULL,
   metadata TEXT,
+  expects_reply INTEGER NOT NULL DEFAULT 0,
+  reply_to_activity_id TEXT,
   created_at TEXT DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))
+);
+
+CREATE TABLE IF NOT EXISTS task_surface_threads (
+  task_id TEXT NOT NULL REFERENCES tasks(id) ON DELETE CASCADE,
+  surface TEXT NOT NULL,
+  channel_id TEXT NOT NULL,
+  thread_ts TEXT NOT NULL,
+  created_by_external_id TEXT,
+  created_at TEXT DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
+  PRIMARY KEY (surface, channel_id, thread_ts)
 );
 
 CREATE TABLE IF NOT EXISTS task_deliverables (
@@ -473,6 +511,7 @@ CREATE INDEX IF NOT EXISTS idx_agents_workspace ON agents(workspace_id);
 CREATE INDEX IF NOT EXISTS idx_events_created ON events(created_at DESC);
 CREATE INDEX IF NOT EXISTS idx_agents_status ON agents(status);
 CREATE INDEX IF NOT EXISTS idx_activities_task ON task_activities(task_id, created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_surface_threads_task ON task_surface_threads(task_id);
 CREATE INDEX IF NOT EXISTS idx_deliverables_task ON task_deliverables(task_id);
 CREATE INDEX IF NOT EXISTS idx_agent_sessions_task ON agent_sessions(task_id);
 CREATE TABLE IF NOT EXISTS agent_progress (
@@ -578,7 +617,32 @@ export class MissionControlDB {
     this.migrateLinearColumns();
     this.migrateTaskType();
     this.migrateTaskLease();
+    this.migrateActivityChat();
     this.migrateTimestampFormat();
+  }
+
+  private activityColumnExists(column: string): boolean {
+    const rows = this.db.prepare("PRAGMA table_info(task_activities)").all() as Array<{ name: string }>;
+    return rows.some((row) => row.name === column);
+  }
+
+  private migrateActivityChat(): void {
+    if (!this.activityColumnExists("expects_reply")) {
+      this.db.exec("ALTER TABLE task_activities ADD COLUMN expects_reply INTEGER NOT NULL DEFAULT 0");
+    }
+    if (!this.activityColumnExists("reply_to_activity_id")) {
+      this.db.exec("ALTER TABLE task_activities ADD COLUMN reply_to_activity_id TEXT");
+    }
+    // Pending scans are global but bounded; index the queue predicate so a large
+    // activity history never turns the bridge's once-per-minute check into a sweep.
+    this.db.exec(
+      "CREATE INDEX IF NOT EXISTS idx_activities_pending_reply ON task_activities(expects_reply, created_at)",
+    );
+    // A reply is the durable acknowledgement. This also makes retry after a lost
+    // HTTP response idempotent: only one reply can point at a human message.
+    this.db.exec(
+      "CREATE UNIQUE INDEX IF NOT EXISTS idx_activities_reply_to ON task_activities(reply_to_activity_id) WHERE reply_to_activity_id IS NOT NULL",
+    );
   }
 
   private migrateTimestampFormat(): void {
@@ -820,6 +884,12 @@ export class MissionControlDB {
       | undefined;
   }
 
+  getTaskByExternalId(externalId: string): TaskRecord | undefined {
+    return this.db.prepare("SELECT * FROM tasks WHERE external_id = ?").get(externalId) as
+      | TaskRecord
+      | undefined;
+  }
+
   countTasks(): number {
     const row = this.db.prepare("SELECT COUNT(*) AS n FROM tasks").get() as { n: number };
     return row.n;
@@ -906,8 +976,28 @@ export class MissionControlDB {
     }
 
     const { sql, values } = this.buildDynamicUpdate(fields);
-    this.db.prepare(`UPDATE tasks SET ${sql} WHERE id = ?`).run(...values, id);
-    return this.getTask(id);
+    return this.db.transaction(() => {
+      this.db.prepare(`UPDATE tasks SET ${sql} WHERE id = ?`).run(...values, id);
+
+      // A completed task cannot still be waiting for a human decision. Linear sync,
+      // the completion webhook, and the dashboard all converge through updateTask;
+      // cancelling here keeps that invariant true regardless of which path finished
+      // the work. Otherwise Done tickets remain in the checkpoint inbox forever.
+      if (data.status === "done") {
+        const now = new Date().toISOString();
+        this.db
+          .prepare(
+            `UPDATE task_checkpoints
+             SET status = 'cancelled',
+                 response = 'Cancelled because the task was completed.',
+                 resolved_at = ?
+             WHERE task_id = ? AND status = 'pending'`,
+          )
+          .run(now, id);
+      }
+
+      return this.getTask(id);
+    })();
   }
 
   claimNextInboxTask(owner: string, leaseSeconds = 900): TaskRecord | undefined {
@@ -1173,8 +1263,10 @@ export class MissionControlDB {
     const id = randomUUID();
     this.db
       .prepare(
-        `INSERT INTO task_activities (id, task_id, agent_id, activity_type, message, metadata, created_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?)`
+        `INSERT INTO task_activities (
+           id, task_id, agent_id, activity_type, message, metadata,
+           expects_reply, reply_to_activity_id, created_at
+         ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`
       )
       .run(
         id,
@@ -1183,12 +1275,91 @@ export class MissionControlDB {
         data.activity_type,
         data.message,
         data.metadata ?? null,
+        data.expects_reply ? 1 : 0,
+        data.reply_to_activity_id ?? null,
         new Date().toISOString()
       );
 
     return this.db
       .prepare("SELECT * FROM task_activities WHERE id = ?")
       .get(id) as TaskActivityRecord;
+  }
+
+  listPendingChatMessages(limit = 20): PendingChatMessageRecord[] {
+    const boundedLimit = Math.min(Math.max(Math.floor(limit), 1), 50);
+    return this.db
+      .prepare(
+        `SELECT
+           a.*,
+           t.title AS task_title,
+           t.description AS task_description,
+           t.status AS task_status
+         FROM task_activities a
+         JOIN tasks t ON t.id = a.task_id
+         WHERE a.expects_reply = 1
+           AND NOT EXISTS (
+             SELECT 1 FROM task_activities reply
+             WHERE reply.reply_to_activity_id = a.id
+           )
+         ORDER BY a.created_at ASC
+         LIMIT ?`,
+      )
+      .all(boundedLimit) as PendingChatMessageRecord[];
+  }
+
+  getSurfaceThread(surface: string, channelId: string, threadTs: string): SurfaceThreadRecord | undefined {
+    return this.db
+      .prepare(
+        `SELECT * FROM task_surface_threads
+         WHERE surface = ? AND channel_id = ? AND thread_ts = ?`
+      )
+      .get(surface, channelId, threadTs) as SurfaceThreadRecord | undefined;
+  }
+
+  createTaskForSurfaceThread(
+    data: CreateSurfaceThreadTaskInput,
+  ): { thread: SurfaceThreadRecord; task: TaskRecord; created: boolean } {
+    const create = this.db.transaction(() => {
+      const existing = this.getSurfaceThread(data.surface, data.channel_id, data.thread_ts);
+      if (existing) {
+        const task = this.getTask(existing.task_id);
+        if (!task) throw new Error(`Surface thread points to missing task ${existing.task_id}`);
+        return { thread: existing, task, created: false };
+      }
+
+      const task = this.createTask(data);
+      this.db
+        .prepare(
+          `INSERT INTO task_surface_threads
+            (task_id, surface, channel_id, thread_ts, created_by_external_id, created_at)
+           VALUES (?, ?, ?, ?, ?, ?)`
+        )
+        .run(
+          task.id,
+          data.surface,
+          data.channel_id,
+          data.thread_ts,
+          data.created_by_external_id ?? null,
+          new Date().toISOString(),
+        );
+      this.createActivity({
+        task_id: task.id,
+        activity_type: "created",
+        message: `Created from ${data.surface} channel ${data.channel_id}`,
+        metadata: JSON.stringify({
+          source: data.surface,
+          channel_id: data.channel_id,
+          thread_ts: data.thread_ts,
+          actor: data.created_by_external_id ?? null,
+        }),
+      });
+
+      const thread = this.getSurfaceThread(data.surface, data.channel_id, data.thread_ts);
+      if (!thread) throw new Error("Failed to read surface thread after insert");
+      return { thread, task, created: true };
+    });
+
+    return create();
   }
 
   listDeliverables(taskId: string, limit?: number, offset?: number): TaskDeliverableRecord[] {
@@ -1201,6 +1372,18 @@ export class MissionControlDB {
   }
 
   createDeliverable(data: CreateDeliverableInput): TaskDeliverableRecord {
+    // Multiple completion observers can discover the same PR. Treat its URL as the
+    // identity across both historical type names so retries stay idempotent.
+    if (["pr", "pull_request"].includes(data.deliverable_type.toLowerCase()) && data.path) {
+      const existing = this.db
+        .prepare(
+          `SELECT * FROM task_deliverables
+           WHERE task_id = ? AND deliverable_type IN ('pr', 'pull_request') AND path = ?
+           ORDER BY created_at DESC LIMIT 1`
+        )
+        .get(data.task_id, data.path) as TaskDeliverableRecord | undefined;
+      if (existing) return existing;
+    }
     const id = randomUUID();
     this.db
       .prepare(
@@ -1330,6 +1513,18 @@ export class MissionControlDB {
              processing_expires_at = NULL,
              updated_at = ?
          WHERE id = ?`
+      )
+      .run(new Date().toISOString(), taskId);
+    // A checkpoint belongs to the run that raised it. Keeping one pending after
+    // reset makes the discarded run continue to block the new triage round (the
+    // old draft-PR choice did this on MET-650).
+    this.db
+      .prepare(
+        `UPDATE task_checkpoints
+         SET status = 'cancelled',
+             response = 'Cancelled because triage was reset.',
+             resolved_at = ?
+         WHERE task_id = ? AND status = 'pending'`
       )
       .run(new Date().toISOString(), taskId);
     return this.getTask(taskId);
@@ -1506,9 +1701,25 @@ export class MissionControlDB {
       .all(taskId) as CheckpointRecord[];
   }
 
+  findPendingCheckpoint(taskId: string, prompt: string): CheckpointRecord | undefined {
+    return this.db
+      .prepare(
+        `SELECT * FROM task_checkpoints
+         WHERE task_id = ? AND status = 'pending' AND prompt = ?
+         ORDER BY created_at DESC
+         LIMIT 1`,
+      )
+      .get(taskId, prompt) as CheckpointRecord | undefined;
+  }
+
   listPendingCheckpoints(): CheckpointRecord[] {
     return this.db
-      .prepare("SELECT * FROM task_checkpoints WHERE status = 'pending' ORDER BY created_at ASC")
+      .prepare(
+        `SELECT c.* FROM task_checkpoints c
+         JOIN tasks t ON t.id = c.task_id
+         WHERE c.status = 'pending' AND t.status != 'done'
+         ORDER BY c.created_at ASC`,
+      )
       .all() as CheckpointRecord[];
   }
 

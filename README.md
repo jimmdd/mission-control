@@ -202,7 +202,7 @@ context-fabrica knowledge diagnostics.
 
 ---
 
-## Chat interface (Telegram / Slack DM)
+## Chat interface (Telegram / Slack)
 
 Mission Control can ping you where you already are and take instructions back, so nobody
 has to watch the board for a blocked agent or an unanswered triage question.
@@ -222,14 +222,19 @@ Enable it in ⚙ SETTINGS: paste a bot token, add your chat id (Telegram) or use
 (Slack), set the interaction level to **Command**, then **Send test message**. Nothing
 runs until a token is present, and Settings edits apply live — no restart.
 
-`/status`, `/tasks`, `/search`, `/task`, `/answer`, `/confirm`, `/checkpoints`,
-`/approve`, `/deny`, `/followup`, `/preview`, `/done`, `/agents`. Tickets are named by
+`/status`, `/create`, `/tasks`, `/search`, `/task`, `/answer`, `/confirm`, `/checkpoints`,
+`/approve`, `/deny`, `/followup`, `/preview`, `/hold`, `/unhold`, `/done`, `/agents`. Tickets are named by
 Linear key throughout — typed loosely (`met 639`) or searched by keyword. Full setup,
 scopes, event routing, and the security model:
 [`docs/message-bus.md`](docs/message-bus.md).
 
 Slack inbound uses **Socket Mode** (an outbound WebSocket) because Mission Control binds
 to `127.0.0.1` and must not be exposed to the internet.
+
+In an explicitly allowlisted public channel, mention the bot with a request to create a
+ticket. Mission Control replies in a thread, links that thread to the ticket, and routes
+later thread replies through the ticket's normal triage/feedback path. Other channel
+messages are ignored.
 
 ---
 
@@ -660,6 +665,20 @@ It detects:
   `~/.claude.json`, `~/.codex/auth.json`).
 - **Sources** — connected MCP servers (Notion, Google Drive, etc.) read straight
   from `claude mcp list`, plus API-key/CLI integrations (Linear, GitHub).
+
+Supercut links in a ticket description or recent comment are read only through
+the authenticated `supercut` MCP server. Mission Control uses read-only MCP tools
+to collect metadata, transcript, comments, reactions, and relevant frames for
+triage, then tells planning and execution agents to re-read the source through
+the same MCP. Connect Supercut in every CLI profile Mission Control may launch:
+
+```bash
+claude mcp add --scope user --transport http supercut https://mcp.supercut.ai/mcp
+codex mcp add supercut --url https://mcp.supercut.ai/mcp
+```
+
+Complete each CLI's OAuth login after adding the server. Mission Control does
+not scrape Supercut share pages or accept a separate Supercut API token.
 
 See the full picture any time with `./mc connections` or `GET /api/connections`.
 

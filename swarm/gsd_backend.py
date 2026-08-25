@@ -17,6 +17,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+import re
 import shutil
 import subprocess
 from pathlib import Path
@@ -214,13 +215,19 @@ def plan_step_text(provider: str = "", mode: str = "", brief: str = "") -> str:
         "reads. It builds the ticket's step map by parsing the files themselves, not by\n"
         "taking your word that a plan exists:\n"
         f"- One file per wave under `{planning_dir_name()}/`, named `NN-NN-PLAN.md` — e.g.\n"
-        f"  `{planning_dir_name()}/phases/phase-1-<slug>/01-01-PLAN.md`. The name must end in\n"
+        f"  `{planning_dir_name()}/phases/01-<slug>/01-01-PLAN.md`. Phase directories must\n"
+        "  start with GSD's zero-padded numeric phase token (`01-`, `02-`, ...); the\n"
+        "  tempting `phase-1-<slug>` form is not resolvable by `/gsd-execute-phase`.\n"
+        "  The plan filename must end in\n"
         "  `-PLAN.md`; a descriptive slug in its place is not read.\n"
         "- YAML frontmatter carrying `phase:` and `wave:` (an integer). Files sharing a\n"
         "  wave are the ones meant to run together; tasks inside one file are sequential.\n"
         "- Every task as a `<task type=\"...\">` block containing `<name>`, `<files>` and\n"
         "  `<verify>`. Markdown headings such as `### T1 — …` are not tasks and import as\n"
         "  nothing, however well written they are.\n"
+        "- Verification commands must run from the repository root they are invoked in.\n"
+        "  Never `cd` to this temporary planning worktree by absolute path; the plan is\n"
+        "  copied into a separate execution worktree before it runs.\n"
         "\nA plan file with no `<task>` blocks counts as no plan at all."
     )
     if brief:
@@ -261,6 +268,102 @@ def verify_command() -> str:
 def planning_dir_name() -> str:
     ensure_supported_backend()
     return ".planning"
+
+
+_LEGACY_PHASE_DIR = re.compile(r"^phase-(\d+)-([A-Za-z0-9][A-Za-z0-9_-]*)$")
+_TEXT_ARTIFACT_SUFFIXES = {".md", ".json", ".yaml", ".yml", ".toml", ".txt"}
+
+
+def normalize_plan_layout(cwd: str, since: Optional[float] = None) -> list:
+    """Repair MC's former `phase-N-slug` output into GSD's canonical layout.
+
+    The compatibility repair is intentionally narrow: only directories matching the
+    exact legacy shape are moved, and `since` limits a planning-stage call to plans
+    written by that run. Existing destinations are never merged or overwritten.
+    Text references are updated with the move, including malformed frontmatter that
+    used the directory name as the phase id.
+    """
+    planning = Path(cwd) / planning_dir_name()
+    phases = planning / "phases"
+    if not phases.is_dir():
+        return []
+
+    repairs = []
+    for legacy in sorted(phases.iterdir()):
+        if not legacy.is_dir():
+            continue
+        match = _LEGACY_PHASE_DIR.fullmatch(legacy.name)
+        if not match:
+            continue
+        if since is not None:
+            fresh = False
+            for plan in legacy.rglob("*PLAN.md"):
+                try:
+                    fresh = fresh or plan.stat().st_mtime >= since
+                except OSError:
+                    pass
+            if not fresh:
+                continue
+
+        phase_number = int(match.group(1))
+        canonical_name = f"{phase_number:02d}-{match.group(2)}"
+        canonical = phases / canonical_name
+        if canonical.exists():
+            raise RuntimeError(
+                f"cannot normalize {legacy}: destination already exists: {canonical}"
+            )
+        legacy_name = legacy.name
+        legacy.rename(canonical)
+        repairs.append({"from": str(legacy), "to": str(canonical)})
+
+        for artifact in planning.rglob("*"):
+            if not artifact.is_file() or artifact.suffix.lower() not in _TEXT_ARTIFACT_SUFFIXES:
+                continue
+            try:
+                if artifact.stat().st_size > 2_000_000:
+                    continue
+                text = artifact.read_text(encoding="utf-8")
+            except (OSError, UnicodeError):
+                continue
+            updated = text.replace(legacy_name, canonical_name)
+            updated = re.sub(
+                rf"(?m)^phase:\s*{re.escape(canonical_name)}\s*$",
+                f"phase: {phase_number}",
+                updated,
+            )
+            if updated != text:
+                artifact.write_text(updated, encoding="utf-8")
+
+    return repairs
+
+
+def rebase_plan_paths(cwd: str, source_root: str, destination_root: str) -> int:
+    """Point copied plan commands at their execution worktree, not the planner's."""
+    planning = Path(cwd) / planning_dir_name()
+    if not planning.is_dir():
+        return 0
+    sources = {str(Path(source_root)), str(Path(source_root).resolve())}
+    destinations = {
+        str(Path(source_root)): str(Path(destination_root)),
+        str(Path(source_root).resolve()): str(Path(destination_root).resolve()),
+    }
+    changed = 0
+    for artifact in planning.rglob("*"):
+        if not artifact.is_file() or artifact.suffix.lower() not in _TEXT_ARTIFACT_SUFFIXES:
+            continue
+        try:
+            if artifact.stat().st_size > 2_000_000:
+                continue
+            text = artifact.read_text(encoding="utf-8")
+        except (OSError, UnicodeError):
+            continue
+        updated = text
+        for source in sorted(sources, key=len, reverse=True):
+            updated = updated.replace(source, destinations[source])
+        if updated != text:
+            artifact.write_text(updated, encoding="utf-8")
+            changed += 1
+    return changed
 
 
 def _tools_path() -> Optional[str]:

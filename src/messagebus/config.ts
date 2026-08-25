@@ -45,6 +45,8 @@ export interface SlackConfig {
    * click approve" problem to solve yet (see docs/slack-adaptor.md).
    */
   userIds: string[];
+  /** Public channels where an allowlisted user may mention the bot to create/follow a ticket. */
+  channelIds: string[];
   interaction: Interaction;
   events: EventScope;
 }
@@ -102,6 +104,7 @@ export function readBusConfig(mcHome: string): BusConfig {
       botToken: get("SLACK_BOT_TOKEN"),
       appToken: get("SLACK_APP_TOKEN"),
       userIds: parseList(get("SLACK_ALLOWED_USER_IDS")),
+      channelIds: parseList(get("SLACK_ALLOWED_CHANNEL_IDS")),
       interaction: parseInteraction(get("SLACK_INTERACTION")),
       events: scope("SLACK_EVENTS"),
     },
@@ -129,4 +132,9 @@ export function slackInboundReady(cfg: SlackConfig): boolean {
     cfg.userIds.length > 0 &&
     cfg.interaction === "command"
   );
+}
+
+/** Channel mentions are opt-in on top of DM commands: no channel allowlist means no channel ingestion. */
+export function slackChannelInboundReady(cfg: SlackConfig): boolean {
+  return slackInboundReady(cfg) && cfg.channelIds.length > 0;
 }

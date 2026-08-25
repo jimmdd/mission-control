@@ -49,6 +49,8 @@ def main(argv=None) -> int:
         verdict = plan_in_worktree(
             job["worktree"], job["task"],
             context=job.get("context", ""), model=job.get("model", ""),
+            provider=job.get("provider", ""),
+            supercut_mcp=bool(job.get("supercut_mcp")),
             mode=job.get("mode", ""),
             # The settled decisions, so the stage can write them into the worktree
             # as a file GSD treats as locked rather than as prose in a prompt.

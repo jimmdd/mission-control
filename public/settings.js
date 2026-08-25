@@ -71,6 +71,8 @@
         { key: "LINEAR_TRIAGE_LABEL", label: "Linear triage labels (optional)", type: "multiselect", source: "labels" },
         { key: "LINEAR_TEAM_KEYS", label: "Linear teams (optional)", type: "multiselect", source: "teams" },
         { key: "LINEAR_ASSIGNEES", label: "Linear assignees (optional)", type: "multiselect", source: "assignees" },
+        { key: "LINEAR_CREATE_TEAM_KEY", label: "Default team for chat-created tickets (e.g. MET)", secret: false },
+        { key: "LINEAR_CREATE_ASSIGNEE", label: "Default assignee for chat-created tickets (email)", secret: false },
         { key: "LINEAR_INTERACTION", label: "Linear interaction level", type: "select", default: "intake",
           options: [
             { value: "intake", label: "Intake only — import issues, never write back" },
@@ -108,12 +110,13 @@
       ],
     },
     {
-      title: "Message bus — Slack DM",
-      note: "Scoped to a direct message with you. Bot token (xoxb-) sends; an app-level token (xapp-, Socket Mode) is what lets commands come back — no inbound port is opened either way. Scopes: chat:write, im:write, im:history.",
+      title: "Message bus — Slack",
+      note: "DM commands plus explicitly allowlisted channel mentions and linked ticket threads. Socket Mode opens no inbound port. Scopes: chat:write, im:write, im:history, app_mentions:read, channels:history.",
       fields: [
         { key: "SLACK_BOT_TOKEN", label: "Slack bot token (xoxb-)", secret: true },
         { key: "SLACK_APP_TOKEN", label: "Slack app-level token (xapp-, for commands)", secret: true },
         { key: "SLACK_ALLOWED_USER_IDS", label: "Your Slack user id (U…)", secret: false },
+        { key: "SLACK_ALLOWED_CHANNEL_IDS", label: "Allowed public channel ids (C…, comma-separated)", secret: false },
         { key: "SLACK_INTERACTION", label: "Interaction level", type: "select", default: "notify",
           options: [
             { value: "off", label: "Off — no messages" },
@@ -131,8 +134,11 @@
     },
     {
       title: "Local previews",
-      note: "Preview a task's branch from its card (▶ Preview). Each runs on its own port; they auto-stop after 2h idle and are capped at 4 concurrent.",
+      note: "New UI ticket branches use a separate trusted Rust API checkout against production data. Database and HTTP writes are disabled, and ticket code never receives the credential.",
       fields: [
+        { key: "MC_PREVIEW_API_RUNNER_ROOT", label: "Trusted backend checkout", secret: false },
+        { key: "MC_PREVIEW_PROD_READ_DATABASE_URL", label: "Production reader Postgres URL", secret: true },
+        { key: "__preview_save", type: "action", action: "save_section" },
         { key: "__previews_stop_all", type: "action", action: "previews_stop_all" },
       ],
     },

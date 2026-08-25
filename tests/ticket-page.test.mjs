@@ -3,7 +3,8 @@
 // by the Python planner, so the page reads them through /api/tasks/:id/plan.
 
 import assert from "node:assert/strict";
-import { mkdtempSync, mkdirSync, writeFileSync, rmSync, readFileSync, readdirSync } from "node:fs";
+import { spawn } from "node:child_process";
+import { mkdtempSync, mkdirSync, writeFileSync, rmSync, readFileSync, readdirSync, existsSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { Readable } from "node:stream";
@@ -35,7 +36,7 @@ function mockRes() {
 }
 
 /** A handler backed by a scratch MC_HOME so plan files can be planted on disk. */
-async function withHandler(fn) {
+async function withHandler(fn, dependencies = {}) {
   const dir = mkdtempSync(join(tmpdir(), "mc-ticket-"));
   const priorHome = process.env.MC_HOME;
   process.env.MC_HOME = dir;
@@ -43,7 +44,7 @@ async function withHandler(fn) {
   db.initSchema();
   db.seedDefaults();
   try {
-    return await fn(createHandler(db, SILENT), db, dir);
+    return await fn(createHandler(db, SILENT, undefined, dependencies), db, dir);
   } finally {
     db.close();
     if (priorHome === undefined) delete process.env.MC_HOME;
@@ -73,6 +74,7 @@ test("the ticket page is served and carries no external requests", () => {
   assert.doesNotMatch(html, /<script[^>]+src=/i);
   assert.doesNotMatch(html, /https?:\/\/fonts\./i);
   assert.match(html, /\/api\/tasks\//);
+  assert.match(html, /\/checkpoints/, "the ticket must load actionable checkpoints");
 });
 
 test("GET /ticket returns the page", async () => {
@@ -135,6 +137,74 @@ test("the dashboard routes to the ticket page from both the card and the drawer"
   // Without stopPropagation the click toggles the card instead of following the link.
   assert.match(appJs, /TICKET[^`]*|onclick="event\.stopPropagation\(\)"/);
   assert.match(indexHtml, /id="drawer-ticket-link"/, "the drawer must link out too");
+});
+
+test("child processes never become standalone task cards when their parent is hidden", () => {
+  const appJs = readFileSync(new URL("../public/app.js", import.meta.url), "utf8");
+  const start = appJs.indexOf("const getProcessedTasks = () => {");
+  const end = appJs.indexOf("\n        const renderTasks = () => {", start);
+  assert.ok(start >= 0 && end > start, "getProcessedTasks must remain extractable for regression coverage");
+
+  const getProcessedTasks = new Function(
+    "state",
+    "STATUSES",
+    "PRIORITIES",
+    `${appJs.slice(start, end)}\nreturn getProcessedTasks;`,
+  )(
+    {
+      filter: "all",
+      showDoneCards: false,
+      sort: "newest",
+      tasks: [
+        { id: "parent", title: "MET-645", status: "done", created_at: "2026-08-20T17:00:00Z" },
+        {
+          id: "child",
+          title: "MET-645 — wrong repo",
+          status: "on_hold",
+          parent_task_id: "parent",
+          created_at: "2026-08-20T18:00:00Z",
+        },
+      ],
+    },
+    ["inbox", "planning", "in_progress", "assigned", "review", "on_hold", "done", "failed"],
+    { low: 1, normal: 2, high: 3, urgent: 4 },
+  );
+
+  assert.deepEqual(getProcessedTasks(), [], "a child must not replace its filtered-out parent card");
+});
+
+test("visible parent cards retain their child process context regardless of child status", () => {
+  const appJs = readFileSync(new URL("../public/app.js", import.meta.url), "utf8");
+  const start = appJs.indexOf("const getProcessedTasks = () => {");
+  const end = appJs.indexOf("\n        const renderTasks = () => {", start);
+  const state = {
+    filter: "review",
+    showDoneCards: false,
+    sort: "newest",
+    tasks: [
+      { id: "parent", title: "MET-645", status: "review", created_at: "2026-08-20T17:00:00Z" },
+      {
+        id: "child",
+        title: "MET-645 — backend",
+        status: "done",
+        parent_task_id: "parent",
+        created_at: "2026-08-20T18:00:00Z",
+      },
+    ],
+  };
+  const getProcessedTasks = new Function(
+    "state",
+    "STATUSES",
+    "PRIORITIES",
+    `${appJs.slice(start, end)}\nreturn getProcessedTasks;`,
+  )(state, ["inbox", "planning", "in_progress", "assigned", "review", "on_hold", "done", "failed"], {
+    low: 1, normal: 2, high: 3, urgent: 4,
+  });
+
+  const cards = getProcessedTasks();
+  assert.equal(cards.length, 1);
+  assert.equal(cards[0].id, "parent");
+  assert.deepEqual(cards[0].children.map(child => child.id), ["child"]);
 });
 
 // The plan graph is built client-side, so serving the page proves nothing about it.
@@ -332,6 +402,10 @@ test("delegating and deferring are mutually exclusive", async () => {
     assert.equal(q.delegate_requested, true);
     assert.equal(q.deferred, false);
 
+    await act(handler, task.id, "q1", "delegate");
+    assert.equal(db.listActivities(task.id).filter(a => a.activity_type === "question_delegated").length, 1,
+      "a stale double-click must not create repeated handoff events");
+
     q = JSON.parse((await act(handler, task.id, "q1", "defer")).body).triage_state.questions[0];
     assert.equal(q.deferred, true);
     assert.equal(q.delegate_requested, false, "deferring cancels the handover");
@@ -406,12 +480,99 @@ test("resetting triage archives the plan, so a kicked-back ticket is not still p
   });
 });
 
+test("resetting triage stops and archives the detached planning run", async () => {
+  await withHandler(async (handler, db, home) => {
+    const task = db.createTask({ title: "restart planning" });
+    const child = spawn(process.execPath, ["-e", "setInterval(() => {}, 1000)"], {
+      detached: true,
+      stdio: "ignore",
+    });
+    child.unref();
+    const jobDir = join(home, "bridge", "plan-stage");
+    mkdirSync(jobDir, { recursive: true });
+    writeFileSync(join(jobDir, `${task.id}.job.json`), JSON.stringify({
+      state: "running",
+      pid: child.pid,
+      task: { id: task.id },
+    }));
+
+    try {
+      const res = mockRes();
+      await handler(mockReq({ url: `/api/tasks/${task.id}/reset-triage`, method: "POST", body: {} }), res);
+      assert.equal(res.statusCode, 200);
+      assert.ok(!existsSync(join(jobDir, `${task.id}.job.json`)), "the stale live receipt is gone");
+      assert.equal(readdirSync(join(home, "bridge", "archive", "plan-stage")).length, 1);
+
+      await new Promise(resolve => setTimeout(resolve, 100));
+      assert.throws(() => process.kill(child.pid, 0), err => err?.code === "ESRCH");
+      assert.match(db.listActivities(task.id)[0].message, /active planning run was stopped/i);
+    } finally {
+      try { process.kill(-child.pid, "SIGKILL"); } catch {}
+    }
+  });
+});
+
 test("resetting a task that was never planned is not an error", async () => {
   await withHandler(async (handler, db) => {
     const task = db.createTask({ title: "never planned" });
     const res = mockRes();
     await handler(mockReq({ url: `/api/tasks/${task.id}/reset-triage`, method: "POST", body: {} }), res);
     assert.equal(res.statusCode, 200);
+  });
+});
+
+test("resetting a review task closes its PR and records that it can be reused", async () => {
+  const seen = [];
+  const prUrl = "https://github.com/acme/backend/pull/42";
+  await withHandler(async (handler, db) => {
+    const task = db.createTask({ title: "MET-42 revise it", status: "review" });
+    db.createDeliverable({ task_id: task.id, deliverable_type: "pr", title: "PR #42", path: prUrl });
+    const staleCheckpoint = db.createCheckpoint({
+      task_id: task.id,
+      kind: "choice",
+      prompt: "What should happen to the old PR?",
+    });
+
+    const res = mockRes();
+    await handler(mockReq({ url: `/api/tasks/${task.id}/reset-triage`, method: "POST", body: {} }), res);
+    assert.equal(res.statusCode, 200);
+    assert.equal(db.getTask(task.id).status, "inbox");
+    assert.deepEqual(seen, [prUrl]);
+    assert.equal(db.getCheckpoint(staleCheckpoint.id).status, "cancelled");
+    assert.equal(db.countPendingCheckpoints(task.id), 0);
+
+    const reset = db.listActivities(task.id).find(activity => activity.activity_type === "triage_reset");
+    assert.ok(reset);
+    assert.match(reset.message, /same PR will be reopened/i);
+    assert.deepEqual(JSON.parse(reset.metadata), {
+      pr_url: prUrl,
+      pr_state: "CLOSED",
+      pr_disposition: "reuse_if_same_repo",
+    });
+  }, {
+    resetPullRequest: async url => {
+      seen.push(url);
+      return { url, state: "CLOSED", closed: true };
+    },
+  });
+});
+
+test("a reset fails closed when GitHub cannot close the review PR", async () => {
+  const prUrl = "https://github.com/acme/backend/pull/43";
+  await withHandler(async (handler, db) => {
+    const task = db.createTask({ title: "MET-43 keep review intact", status: "review" });
+    db.replaceTriageState(task.id, { confirmed: true, questions: [] });
+    db.createDeliverable({ task_id: task.id, deliverable_type: "pr", title: "PR #43", path: prUrl });
+
+    const res = mockRes();
+    await handler(mockReq({ url: `/api/tasks/${task.id}/reset-triage`, method: "POST", body: {} }), res);
+    assert.equal(res.statusCode, 502);
+    assert.equal(db.getTask(task.id).status, "review");
+    assert.equal(db.getTriageState(task.id).confirmed, true);
+    assert.match(JSON.parse(res.body).error, /could not be closed/i);
+    assert.equal(db.listActivities(task.id).some(activity => activity.activity_type === "triage_reset"), false);
+  }, {
+    resetPullRequest: async () => { throw new Error("not authenticated"); },
   });
 });
 
@@ -448,6 +609,29 @@ const CONVO = [
   { id: "t2", becomes: "D-04", question: "Rate-limit now?", deferred: true },
 ];
 
+test("pending checkpoints replace the idle composer with resolvable actions", () => {
+  const { renderConversation } = convoHelpers();
+  const out = renderConversation({ questions: [] }, null, {
+    checkpoints: [{
+      id: "cp-focus-ring",
+      kind: "choice",
+      prompt: "Choose the focus-ring treatment",
+      options: JSON.stringify(["Inverse ring", "Plain outline", "Accept as-is"]),
+      status: "pending",
+    }],
+  });
+
+  assert.match(out, /Your input is needed/);
+  assert.match(out, /Choose the focus-ring treatment/);
+  assert.match(out, /Choose an option or write the answer the agent needs/);
+  assert.match(out, /placeholder="Write your answer…"/);
+  assert.match(out, />Submit answer</);
+  assert.match(out, /data-checkpoint="cp-focus-ring"/);
+  assert.match(out, /data-cp-response="Plain outline"/);
+  assert.match(out, /data-cp-submit/);
+  assert.doesNotMatch(out, /Nothing is waiting on you/);
+});
+
 test("everything the agent asked and everything said back is one stream", () => {
   const { renderConversation } = convoHelpers();
   const out = renderConversation({ questions: CONVO }, null);
@@ -483,17 +667,28 @@ test("the composer points at what is blocking, planner questions first", () => {
   assert.equal(activeQuestion([CONVO[1], CONVO[2]], null), null);
 });
 
-test("clicking decides and typing talks", () => {
+test("answering and chatting use separate fields and separate actions", () => {
   const { renderConversation } = convoHelpers();
   const out = renderConversation({ questions: CONVO }, null);
   // An option settles the question outright.
   assert.match(out, /data-answer="Host &amp; Link"/);
-  // Typing has two destinations, and the safe one is a message.
+  // A free-text answer belongs to the live question and has one outcome.
+  assert.match(out, /data-answer-box="p1"/);
+  assert.match(out, /data-free="p1"/);
+  assert.match(out, /data-submit-answer="p1"/);
+  assert.match(out, />Submit answer</);
+  // The footer composer only talks to the agent.
   assert.match(out, /data-send="ask"/);
-  assert.match(out, /data-send="answer"/);
-  // The exits stay available on whichever question is in focus.
+  assert.doesNotMatch(out, /data-send="answer"/);
+  assert.match(out, /Ask a follow-up about this question/);
+  assert.match(out, /Messages here only continue the conversation/);
+  assert.match(out, /placeholder="Ask a follow-up question…"/);
+  assert.match(out, />Ask</);
+  // Delegation stays with the question instead of masquerading as chat.
   assert.match(out, /data-act="delegate"/);
-  assert.match(out, /data-act="defer"/);
+  assert.match(out, />Let the agent decide</);
+  assert.doesNotMatch(out, />You decide</);
+  assert.doesNotMatch(out, />Decide for me</);
 });
 
 test("the panel says what is settled and what is blocking, without scrolling", () => {
@@ -511,7 +706,7 @@ test("the panel says what is settled and what is blocking, without scrolling", (
 test("with nothing open the composer stops asking for an answer", () => {
   const { renderConversation } = convoHelpers();
   const out = renderConversation({ questions: [CONVO[1]] }, null);
-  assert.doesNotMatch(out, /data-send="answer"/, "there is nothing to answer");
+  assert.doesNotMatch(out, /data-submit-answer/, "there is nothing to answer");
   // Nothing to answer is not nothing to do: the daemon will not dispatch until a
   // human confirms, so that is what the composer offers instead.
   assert.match(out, /data-act="confirm"/);
@@ -553,13 +748,15 @@ test("the stream asks one question, not all of them at once", () => {
   assert.doesNotMatch(out, /Rate limit\?[\s\S]*data-answer/, "later ones are not asked yet");
   assert.doesNotMatch(out, /Feature flag\?[\s\S]*data-answer/);
 
-  // The composer says what the answer binds and what is left, not the question again.
-  assert.match(out, /Your answer becomes <b>D-02<\/b>/);
+  // The answer field says what it settles and is attached to the question itself.
+  assert.match(out, /data-answer-box="b"/);
+  assert.match(out, /<span>settles D-02<\/span>/);
   assert.match(out, /2 more after this/);
   // Exactly one askable question: only the live one carries pills. Settled ones
   // still hold their own question text inside their collapsed group, which is the
   // record, not a second thing to answer.
   assert.equal((out.match(/class="cpills"/g) || []).length, 1);
+  assert.equal((out.match(/class="qanswer"/g) || []).length, 1);
   assert.match(out, /title="Variable or static\?"/, "the rail keeps the full text on hover");
 });
 
@@ -676,6 +873,28 @@ test("a settled question stops offering its options", () => {
   assert.match(out, /data-answer="Variable"/);
 });
 
+test("a delegated question stays visible while the agent decides", () => {
+  const { renderConversation } = convoHelpers();
+  const out = renderConversation({ questions: [{
+    id: "a", becomes: "D-01", question: "Which fallback?", options: ["A", "B"],
+    delegate_requested: true,
+  }] }, null);
+  assert.match(out, /Agent deciding…/);
+  assert.match(out, /question stays open/);
+  assert.doesNotMatch(out, /data-submit-answer/);
+  assert.doesNotMatch(out, /Let the agent decide/);
+});
+
+test("an answer returned from delegation opens its receipt", () => {
+  const { renderConversation } = convoHelpers();
+  const out = renderConversation({ questions: [{
+    id: "a", becomes: "D-01", question: "Which fallback?", answer: "A",
+    answered_by: "agent", delegated_answer: true,
+  }] }, null);
+  assert.match(out, /<details class="csettled" open>/);
+  assert.match(out, /A · chosen for you/);
+});
+
 // ─────────── the thread after triage settles (design 2c) ───────────
 // The same thread keeps going: no new screen and no "submit". The plan arrives as
 // a message, because that is when it arrives, and the decisions it was built from
@@ -716,6 +935,29 @@ test("with the questions settled the thread marks the moment and keeps going", (
   const confirmed = renderConversation({ questions: SETTLED, confirmed: true }, null,
     { plan: PLAN, progress: PROGRESS });
   assert.match(confirmed, /Nothing is waiting on you/);
+});
+
+test("a pending checkpoint is a full question in the conversation with one attached answer flow", () => {
+  const { renderConversation } = threadHelpers();
+  const prompt = "MET-651 draft PR #700 is up. Please re-check the visual items against the recording before merge.";
+  const out = renderConversation({ questions: SETTLED, confirmed: true }, null, {
+    taskStatus: "review",
+    checkpoints: [{
+      id: "cp-1", kind: "question", status: "pending", prompt,
+      created_at: "2026-08-21T17:00:00Z",
+    }],
+    activities: [{
+      activity_type: "checkpoint_raised", message: prompt,
+      created_at: "2026-08-21T17:00:00Z",
+    }],
+  });
+
+  assert.equal((out.match(/MET-651 draft PR #700 is up/g) || []).length, 1,
+    "the prompt is not duplicated between the conversation, composer, and activity rail");
+  assert.match(out, /class="cmsg checkpoint-message"/);
+  assert.match(out, /agent · input needed/);
+  assert.match(out, /id="checkpoint-reply"/);
+  assert.match(out, /Answer the question above/);
 });
 
 test("the mark is not drawn before there is anything to mark", () => {
@@ -802,6 +1044,157 @@ test("the count turns green only when nothing is blocking", () => {
     /class="tk-count ">2 of 3 settled/);
 });
 
+test("the ticket summary leaves execution detail to the right status card", () => {
+  const { renderTicket, renderConversation } = threadHelpers();
+  const task = {
+    id: "t1",
+    title: "[MET-635] Implement brand guideline changes",
+    status: "in_progress",
+    created_at: "2026-08-11T10:00:00Z",
+    updated_at: "2026-08-13T10:00:00Z",
+    external_url: "https://linear.app/example/MET-635",
+    description: "base-branch: coda/new-ui\ntarget app: `apps/new-ui`\nApply the canonical prototype.",
+  };
+  const triage = {
+    questions: SETTLED,
+    execution_target: {
+      repos: [{ project: "GitProjects", repo: "backend", label: "GitProjects/backend", base_branch: "origin/master" }],
+      apps: ["apps/frontend"],
+    },
+  };
+  const out = renderTicket(task, triage, [], { plan: PLAN, progress: PROGRESS });
+  const status = renderConversation(triage, null, { task, plan: PLAN, progress: PROGRESS });
+
+  assert.match(out, /class="ticket-summary"/);
+  assert.doesNotMatch(out, /class="stage-flow"/,
+    "the ticket summary no longer repeats execution state as a large process chart");
+  assert.match(out, /class="tk-title"[^>]*>Implement brand guideline changes</,
+    "the reference is printed beside the title, not repeated inside it");
+  assert.doesNotMatch(out, /<span class="k">(?:repo|base|app)<\/span>/,
+    "execution facts no longer lengthen the main ticket card");
+  assert.match(status, /class="status-target"/);
+  assert.match(status, /<span class="k">repo<\/span><span class="v"[^>]*>GitProjects\/backend/);
+  assert.match(status, /<span class="k">base<\/span><span class="v"[^>]*>origin\/master/);
+  assert.match(status, /<span class="k">app<\/span><span class="v"[^>]*>apps\/frontend/);
+  const html = readFileSync(new URL("../public/ticket.html", import.meta.url), "utf8");
+  assert.match(html, /\.status-target-grid\s*\{[^}]*grid-template-columns:[^;]*1\.35fr[^;]*repeat\(2,/s,
+    "Repo, Base, and App stay on one compact line in the right card");
+  assert.doesNotMatch(out, /<span class="k">(?:source|handoff|state)<\/span>/,
+    "the summary keeps one useful metadata row instead of repeating ticket state and source context");
+  assert.doesNotMatch(out, /View source|https:\/\/linear\.app\/example\/MET-635/,
+    "the main card does not duplicate the source-ticket link from the status card");
+  assert.match(out, /class="summary-action primary" data-planopen>Open plan</);
+  assert.match(out, /class="summary-action hold" data-hold-task>Pause task<\/button>/);
+});
+
+test("the ticket detail offers the existing local preview flow", () => {
+  const { renderTicket } = threadHelpers();
+  const base = { id: "t1", title: "Preview me", status: "in_progress", updated_at: "2026-08-20T20:00:00Z" };
+  assert.doesNotMatch(renderTicket(base, null, []), /data-start-preview|>Start preview<|>Open preview|Preview after build/,
+    "an active build does not offer preview before the work is ready");
+  assert.doesNotMatch(renderTicket({ ...base, status: "planning" }, null, []),
+    /data-start-preview|>Start preview<|>Open preview|Preview after build/,
+    "pre-build tickets omit the action instead of showing a disabled placeholder");
+  assert.match(renderTicket({ ...base, status: "review" }, null, []),
+    /data-start-preview[^>]*>Start preview<\/button>/);
+  assert.match(renderTicket({ ...base, status: "review", preview: { url: "http:\/\/127.0.0.1:4173", app: "apps\/new-ui" } }, null, []),
+    /href="http:\/\/127.0.0.1:4173"[^>]*>Open preview<\/a>/);
+  assert.match(renderTicket({ ...base, status: "done", preview: { url: "http:\/\/127.0.0.1:4173", app: "apps\/new-ui", apiReadOnly: true } }, null, []),
+    />Open preview · prod read-only<\/a>/);
+  assert.doesNotMatch(renderTicket({ ...base, status: "on_hold" }, null, []), /data-start-preview|>Open preview/,
+    "holding an unfinished build does not make it preview-ready");
+  assert.match(renderTicket({ ...base, status: "on_hold", pr_url: "https:\/\/github.com\/acme\/app\/pull\/700" }, null, []),
+    /data-start-preview[^>]*>Start preview<\/button>/,
+    "a review-ready ticket keeps preview access after it is put on hold");
+  assert.match(renderTicket({ ...base, status: "on_hold" }, null, [], {
+    plan: PLAN,
+    progress: { steps: Object.fromEntries(PLAN.steps.map(step => [step.step, { status: "completed" }])) },
+  }), /data-start-preview[^>]*>Start preview<\/button>/,
+  "a completed plan is sufficient review evidence even when no PR is recorded");
+  assert.match(renderTicket({ ...base, status: "on_hold", preview: { url: "http:\/\/127.0.0.1:4173" } }, null, []),
+    />Open preview<\/a>/, "an already-running preview remains reachable while held");
+
+  const html = readFileSync(new URL("../public/ticket.html", import.meta.url), "utf8");
+  const fn = html.slice(html.indexOf("async function startTaskPreview("), html.indexOf("async function putTaskOnHold("));
+  assert.match(fn, /\/preview`, \{ method: "POST" \}/);
+  assert.match(fn, /window\.open\(data\.url, "_blank", "noopener"\)/);
+});
+
+test("the dead Open conversation action is not rendered or wired", () => {
+  const html = readFileSync(new URL("../public/ticket.html", import.meta.url), "utf8");
+  assert.doesNotMatch(html, /data-open-conversation|Open conversation/);
+});
+
+test("the pause switch parks active work without offering to pause an already held task", () => {
+  const { renderTicket } = threadHelpers();
+  const task = { id: "t1", title: "T", status: "in_progress", updated_at: "2026-08-20T20:00:00Z" };
+  assert.match(renderTicket(task, { questions: SETTLED }, [], { plan: PLAN }), /data-hold-task>Pause task/);
+  assert.doesNotMatch(renderTicket({ ...task, status: "on_hold" }, { questions: SETTLED }, [], { plan: PLAN }), /data-hold-task/);
+
+  const html = readFileSync(new URL("../public/ticket.html", import.meta.url), "utf8");
+  const start = html.indexOf("async function putTaskOnHold(");
+  const fn = html.slice(start, start + 1000);
+  assert.match(fn, /method:\s*"PATCH"/);
+  assert.match(fn, /JSON\.stringify\(\{ status: "on_hold" \}\)/,
+    "pausing is a reversible status transition, not task deletion");
+  assert.doesNotMatch(fn, /method:\s*"DELETE"/);
+});
+
+test("pause and triage reset share an explicit in-page safety panel", () => {
+  const { renderTicket } = threadHelpers();
+  const task = { id: "t1", title: "T", status: "in_progress", updated_at: "2026-08-20T20:00:00Z" };
+  const out = renderTicket(task, { questions: SETTLED }, [], { plan: PLAN });
+  assert.match(out, /data-reset-triage>Reset triage<\/button>/);
+
+  const html = readFileSync(new URL("../public/ticket.html", import.meta.url), "utf8");
+  assert.match(html, /<dialog class="safety-dialog" id="safety-confirm">/);
+  const pause = html.slice(html.indexOf("async function putTaskOnHold("), html.indexOf("async function resetTaskTriage("));
+  const reset = html.slice(html.indexOf("async function resetTaskTriage("), html.indexOf("async function postNote("));
+  assert.match(pause, /await confirmSafety\(/);
+  assert.match(reset, /await confirmSafety\(/);
+  assert.match(reset, /reset-triage`, \{ method: "POST" \}/);
+  assert.match(reset, /delete ticketPlanCache\[taskId\]/,
+    "reset removes the archived plan snapshot before repainting the ticket");
+});
+
+test("the colored status card carries a prominent link to the source ticket", () => {
+  const { renderConversation } = threadHelpers();
+  const url = "https://linear.app/acme/issue/MET-642/correct-focus-rings";
+  const out = renderConversation({ questions: SETTLED }, null, {
+    task: { id: "t1", title: "[MET-642] Correct focus rings", status: "review", external_url: url },
+    taskStatus: "review", activities: [],
+  });
+  assert.match(out, new RegExp(`class="status-ticket-ref" href="${url}"[^>]*>MET-642 ↗<`));
+
+  const html = readFileSync(new URL("../public/ticket.html", import.meta.url), "utf8");
+  assert.match(html, /\.status-ticket-ref\s*\{[^}]*font-size:\s*18px;/s);
+});
+
+test("review puts its PR action on the colored status card", () => {
+  const { renderConversation } = threadHelpers();
+  const prUrl = "https://github.com/acme/app/pull/687";
+  const out = renderConversation({ questions: SETTLED }, null, {
+    task: { id: "t1", title: "Review me", status: "review", updated_at: "2026-08-20T20:00:00Z" },
+    taskStatus: "review", plan: PLAN, progress: {}, activities: [], deliverables: [
+      { deliverable_type: "pr", title: "Pull Request #687", path: prUrl },
+    ],
+  });
+
+  assert.match(out, /class="ticket-status-panel tone-review"/);
+  assert.doesNotMatch(out, />lifecycle<\/span>/);
+  assert.match(out, new RegExp(`class="status-pr" href="${prUrl}"[^>]*>Go to pull request<`));
+});
+
+test("review omits the PR action when no link is recorded", () => {
+  const { renderConversation } = threadHelpers();
+  const out = renderConversation({ questions: SETTLED }, null, {
+    task: { id: "t1", title: "Review me", status: "review", updated_at: "2026-08-20T20:00:00Z" },
+    taskStatus: "review", plan: PLAN, progress: {}, activities: [], deliverables: [],
+  });
+  assert.doesNotMatch(out, /PR not recorded/);
+  assert.doesNotMatch(out, /class="status-pr"/);
+});
+
 test("the rail's segments follow the steps once there is a plan", () => {
   // Before it they are the questions, because that is the only progress triage has.
   const { renderRail } = threadHelpers();
@@ -815,6 +1208,145 @@ test("the rail's segments follow the steps once there is a plan", () => {
     { questions: SETTLED }, {});
   assert.match(triaging, /class="dim">triage<\/span>/);
   assert.match(triaging, /class="n">2\/2</);
+});
+
+test("ticket rail keeps the operational group order", () => {
+  const { renderRail } = threadHelpers();
+  const tasks = [
+    { id: "triage", status: "planning", title: "Triage", external_id: "MET-1" },
+    { id: "building", status: "in_progress", title: "Building", external_id: "MET-2" },
+    { id: "holding", status: "on_hold", title: "Holding", external_id: "MET-3" },
+    { id: "review", status: "review", title: "Review", external_id: "MET-2" },
+    { id: "done", status: "done", title: "Done", external_id: "MET-4" },
+  ];
+  const out = renderRail(tasks, tasks[0], null, {});
+  const headings = [">TRIAGE<", ">BUILDING<", ">REVIEW<", ">HOLDING<", ">DONE<"];
+  for (let i = 1; i < headings.length; i += 1) {
+    assert.ok(out.indexOf(headings[i - 1]) < out.indexOf(headings[i]),
+      `${headings[i - 1]} must stay before ${headings[i]}`);
+  }
+});
+
+test("selecting a ticket never reorders cards within its rail group", () => {
+  const { renderRail } = threadHelpers();
+  const tasks = [
+    { id: "newest", external_id: "MET-3", title: "Newest", status: "in_progress" },
+    { id: "middle", external_id: "MET-2", title: "Middle", status: "in_progress" },
+    { id: "oldest", external_id: "MET-1", title: "Oldest", status: "in_progress" },
+  ];
+  const out = renderRail(tasks, tasks[1], { questions: [] });
+  assert.ok(out.indexOf("MET-3") < out.indexOf("MET-2"));
+  assert.ok(out.indexOf("MET-2") < out.indexOf("MET-1"),
+    "the active card is highlighted in place instead of promoted to the top");
+});
+
+test("selecting another ticket does not clear a visited card's plan steps", () => {
+  const { renderRail } = threadHelpers();
+  const tasks = [
+    { id: "first", external_id: "MET-3", title: "First", status: "in_progress" },
+    { id: "second", external_id: "MET-2", title: "Second", status: "in_progress" },
+  ];
+  const firstPlan = {
+    plan: PLAN,
+    progress: { steps: { "1": { status: "completed" }, "2": { status: "in_progress" } } },
+  };
+  const out = renderRail(tasks, tasks[1], { questions: [] }, {}, { first: firstPlan });
+  const firstCard = out.slice(out.indexOf('href="/ticket?id=first"'), out.indexOf('</a>', out.indexOf('href="/ticket?id=first"')));
+
+  assert.match(firstCard, /class="dim">step<\/span>/);
+  assert.match(firstCard, /class="n">1\/4<\/span>/);
+  assert.equal((firstCard.match(/<i class=/g) || []).length, 4,
+    "the remembered card retains its plan-step segments after selection moves away");
+});
+
+test("a non-selected planning ticket shows its answers, not lifecycle stage 2 of 6", () => {
+  const { renderRail } = threadHelpers();
+  const answered = Array.from({ length: 8 }, (_, i) => ({
+    id: `q${i + 1}`, question: `Q${i + 1}`, answer: `A${i + 1}`,
+  }));
+  const tasks = [
+    { id: "selected", status: "in_progress", title: "Selected" },
+    { id: "met648", status: "planning", title: "MET-648", external_id: "MET-648",
+      triage_state: JSON.stringify({ questions: answered }) },
+  ];
+  const out = renderRail(tasks, tasks[0], { questions: [] }, {});
+  const card = out.slice(out.indexOf('href="/ticket?id=met648"'), out.indexOf("</a>", out.indexOf('href="/ticket?id=met648"')));
+  assert.match(card, /triage/);
+  assert.match(card, /8\/8/);
+  assert.doesNotMatch(card, /2\/6/);
+});
+
+test("the ticket rail marks every ticket that is waiting on the operator", () => {
+  const { renderRail } = threadHelpers();
+  const tasks = [
+    { id: "question", status: "planning", title: "Choose a repo", external_id: "MET-1",
+      triage_state: JSON.stringify({ questions: [{ id: "q1", question: "Which repo?" }] }) },
+    { id: "confirm", status: "planning", title: "Confirm the plan", external_id: "MET-2",
+      triage_state: JSON.stringify({ questions: [], confirmed: false }) },
+    { id: "checkpoint", status: "on_hold", title: "Approve a decision", external_id: "MET-3",
+      pending_checkpoints: 1 },
+    { id: "review", status: "review", title: "Review the pull request", external_id: "MET-4" },
+    { id: "building", status: "in_progress", title: "Agent is working", external_id: "MET-5" },
+  ];
+  const out = renderRail(tasks, tasks[4], null, {});
+  const card = id => {
+    const href = out.indexOf(`href="/ticket?id=${id}"`);
+    const start = out.lastIndexOf("<a ", href);
+    return out.slice(start, out.indexOf("</a>", start));
+  };
+
+  for (const id of ["question", "confirm", "checkpoint"]) {
+    assert.match(card(id), /class="rt needs-you/,
+      `${id} should receive the amber attention treatment`);
+    assert.match(card(id), /class="rt-needs-icon"/,
+      `${id} should carry the bell icon`);
+    assert.match(card(id), /aria-label="Needs your attention:/,
+      `${id} needs a non-color accessible explanation`);
+  }
+  assert.doesNotMatch(card("building"), /needs-you|rt-needs-icon/,
+    "ordinary agent-owned work must not look like it is waiting on the operator");
+  // "In review" is what the column already says, and it is a state no action on
+  // this page clears — so the bell would be permanent for every reviewable task.
+  // Spending the amber on the expected state of a whole column is how the signal
+  // stops being read.
+  assert.doesNotMatch(card("review"), /needs-you|rt-needs-icon/,
+    "review status alone is not a concrete outstanding item");
+});
+
+test("a task in review still raises the bell for a real outstanding item", () => {
+  const { renderRail } = threadHelpers();
+  // The distinction that matters: the bell tracks the checkpoint, not the status.
+  const tasks = [
+    { id: "plain", status: "review", title: "Review the pull request", external_id: "MET-7" },
+    { id: "asking", status: "review", title: "Review, but blocked", external_id: "MET-8",
+      pending_checkpoints: 1 },
+  ];
+  const out = renderRail(tasks, tasks[0], null, {});
+  const card = id => {
+    const href = out.indexOf(`href="/ticket?id=${id}"`);
+    const start = out.lastIndexOf("<a ", href);
+    return out.slice(start, out.indexOf("</a>", start));
+  };
+
+  assert.doesNotMatch(card("plain"), /needs-you|rt-needs-icon/);
+  assert.match(card("asking"), /class="rt needs-you/,
+    "a pending decision is actionable regardless of which column it sits in");
+  assert.match(card("asking"), /aria-label="Needs your attention: 1 pending decision"/);
+});
+
+test("a resolved human action clears the rail attention treatment", () => {
+  const { renderRail } = threadHelpers();
+  const settled = {
+    id: "settled", status: "planning", title: "Ready to go", external_id: "MET-6",
+    pending_checkpoints: 0,
+    triage_state: JSON.stringify({
+      confirmed: true,
+      questions: [{ id: "q1", question: "Which repo?", answer: "GitProjects/backend" }],
+    }),
+  };
+  const out = renderRail([settled], settled, JSON.parse(settled.triage_state), {});
+
+  assert.doesNotMatch(out, /needs-you|rt-needs-icon/);
 });
 
 // ─────────── the top nav (design 2b, revised) ───────────
@@ -878,6 +1410,60 @@ test("settling every question is not the same as starting the work", () => {
   assert.doesNotMatch(out, /the planner runs next/);
   assert.doesNotMatch(out, /no plan on disk yet/);
   assert.match(out, /confirming creates the branch and worktree/, "the write says what it writes");
+});
+
+test("a new ticket confirms one repository before it can confirm planning", () => {
+  const { renderConversation, renderTicket } = threadHelpers();
+  const triage = {
+    questions: SETTLED,
+    triage_repos: [{ project: "GitProjects", repo: "backend" }],
+    execution_target: { repos: [{ project: "GitProjects", repo: "backend", label: "GitProjects/backend" }] },
+  };
+  const task = {
+    id: "t", external_id: "MET-648", title: "Carousel", status: "planning",
+    description: "Target app: apps/new-ui", created_at: "2026-08-20T17:00:00Z",
+    updated_at: "2026-08-20T18:00:00Z",
+  };
+  const ticket = renderTicket(task, triage, [], { repoOptions: ["GitProjects/backend"] });
+  const target = renderConversation(triage, null, { task, repoOptions: ["GitProjects/backend"] });
+  assert.doesNotMatch(ticket, /data-repo-select|class="status-target"/,
+    "the main ticket card does not duplicate execution targeting");
+  assert.match(target, /data-repo-select/);
+  assert.match(target, /<div class="fld repo-field"><span class="k">repo<\/span>/);
+  assert.match(target, /Select repository…/,
+    "an unconfirmed suggestion must require an explicit dropdown choice");
+  assert.doesNotMatch(target, /repo-confirm|data-confirm-repo|Repository confirmed/,
+    "repository selection belongs in the right-side execution facts, not a confirmation row");
+  assert.equal((target.match(/<option value="GitProjects\/backend"/g) || []).length, 1);
+  assert.doesNotMatch(target, /worktrees\/|external\//,
+    "generated worktrees and reference checkouts are not execution choices");
+
+  const gated = renderConversation(triage, null, { task });
+  assert.match(gated, /Choose one repository in the status card/);
+  assert.match(gated, /Use the Repo dropdown on the right/);
+  assert.doesNotMatch(gated, /data-act="confirm"/);
+
+  const repoConfirmed = renderConversation({ ...triage, repo_confirmed: "GitProjects/backend" }, null, { task });
+  assert.match(repoConfirmed, /data-act="confirm"/, "repo receipt unlocks the separate start gate");
+});
+
+test("a dispatched ticket never asks for an impossible repository confirmation", () => {
+  const { renderConversation } = threadHelpers();
+  const triage = {
+    questions: [],
+    triage_repos: [{ project: "GitProjects", repo: "backend" }],
+    execution_target: {
+      repos: [{ project: "GitProjects", repo: "backend", label: "GitProjects/backend" }],
+    },
+  };
+  const out = renderConversation(triage, null, {
+    task: { id: "t", external_id: "MET-651", status: "in_progress" },
+    taskStatus: "in_progress",
+  });
+
+  assert.doesNotMatch(out, /Choose one repository|Repo dropdown|confirm repository/);
+  assert.doesNotMatch(out, /data-act="confirm"/);
+  assert.match(out, /Nothing is waiting on you/);
 });
 
 test("once confirmed the thread stops asking and starts reporting", () => {
@@ -950,14 +1536,18 @@ test("the exchange shows what people said, not the bridge narrating itself", () 
   ];
   const out = renderConversation({ questions: SETTLED, confirmed: true }, null,
     { activities, taskStatus: "review" });
+  const conversation = out.split('<aside class="decisions">')[0];
+  const timeline = out.split('<aside class="decisions">')[1];
 
-  assert.match(out, /why is the header duplicated\?/);
-  assert.match(out, /It reuses SiteHeader twice\./);
-  assert.doesNotMatch(out, /dispatching for 1 repo/, "the bridge narrating itself is not conversation");
-  // A milestone still earns a line, but as an event — never as somebody speaking.
-  assert.doesNotMatch(out, /class="cmsg me"><div class="cbody">Task triaged/);
+  assert.match(conversation, /why is the header duplicated\?/);
+  assert.match(conversation, /It reuses SiteHeader twice\./);
+  assert.doesNotMatch(conversation, /dispatching for 1 repo/,
+    "the bridge narrating itself is not conversation");
+  // Lifecycle narration remains available as timeline history, never as speech.
+  assert.match(timeline, /dispatching for 1 repo/);
+  assert.doesNotMatch(conversation, /class="cmsg me"><div class="cbody">Task triaged/);
   // Yours reads as yours; an agent's carries its avatar.
-  assert.match(out, /class="cmsg me"><div class="cbody">why is the header/);
+  assert.match(conversation, /class="cmsg me"><div class="cbody">why is the header/);
 });
 
 test("the exchange reads in the order it happened", () => {
@@ -998,7 +1588,11 @@ test("every ticket appears in the rail, whatever its status", () => {
   for (const t of tasks) {
     assert.match(out, new RegExp(t.external_id), `${t.status} ticket is missing from the rail`);
   }
-  assert.match(out, /ON HOLD · 1/, "an unnamed status still gets a heading, using its own name");
+  assert.match(out, /HOLDING · 1/);
+  assert.match(out, /class="rgroup tone-hold"/);
+  assert.match(out, /class="rgroup tone-building"/);
+  assert.match(out, /class="rgroup tone-review"/);
+  assert.match(out, /<b>1<\/b>/, "the count has the reference's detached header cell");
 });
 
 test("a parked ticket does not borrow the colour that means an agent has it", () => {
@@ -1006,6 +1600,22 @@ test("a parked ticket does not borrow the colour that means an agent has it", ()
   const parked = { id: "b", status: "on_hold", title: "Parked", external_id: "T-2" };
   const out = renderRail([parked], parked, null, {});
   assert.doesNotMatch(out, /class="rt on build"/, "on_hold is not building");
+});
+
+test("done tickets are collapsed by default and reveal through their group header", () => {
+  const { renderRail } = threadHelpers();
+  const tasks = [
+    { id: "active", status: "in_progress", title: "Building", external_id: "T-1" },
+    { id: "done", status: "done", title: "Finished", external_id: "T-2" },
+  ];
+  const out = renderRail(tasks, tasks[0], null, {});
+
+  assert.match(out, /<details class="rsection tone-building" open>/,
+    "active groups remain expanded");
+  assert.match(out, /<details class="rsection tone-done" >/,
+    "Done uses a closed native disclosure, so clicking its summary reveals the cards");
+  assert.match(out, /<summary class="rgroup tone-done"[^>]*><span>DONE<\/span><b>1<\/b><\/summary>/);
+  assert.match(out, /Finished/, "collapsed tickets remain available inside the disclosure");
 });
 
 test("every ticket is a thread, including one triage had no questions about", () => {
@@ -1024,6 +1634,26 @@ test("every ticket is a thread, including one triage had no questions about", ()
   const confirmed = renderConversation(
     { questions: [], confirmed: true, triage_reasoning: "Single file." }, null, { taskStatus: "in_progress" });
   assert.match(confirmed, /id="say"/, "once confirmed there is somewhere to type");
+});
+
+test("what triage found shows a concise task, issues, and proposed solution", () => {
+  const { renderConversation } = threadHelpers();
+  const out = renderConversation({
+    questions: [],
+    triage_reasoning: "The recording and target application are clear.",
+    triage_brief: {
+      task: "Bring the company page in line with the recorded feedback.",
+      issues: "Numeric text is too heavy, the tab strip scrolls, and Execution Route should be removed.",
+      solution: "Adjust scoped typography and tabs, remove the obsolete section, and reposition the badge.",
+    },
+  }, null, { taskStatus: "planning" });
+
+  assert.match(out, /What triage found/);
+  assert.match(out, /<span class="fk">Task<\/span>/);
+  assert.match(out, /<span class="fk">Issues<\/span>/);
+  assert.match(out, /<span class="fk">Solution<\/span>/);
+  assert.match(out, /Numeric text is too heavy/);
+  assert.match(out, /remove the obsolete section/);
 });
 
 test("triage having no questions reads differently from triage not having run", () => {
@@ -1070,15 +1700,15 @@ test("nothing is attributed to a person unless a person is on it", () => {
   assert.doesNotMatch(out, /class="cmsg me"><div class="cbody">Agent heartbeat/);
 });
 
-test("routine chatter collapses to a count instead of repeating", () => {
+test("routine transport chatter is omitted from the activity timeline", () => {
   const { renderConversation } = threadHelpers();
   const beats = Array.from({ length: 12 }, (_, i) => ({
     activity_type: "updated", message: "Agent heartbeat: task x running (attempt 1/3).",
     created_at: `2026-08-14T10:${String(i).padStart(2, "0")}:00Z` }));
   const out = renderConversation({ questions: SETTLED, confirmed: true }, null,
     { taskStatus: "in_progress", activities: beats });
-  assert.match(out, /12 routine updates/);
-  assert.equal((out.match(/Agent heartbeat/g) || []).length, 0, "the beats themselves are not printed");
+  assert.doesNotMatch(out, /Ticket activity timeline|routine updates|Agent heartbeat/,
+    "heartbeats do not crowd real events out of the timeline");
 });
 
 test("trouble is never collapsed, whatever else is", () => {
@@ -1091,10 +1721,9 @@ test("trouble is never collapsed, whatever else is", () => {
       { activity_type: "updated", message: "Agent spawn failed for repo/x (attempt 2).", created_at: "2" },
       { activity_type: "updated", message: "Agent heartbeat: running.", created_at: "3" },
     ] });
-  assert.match(out, /class="cevent bad"/);
+  assert.match(out, /class="activity-item cevent bad"/);
   assert.match(out, /Agent spawn failed/);
-  // And the runs either side of it stay separate rather than merging across it.
-  assert.equal((out.match(/routine update/g) || []).length, 2);
+  assert.doesNotMatch(out, /Agent heartbeat|routine update/);
 });
 
 test("a milestone reads as an event, not as somebody speaking", () => {
@@ -1102,7 +1731,7 @@ test("a milestone reads as an event, not as somebody speaking", () => {
   const out = renderConversation({ questions: SETTLED, confirmed: true }, null, {
     taskStatus: "in_progress",
     activities: [{ activity_type: "step_completed", message: "Step 2 completed", created_at: "1" }] });
-  assert.match(out, /class="cevent /);
+  assert.match(out, /class="activity-item cevent event"/);
   assert.match(out, /Step 2 completed/);
   assert.doesNotMatch(out, /class="cmsg me"/);
 });
@@ -1111,6 +1740,8 @@ test("a note the page sends marks itself as a person's", () => {
   const html = readFileSync(new URL("../public/ticket.html", import.meta.url), "utf8");
   const fn = html.slice(html.indexOf("async function postNote("), html.indexOf("async function postNote(") + 1100);
   assert.match(fn, /source: "human"/);
+  assert.match(fn, /expects_reply: true/,
+    "ticket chat must enqueue a durable reply instead of drawing an unbacked spinner");
 });
 
 test("a message with nothing back yet shows that a reply is coming", () => {
@@ -1119,7 +1750,8 @@ test("a message with nothing back yet shows that a reply is coming", () => {
   const { renderConversation } = threadHelpers();
   const waiting = renderConversation({ questions: SETTLED, confirmed: true }, null, {
     taskStatus: "review",
-    activities: [{ activity_type: "manual_feedback", message: "why UTC?", created_at: "1" }] });
+    activities: [{ activity_type: "manual_feedback", message: "why UTC?", created_at: "1",
+      expects_reply: 1 }] });
   assert.match(waiting, /class="cthink"/);
 
   const answered = renderConversation({ questions: SETTLED, confirmed: true }, null, {
@@ -1131,6 +1763,21 @@ test("a message with nothing back yet shows that a reply is coming", () => {
   assert.doesNotMatch(answered, /class="cthink"/, "the reply landed, so nothing is pending");
 });
 
+test("lifecycle-handled follow-up changes do not leave a permanent reply animation", () => {
+  const { renderConversation } = threadHelpers();
+  const out = renderConversation({ questions: SETTLED, confirmed: true }, null, {
+    taskStatus: "review",
+    activities: [
+      { activity_type: "manual_feedback", message: "move the badge onto the logo",
+        created_at: "1", expects_reply: 0 },
+      { activity_type: "updated", message: "Change request received from Mission Control — re-launching agent",
+        created_at: "2" },
+    ],
+  });
+  assert.doesNotMatch(out, /class="cthink"/,
+    "a note not queued for chat reply must not claim Mission Control is still replying");
+});
+
 test("routine chatter after your message does not count as a reply", () => {
   // A heartbeat is not an answer, and letting one clear the indicator would say
   // the agent responded when it did not.
@@ -1138,10 +1785,18 @@ test("routine chatter after your message does not count as a reply", () => {
   const out = renderConversation({ questions: SETTLED, confirmed: true }, null, {
     taskStatus: "review",
     activities: [
-      { activity_type: "manual_feedback", message: "why UTC?", created_at: "1" },
+      { activity_type: "manual_feedback", message: "why UTC?", created_at: "1", expects_reply: 1 },
       { activity_type: "updated", message: "Agent heartbeat: running.", created_at: "2" },
     ] });
   assert.match(out, /class="cthink"/);
+});
+
+test("the dashboard note channel also requests a durable reply", () => {
+  const dashboard = readFileSync(new URL("../public/app.js", import.meta.url), "utf8");
+  const start = dashboard.indexOf("els.addNoteForm.addEventListener('submit'");
+  const form = dashboard.slice(start, start + 2300);
+  assert.match(form, /source: ['"]human['"]/);
+  assert.match(form, /expects_reply: true/);
 });
 
 test("machine events live in the rail, not interleaved with the conversation", () => {
@@ -1161,6 +1816,133 @@ test("machine events live in the rail, not interleaved with the conversation", (
   assert.match(rail, /Activity/);
 });
 
+test("the ticket rail leads with the reference's compact status record", () => {
+  const { renderConversation } = threadHelpers();
+  const out = renderConversation({ questions: SETTLED, confirmed: true }, null, {
+    task: { id: "t1", status: "in_progress", agent_profile: "codex" },
+    taskStatus: "in_progress",
+    plan: { steps: [{ step: 1 }, { step: 2 }], parallel_groups: [[1], [2]] },
+    progress: { steps: {
+      "1": { status: "completed" },
+      "2": { status: "in_progress", agent_profile: "pi" },
+    } },
+    agentProgress: { state: "running", phase: "execute", step_label: "Applying company polish" },
+    status: "nothing needs you · 1 of 2 done, 1 running",
+    activities: [],
+  });
+  assert.match(out, /class="ticket-status-panel tone-building"/);
+  assert.match(out, /class="status-kicker"><span class="status-symbol"[^>]*>↗<\/span>in progress</);
+  assert.doesNotMatch(out, />agent<\/span>|>decisions<\/span>|>lifecycle<\/span>|>now<\/span>/);
+  assert.match(out, /class="autos autonomy-badge"/);
+  assert.match(out, /class="status-heading-actions"[\s\S]*class="autos autonomy-badge"/);
+  assert.doesNotMatch(out, /status-autonomy-row|>Autonomy<\/span>/);
+  assert.doesNotMatch(out, /class="wave-bars"/);
+
+  const html = readFileSync(new URL("../public/ticket.html", import.meta.url), "utf8");
+  assert.match(html, /\.shell\s*\{[^}]*width:\s*min\(100%, var\(--shell-max\)\);[^}]*margin:\s*0 auto;/s,
+    "the entire workspace is centred instead of expanding toward the right on wide displays");
+  assert.match(html, /\.ticket\s+\{\s*grid-column:\s*2;\s*grid-row:\s*2;/s);
+  assert.match(html, /\.ticket-status-panel\s+\{\s*grid-column:\s*3;\s*grid-row:\s*2;/s,
+    "the summary and status panel are sibling cells in the same grid row");
+  assert.match(html, /\.rail\s*\{[^}]*padding:\s*28px 16px 20px;/s);
+  assert.match(html, /\.ticket\s*\{[^}]*padding:\s*28px 0 18px var\(--workspace-gap\);/s,
+    "the ticket card aligns with the first rail heading and uses a compact bottom gutter");
+  assert.match(html, /\.ticket-status-panel\s*\{[^}]*margin:\s*28px var\(--workspace-gap\) 18px 0;/s,
+    "the joined ticket card has equal outside spacing while Decisions stays in the right column");
+  assert.match(html, /\.ticket-status-panel\s*\{[^}]*align-self:\s*stretch;/s,
+    "the reduced status card keeps the main ticket card's full row height");
+  assert.match(html, /\.status-controls\s*\{[^}]*margin-top:\s*auto;/s,
+    "the remaining controls retain the old card's spacious vertical composition");
+  assert.match(html, /\.summary-action\s*\{[^}]*min-height:\s*38px;/s,
+    "the ticket summary remains intentionally compact");
+  assert.ok(out.indexOf('class="ticket-status-panel') < out.indexOf('<aside class="decisions">'),
+    "the lower decision/activity rail is a separate component after the shared ticket header");
+});
+
+test("the status card does not repeat detailed lifecycle state before a plan exists", () => {
+  const { renderConversation } = threadHelpers();
+  const out = renderConversation({ questions: SETTLED, confirmed: true }, null, {
+    task: { id: "t", external_id: "MET-648", status: "planning" },
+    taskStatus: "planning",
+    agentProgress: { phase: "planning" },
+    plan: null,
+    progress: null,
+  });
+  assert.doesNotMatch(out, />lifecycle<\/span>|class="status-current"/);
+  assert.doesNotMatch(out, /class="wave-bars"/);
+  assert.doesNotMatch(out, /status-wave-head/);
+});
+
+test("planning and review have unmistakably different status-card treatments", () => {
+  const { renderConversation } = threadHelpers();
+  const common = { questions: SETTLED, confirmed: true };
+  const planning = renderConversation(common, null, {
+    task: { id: "plan", status: "planning", agent_profile: "triage" },
+    taskStatus: "planning", activities: [],
+  });
+  const review = renderConversation(common, null, {
+    task: { id: "review", status: "review", agent_profile: "reviewer" },
+    taskStatus: "review", activities: [],
+  });
+
+  assert.match(planning, /class="ticket-status-panel tone-planning"/);
+  assert.match(planning, /class="status-symbol" aria-hidden="true">→<\/span>planning/);
+  assert.match(review, /class="ticket-status-panel tone-review"/);
+  assert.match(review, /class="status-symbol" aria-hidden="true">✓<\/span>review/);
+
+  const html = readFileSync(new URL("../public/ticket.html", import.meta.url), "utf8");
+  assert.match(html, /\.ticket-status-panel\s*\{[^}]*background:\s*linear-gradient\(145deg, var\(--status-surface\), var\(--status-surface-end\)\);/s);
+  assert.doesNotMatch(html, /\.ticket-status-panel::after|radial-gradient\(circle at 88% 7%/,
+    "the status card stays flat and boarding-pass-like, without decorative texture");
+  assert.match(html, /\.ticket-status-panel\.tone-planning\s*\{[^}]*#0a2028/s);
+  assert.match(html, /\.ticket-status-panel\.tone-review\s*\{[^}]*#1a1b32/s,
+    "Planning uses a cyan gradient while Review uses a distinct indigo gradient");
+});
+
+test("review keeps only the compact actionable status strip", () => {
+  const { renderConversation } = threadHelpers();
+  const out = renderConversation({ questions: SETTLED, confirmed: true }, null, {
+    task: { id: "review", status: "review", agent_profile: "reviewer" },
+    taskStatus: "review", plan: PLAN, progress: {}, agentProgress: {}, activities: [],
+    status: "every step is done · human review required",
+  });
+
+  assert.doesNotMatch(out, />lifecycle<\/span>|>agent<\/span>|>decisions<\/span>|>now<\/span>/);
+  assert.doesNotMatch(out, /status-wave-head|class="wave-bars"/);
+  assert.doesNotMatch(out, /every step is done · human review required/,
+    "the strip does not repeat the detailed current-state sentence");
+  assert.match(out, /class="autos autonomy-badge"/);
+});
+
+test("review omits agent detail even while follow-up work is active", () => {
+  const { renderConversation } = threadHelpers();
+  const out = renderConversation({ questions: SETTLED, confirmed: true }, null, {
+    task: { id: "review", status: "review", agent_profile: "previous-builder" },
+    taskStatus: "review", plan: PLAN,
+    progress: { steps: { "1": { status: "in_progress", agent_profile: "review-fix" } } },
+    agentProgress: {}, activities: [],
+  });
+
+  assert.doesNotMatch(out, /review-fix|waiting for human review|previous-builder/,
+    "agent detail belongs in execution activity, not the compact status strip");
+});
+
+test("the deliverables rail shows one row for one PR URL", () => {
+  const { renderConversation } = threadHelpers();
+  const url = "https://github.com/acme/app/pull/687";
+  const out = renderConversation({ questions: SETTLED, confirmed: true }, null, {
+    task: { id: "review", status: "review" }, taskStatus: "review", activities: [],
+    deliverables: [
+      { id: "a", deliverable_type: "pull_request", title: "Pull Request #687", path: url },
+      { id: "b", deliverable_type: "pr", title: "Pull Request #687", path: url },
+      { id: "c", deliverable_type: "pr", title: "Pull request", path: url },
+    ],
+  });
+
+  assert.equal((out.match(/class="drow3"/g) || []).length, 1);
+  assert.equal((out.match(/Pull Request #687/g) || []).length, 1);
+});
+
 test("the rail's activity reads newest first", () => {
   // The question it answers is "what is it doing now", and making someone scroll a
   // column to reach the answer defeats having a column.
@@ -1173,6 +1955,39 @@ test("the rail's activity reads newest first", () => {
     ] });
   const rail = out.split('<aside class="decisions">')[1];
   assert.ok(rail.indexOf("NEWEST") < rail.indexOf("OLDEST"));
+});
+
+test("the activity timeline shows five rows before scrolling older events", () => {
+  const { renderConversation } = threadHelpers();
+  const activities = Array.from({ length: 7 }, (_, i) => ({
+    activity_type: "step_completed",
+    message: `Event ${i + 1}`,
+    created_at: `2026-08-14T0${i + 1}:00:00Z`,
+  }));
+  const out = renderConversation({ questions: SETTLED, confirmed: true }, null, {
+    taskStatus: "in_progress", activities,
+  });
+  const rail = out.split('<aside class="decisions">')[1];
+  assert.equal((rail.match(/class="activity-item cevent event"/g) || []).length, 7,
+    "older events remain in the scrollable timeline");
+  assert.match(rail, /class="activity-count">7</);
+  assert.match(rail, /class="dacts" tabindex="0" aria-label="Ticket activity timeline"/);
+
+  const html = readFileSync(new URL("../public/ticket.html", import.meta.url), "utf8");
+  assert.match(html, /\.dacts\s*\{[^}]*height:\s*340px;[^}]*overflow-y:\s*auto;/s);
+  assert.match(html, /\.activity-item\s*\{[^}]*height:\s*68px;/s,
+    "the scroll viewport is exactly five timeline rows tall");
+});
+
+test("settled decisions collapse while unfinished decisions stay open", () => {
+  const { renderConversation } = threadHelpers();
+  const settled = renderConversation({ questions: SETTLED, confirmed: true }, null, {});
+  const open = renderConversation({ questions: [...SETTLED, { id: "c", question: "Which repo?" }] }, null, {});
+
+  assert.match(settled, /<details class="dsec decision-section" >[\s\S]*?2\/2/,
+    "the settled receipt stays available behind its summary");
+  assert.doesNotMatch(settled, /<details class="dsec decision-section" open>/);
+  assert.match(open, /<details class="dsec decision-section" open>[\s\S]*?2\/3/);
 });
 
 test("the gate says why it is stopping you", () => {
@@ -1223,12 +2038,11 @@ test("every activity entry says when it happened", () => {
     ] });
   const rail = out.split('<aside class="decisions">')[1];
   assert.equal((rail.match(/class="ts"/g) || []).length, 2, "one stamp per entry");
-  assert.match(rail, /class="cevent bad"[\s\S]*?class="ts"/, "including the ones that went wrong");
+  assert.match(rail, /class="activity-item cevent bad"[\s\S]*?class="ts"/,
+    "including the ones that went wrong");
 });
 
-test("a collapsed run says when it stopped", () => {
-  // Reading newest first, the most recent of the run is what answers "when did
-  // this go quiet".
+test("pure heartbeat history does not crowd the timeline", () => {
   const { renderConversation } = threadHelpers();
   const out = renderConversation({ questions: SETTLED, confirmed: true }, null, {
     taskStatus: "in_progress",
@@ -1237,13 +2051,10 @@ test("a collapsed run says when it stopped", () => {
       { activity_type: "updated", message: "Agent heartbeat: running.", created_at: "2026-08-14T09:01:00Z" },
     ] });
   const rail = out.split('<aside class="decisions">')[1];
-  assert.match(rail, /2 routine updates · /);
+  assert.doesNotMatch(rail, /Activity|Agent heartbeat|routine updates/);
 });
 
-test("the same thing happening thirteen times is said once, with a count", () => {
-  // Collapsed by identity, not by pattern. A retry loop posts the same sentence
-  // over and over and it is usually *trouble*, so the noise rules never touched
-  // it — thirteen identical amber blocks buried everything else in the column.
+test("repeated real events remain individual timeline entries", () => {
   const { renderConversation } = threadHelpers();
   const repeated = Array.from({ length: 13 }, (_, i) => ({
     activity_type: "updated",
@@ -1255,9 +2066,8 @@ test("the same thing happening thirteen times is said once, with a count", () =>
       ...repeated, { activity_type: "step_completed", message: "Step 1 completed", created_at: "2026-08-14T11:00:00Z" }] });
   const rail = out.split('<aside class="decisions">')[1];
 
-  assert.equal((rail.match(/Agent spawn failed/g) || []).length, 1, "said once");
-  assert.match(rail, /class="xn">×13</);
-  // And the thing it was burying is still visible.
+  assert.equal((rail.match(/class="activity-item cevent bad"/g) || []).length, 13);
+  assert.match(rail, /class="activity-count">14</);
   assert.match(rail, /Step 1 completed/);
 });
 
@@ -1289,34 +2099,35 @@ test("quoting an error is not the same as being one", () => {
       { activity_type: "plan_created", message: "Planning wrote 01-PLAN.md — it could not have been clearer", created_at: "5" },
     ] });
   const rail = out.split('<aside class="decisions">')[1];
-  assert.equal((rail.match(/class="cevent bad"/g) || []).length, 2, "the failure and the escalation");
-  assert.match(rail, /class="cevent ">[\s\S]*?Planning wrote/, "a milestone that merely says 'could not' is not one");
+  assert.equal((rail.match(/class="activity-item cevent bad"/g) || []).length, 2,
+    "the failure and the escalation");
+  assert.match(rail, /class="activity-item cevent event">[\s\S]*?Planning wrote/,
+    "a milestone that merely says 'could not' is not one");
 });
 
 // ─────────── autonomy presets (design 4a) ───────────
 
-test("the assessed level is shown, and can be disagreed with", () => {
+test("Auto stays concise while its assessment can still be disagreed with", () => {
   const { renderConversation } = threadHelpers();
   const out = renderConversation({
     questions: SETTLED, assessed_level: "normal",
     assessed_why: ["one repo", "can push, so a mistake leaves this machine"],
   }, null, {});
-  const rail = out.split('<aside class="decisions">')[1];
-  assert.match(rail, /Autonomy/);
-  assert.match(rail, /Auto · normal/, "the machine's call, named");
+  assert.match(out, /Autonomy/);
+  assert.match(out, /<span class="cur">Auto<\/span>/);
+  assert.doesNotMatch(out, /Auto · normal/, "the assessed level does not clutter the current autonomy label");
   for (const level of ["simple", "normal", "careful"]) {
-    assert.match(rail, new RegExp(`data-level="${level}"`), `${level} is choosable`);
+    assert.match(out, new RegExp(`data-level="${level}"`), `${level} is choosable`);
   }
-  assert.match(rail, /data-level=""/, "and so is handing it back to the rules");
-  assert.match(rail, /can push, so a mistake leaves this machine/, "with the reasoning");
+  assert.match(out, /data-level=""/, "and so is handing it back to the rules");
+  assert.match(out, /can push, so a mistake leaves this machine/, "with the reasoning");
 });
 
 test("an explicit choice is marked, and Auto is not the marked one", () => {
   const { renderConversation } = threadHelpers();
-  const rail = renderConversation({ questions: SETTLED, process_level: "careful" }, null, {})
-    .split('<aside class="decisions">')[1];
-  assert.match(rail, /class="lvl on" data-level="careful"/);
-  assert.doesNotMatch(rail, /class="lvl on" data-level=""/);
+  const out = renderConversation({ questions: SETTLED, process_level: "careful" }, null, {});
+  assert.match(out, /class="lvl on" data-level="careful"/);
+  assert.doesNotMatch(out, /class="lvl on" data-level=""/);
 });
 
 test("no permission matrix is drawn, because nothing enforces one", () => {
@@ -1324,10 +2135,9 @@ test("no permission matrix is drawn, because nothing enforces one", () => {
   // migrations — have no mechanism behind them: `no_pr` is a line in a prompt.
   // Switches would promise a guarantee the system cannot keep.
   const { renderConversation } = threadHelpers();
-  const rail = renderConversation({ questions: SETTLED }, null, {})
-    .split('<aside class="decisions">')[1];
+  const out = renderConversation({ questions: SETTLED }, null, {});
   for (const claim of [/Push the branch/, /Open the PR/, /Install dependencies/, /Migrations/]) {
-    assert.doesNotMatch(rail, claim);
+    assert.doesNotMatch(out, claim);
   }
 });
 
@@ -1339,10 +2149,7 @@ test("choosing a level writes where the bridge reads it", () => {
   assert.match(fn, /load\(\{ force: true \}\)/, "and the gate re-evaluates immediately");
 });
 
-test("repeats are collapsed across the column, not only where adjacent", () => {
-  // A retry loop interleaves its escalation with heartbeats, so the same sentence
-  // appeared five times with "3 routine updates" between each — adjacent-only
-  // merging left every one of them on screen.
+test("repeated checkpoints stay separate while interleaved heartbeats are omitted", () => {
   const { renderConversation } = threadHelpers();
   const activities = [];
   for (let i = 0; i < 5; i++) {
@@ -1354,6 +2161,6 @@ test("repeats are collapsed across the column, not only where adjacent", () => {
   const rail = renderConversation({ questions: SETTLED, confirmed: true }, null,
     { taskStatus: "in_progress", activities }).split('<aside class="decisions">')[1];
 
-  assert.equal((rail.match(/Escalated to human/g) || []).length, 1, "said once");
-  assert.match(rail, /class="xn">×5</);
+  assert.equal((rail.match(/class="activity-item cevent bad"/g) || []).length, 5);
+  assert.doesNotMatch(rail, /Agent heartbeat|class="xn"/);
 });

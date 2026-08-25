@@ -85,6 +85,27 @@ print(json.dumps(bridge.read_key_source_files(pathlib.Path(${JSON.stringify(repo
   assert.ok(!fromCheckout.includes("new-ui"));
 });
 
+test("repo watcher discovers allowlisted flat and nested repositories", () => {
+  const root = mkdtempSync(join(tmpdir(), "mc-watch-root-"));
+  try {
+    mkdirSync(join(root, "backend", ".git"), { recursive: true });
+    mkdirSync(join(root, "group", "frontend", ".git"), { recursive: true });
+    mkdirSync(join(root, "worktrees", "temporary", ".git"), { recursive: true });
+    const discovered = execFileSync("python3", ["-c", `
+import json, sys
+sys.path.insert(0, ${JSON.stringify(SWARM)})
+from pathlib import Path
+from repo_discovery import discover_repo_paths
+root = Path(${JSON.stringify(root)})
+allow = {${JSON.stringify(`${root.split("/").at(-1)}/backend`)}, "group/frontend"}
+print(json.dumps([r["domain"] for r in discover_repo_paths(root, allow)]))
+`], { encoding: "utf8", stdio: ["ignore", "pipe", "ignore"] });
+    assert.deepEqual(JSON.parse(discovered), [`${root.split("/").at(-1)}/backend`, "group/frontend"]);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
 test("an unreadable ref falls back to the checkout instead of returning nothing", () => {
   assert.equal(contextAt("origin/does-not-exist"), "");
   const built = python(`
@@ -289,5 +310,20 @@ bridge.GITPROJECTS_DIR = pathlib.Path(${JSON.stringify(dir)})
 print(json.dumps(sorted(r["repo"] for r in bridge.discover_local_repos())))
 `);
   assert.deepEqual(labels, ["alpha", "beta"]);
+  rmSync(dir, { recursive: true, force: true });
+});
+
+test("triage repository discovery excludes generated/reference groups and honors the execution allowlist", () => {
+  const dir = mkdtempSync(join(tmpdir(), "mc-execution-repos-"));
+  for (const rel of ["backend", "staging-dashboard", "external/mission-control", "worktrees/MET-650-backend"]) {
+    mkdirSync(join(dir, rel, ".git"), { recursive: true });
+  }
+  const labels = python(`
+import json, os, pathlib, bridge
+bridge.GITPROJECTS_DIR = pathlib.Path(${JSON.stringify(dir)})
+os.environ["REPO_WATCH_REPOS"] = "GitProjects/backend"
+print(json.dumps([r["label"] for r in bridge.discover_local_repos()]))
+`);
+  assert.deepEqual(labels, ["GitProjects/backend"]);
   rmSync(dir, { recursive: true, force: true });
 });

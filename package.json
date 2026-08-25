@@ -31,10 +31,10 @@
     "mc": "tsx src/cli.ts"
   },
   "dependencies": {
-    "@opengsd/gsd-core": "^1.10.0",
-    "@sinclair/typebox": "0.34.48",
-    "better-sqlite3": "^12.6.2",
-    "tsx": "^4.19.4"
+    "@opengsd/gsd-core": "^1.11.0",
+    "@sinclair/typebox": "^0.34.52",
+    "better-sqlite3": "^13.0.3",
+    "tsx": "^4.23.12"
   },
   "devDependencies": {
     "@types/better-sqlite3": "^7.6.12",

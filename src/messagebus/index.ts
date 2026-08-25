@@ -14,6 +14,7 @@ import { createLocalApiClient } from "./api.js";
 import type { ApiClient } from "./commands.js";
 import {
   readBusConfig,
+  slackChannelInboundReady,
   slackInboundReady,
   slackOutboundReady,
   telegramInboundReady,
@@ -24,7 +25,8 @@ import { executeCommand } from "./commands.js";
 import { askAssistant, createLlmCall, type AssistantOutcome, type LlmCall } from "./assistant.js";
 import { formatEvent, shouldSend, type TaskContext } from "./format.js";
 import { taskLabel, taskTitle } from "./ref.js";
-import { sendSlackMessage, startSlackListener } from "./slack.js";
+import { createSlackChannelHandler } from "./slack-channel.js";
+import { sendSlackMessage, sendSlackThreadMessage, startSlackListener } from "./slack.js";
 import { sendTelegramMessage, startTelegramListener } from "./telegram.js";
 import type { IncomingChatMessage, Logger, SurfaceKind } from "./types.js";
 
@@ -59,7 +61,9 @@ function inboundSignature(cfg: BusConfig): string {
   // an unrelated Settings edit would drop updates.
   return JSON.stringify([
     telegramInboundReady(cfg.telegram) ? [cfg.telegram.token, cfg.telegram.chatIds] : null,
-    slackInboundReady(cfg.slack) ? [cfg.slack.botToken, cfg.slack.appToken, cfg.slack.userIds] : null,
+    slackInboundReady(cfg.slack)
+      ? [cfg.slack.botToken, cfg.slack.appToken, cfg.slack.userIds, cfg.slack.channelIds]
+      : null,
   ]);
 }
 
@@ -100,7 +104,12 @@ export function makeInboundHandler(deps: InboundHandlerDeps): (message: Incoming
     const actor = message.userName
       ? `${message.surface}:@${message.userName}`
       : `${message.surface}:${message.userId || "unknown"}`;
-    const ctx = { api: deps.api, surface: message.surface, actor };
+    const ctx = {
+      api: deps.api,
+      surface: message.surface,
+      actor,
+      requestId: message.messageId ? `${message.surface}:${message.target}:${message.messageId}` : undefined,
+    };
     const chatKey = `${message.surface}:${message.target}`;
     const text = message.text.trim();
     const spoken = text.toLowerCase().replace(/^\//, "");
@@ -231,6 +240,12 @@ export function startMessageBus(events: McEventBus, opts: MessageBusOptions): ()
       enabled: (surface) => surface === "telegram" && readBusConfig(opts.mcHome).telegram.assistant,
     },
   });
+  const handleSlackChannelMessage = createSlackChannelHandler({
+    api,
+    logger: log,
+    send: (channelId, threadTs, text) =>
+      sendSlackThreadMessage(readBusConfig(opts.mcHome).slack.botToken, channelId, threadTs, text),
+  });
 
   let stopTelegram: (() => void) | null = null;
   let stopSlack: (() => void) | null = null;
@@ -258,12 +273,17 @@ export function startMessageBus(events: McEventBus, opts: MessageBusOptions): ()
       });
     }
     if (slackInboundReady(cfg.slack)) {
-      log?.info?.(`[messagebus] slack commands enabled for ${cfg.slack.userIds.length} user(s)`);
+      log?.info?.(
+        `[messagebus] slack commands enabled for ${cfg.slack.userIds.length} user(s)` +
+        (slackChannelInboundReady(cfg.slack) ? ` in ${cfg.slack.channelIds.length} channel(s)` : ""),
+      );
       stopSlack = startSlackListener({
         botToken: cfg.slack.botToken,
         appToken: cfg.slack.appToken,
         userIds: cfg.slack.userIds,
+        channelIds: cfg.slack.channelIds,
         onMessage: handleMessage,
+        onChannelMessage: slackChannelInboundReady(cfg.slack) ? handleSlackChannelMessage : undefined,
         logger: log,
       });
     }

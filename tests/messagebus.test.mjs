@@ -85,6 +85,50 @@ test("config is read live from MC_HOME/.env, not just process.env", () => {
   }
 });
 
+test("/create makes one linked Linear + MC ticket with a transport idempotency key", async () => {
+  const api = stubApi([], {
+    postResult: {
+      created: true,
+      issue: { id: "linear-id", identifier: "MET-700", url: "https://linear.app/issue/MET-700" },
+      task: { id: "task-id", title: "[MET-700] Fix payout totals" },
+    },
+  });
+  const reply = await executeCommand(
+    "/create [met] Fix payout totals | Totals are stale after settlement",
+    { ...ctxFor(api), requestId: "telegram:555:991" },
+  );
+  const post = api.calls.find((call) => call[0] === "POST");
+  assert.deepEqual(post, ["POST", "/linear/issues", {
+    title: "Fix payout totals",
+    description: "Totals are stale after settlement",
+    team_key: "MET",
+    request_id: "telegram:555:991",
+    actor: "telegram:@tester",
+  }]);
+  assert.match(reply, /Created MET-700/);
+  assert.match(reply, /linear\.app\/issue\/MET-700/);
+  assert.match(reply, /will triage it now/);
+});
+
+test("/create accepts the configured default team and keeps long detail out of the title", async () => {
+  const api = stubApi([], {
+    postResult: {
+      created: false,
+      issue: { id: "linear-id", identifier: "MET-700", url: "https://linear.app/issue/MET-700" },
+      task: { id: "task-id", title: "[MET-700] Fix payout totals" },
+    },
+  });
+  const reply = await executeCommand(
+    "/create Fix payout totals | Preserve this full detail",
+    { ...ctxFor(api), requestId: "telegram:555:991" },
+  );
+  const body = api.calls.find((call) => call[0] === "POST")[2];
+  assert.equal(body.title, "Fix payout totals");
+  assert.equal(body.description, "Preserve this full detail");
+  assert.equal("team_key" in body, false);
+  assert.match(reply, /Already created MET-700/);
+});
+
 test("event routing: action set by default, never the chatty ones", () => {
   assert.equal(shouldSend("needs_human", "action"), true);
   assert.equal(shouldSend("task_completed", "action"), true);
@@ -117,6 +161,15 @@ test("an alert falls back to the short id when the ticket cannot be resolved", (
   // does not read as a sentence, whereas "MET-639 needs you" does.
   const blocked = formatEvent({ type: "needs_human", taskId: "df544305-b413-4f8e", message: "stuck" });
   assert.match(blocked, /Task df544305 needs you/);
+});
+
+test("a terminal completion alert says the ticket is done", () => {
+  const text = formatEvent(
+    { type: "task_completed", taskId: "e46ee493-ac62-47cd-9eb9-4d49d99bfd75", status: "done" },
+    { label: "MET-640", title: "Implement canonical navbar" },
+  );
+  assert.match(text, /^✅ MET-640 is done$/m);
+  assert.match(text, /Implement canonical navbar/);
 });
 
 test("ref helpers: keys come from the title or the issue URL, loosely typed", () => {
@@ -212,6 +265,7 @@ test("parseCommand accepts slash, bare and @botname forms, ignores chatter", () 
   assert.deepEqual(parseCommand("status"), { name: "status", rest: "" });
   assert.deepEqual(parseCommand("/status@mc_bot"), { name: "status", rest: "" });
   assert.deepEqual(parseCommand("/answer abc123 use UTC"), { name: "answer", rest: "abc123 use UTC" });
+  assert.deepEqual(parseCommand("/hold@mc_bot MET-639"), { name: "hold", rest: "MET-639" });
   assert.equal(parseCommand("thanks, that worked"), null);
   assert.equal(parseCommand("/nonsense"), null);
 });
@@ -335,6 +389,47 @@ test("/followup validates the action against the canned set", async () => {
   const post = api.calls.find((c) => c[0] === "POST");
   assert.equal(post[1], `/tasks/${TASKS[0].id}/followup`);
   assert.equal(post[2].action, "ci_lint");
+});
+
+test("/hold parks an active ticket through the same status update as the dashboard", async () => {
+  const api = stubApi(TASKS);
+  const reply = await executeCommand("/hold met 639", ctxFor(api));
+  assert.deepEqual(api.calls.find((c) => c[0] === "PATCH"), [
+    "PATCH",
+    `/tasks/${TASKS[0].id}`,
+    { status: "on_hold" },
+  ]);
+  assert.match(reply, /Put MET-639 on hold/);
+  assert.match(reply, /plan, history, branch, and worktree are preserved/);
+});
+
+test("/hold is idempotent and does not reopen completed tickets", async () => {
+  const heldApi = stubApi([{ ...TASKS[0], status: "on_hold" }]);
+  assert.match(await executeCommand("/hold MET-639", ctxFor(heldApi)), /already on hold/);
+  assert.equal(heldApi.calls.some((c) => c[0] === "PATCH"), false);
+
+  const doneApi = stubApi([{ ...TASKS[0], status: "done" }]);
+  assert.match(await executeCommand("/hold MET-639", ctxFor(doneApi)), /completed tickets cannot be put on hold/);
+  assert.equal(doneApi.calls.some((c) => c[0] === "PATCH"), false);
+});
+
+test("/unhold returns only held tickets to the dispatch inbox", async () => {
+  const heldApi = stubApi([{ ...TASKS[0], status: "on_hold" }]);
+  const reply = await executeCommand("/unhold MET-639", ctxFor(heldApi));
+  assert.deepEqual(heldApi.calls.find((c) => c[0] === "PATCH"), [
+    "PATCH",
+    `/tasks/${TASKS[0].id}`,
+    { status: "inbox" },
+  ]);
+  assert.match(reply, /Resumed MET-639/);
+
+  const activeApi = stubApi(TASKS);
+  assert.match(await executeCommand("/unhold MET-639", ctxFor(activeApi)), /only held tickets can be resumed/);
+  assert.equal(activeApi.calls.some((c) => c[0] === "PATCH"), false);
+
+  const doneApi = stubApi([{ ...TASKS[0], status: "done" }]);
+  assert.match(await executeCommand("/unhold MET-639", ctxFor(doneApi)), /completed tickets cannot be resumed/);
+  assert.equal(doneApi.calls.some((c) => c[0] === "PATCH"), false);
 });
 
 test("/task shows the newest activities — the API returns them newest-first", async () => {
@@ -538,6 +633,27 @@ test("a write proposal is held until /yes, and /no drops it", async () => {
   // A bare /yes with nothing pending must not resolve a stale proposal.
   await msg("yes");
   assert.match(replies.at(-1), /Nothing is waiting for confirmation/);
+});
+
+test("the Telegram assistant treats putting a ticket on hold as a confirmation-gated write", async () => {
+  const api = stubApi(TASKS);
+  const llm = stubLlm({ reply: "Put MET-639 on hold.", command: "/hold MET-639" });
+  const outcome = await askAssistant("put 639 on hold", { api, llm, logger: SILENT });
+  assert.deepEqual(outcome, {
+    reply: "Put MET-639 on hold.",
+    command: "/hold MET-639",
+    kind: "write",
+  });
+  assert.equal(api.calls.some((c) => c[0] === "PATCH"), false, "classification alone must not mutate the ticket");
+});
+
+test("the Telegram assistant treats unhold as a confirmation-gated write", async () => {
+  const api = stubApi([{ ...TASKS[0], status: "on_hold" }]);
+  const llm = stubLlm({ reply: "Resume MET-639.", command: "/unhold MET-639" });
+  const outcome = await askAssistant("unhold 639", { api, llm, logger: SILENT });
+  assert.equal(outcome.kind, "write");
+  assert.equal(outcome.command, "/unhold MET-639");
+  assert.equal(api.calls.some((c) => c[0] === "PATCH"), false, "classification alone must not mutate the ticket");
 });
 
 test("the assistant never reaches Slack", async () => {

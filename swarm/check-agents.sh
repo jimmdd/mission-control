@@ -6,6 +6,17 @@
 #   tmux alive? → PR exists? → CI green? → GSD valid? → Codex review → issues? → iterate (max 3) → complete
 MC_HOME="${MC_HOME:-$HOME/.mission-control}"
 SWARM_DIR="$MC_HOME/swarm"
+SCRIPT_SRC="${BASH_SOURCE[0]}"
+while [ -L "$SCRIPT_SRC" ]; do
+  LINK_TARGET="$(readlink "$SCRIPT_SRC")"
+  case "$LINK_TARGET" in
+    /*) SCRIPT_SRC="$LINK_TARGET" ;;
+    *) SCRIPT_SRC="$(dirname "$SCRIPT_SRC")/$LINK_TARGET" ;;
+  esac
+done
+SCRIPT_DIR="$(cd "$(dirname "$SCRIPT_SRC")" && pwd)"
+COMPLETION_POLICY="$SCRIPT_DIR/completion_policy.py"
+CLEANUP_TOOL="$SCRIPT_DIR/cleanup-worktrees.sh"
 REGISTRY="$SWARM_DIR/active-tasks.json"
 LOG="$SWARM_DIR/logs/monitor-$(date +%Y%m%d).log"
 TIMESTAMP=$(date '+%Y-%m-%d %H:%M:%S')
@@ -17,6 +28,7 @@ if [ -f "$MC_HOME/.env" ]; then
 fi
 
 MC_URL="${MISSION_CONTROL_URL:-http://localhost:18900}"
+source "$SCRIPT_DIR/mc-api.sh"
 GSD_BACKEND="${MISSION_CONTROL_GSD_BACKEND:-core}"
 CONFIG="$SWARM_DIR/swarm-config.json"
 CFG_REVIEW_EFFORT=$(jq -r '.codex.reviewEffort // "xhigh"' "$CONFIG" 2>/dev/null || echo "xhigh")
@@ -27,6 +39,7 @@ SNAPSHOT_INTERVAL_MIN="${SNAPSHOT_INTERVAL_MIN:-60}"
 IDLE_WARN_MIN="${IDLE_WARN_MIN:-30}"
 STUCK_ALERT_COOLDOWN_MIN="${STUCK_ALERT_COOLDOWN_MIN:-20}"
 HEARTBEAT_STALE_THRESHOLD_MS="${HEARTBEAT_STALE_THRESHOLD_MS:-300000}"
+AGENT_LIMIT_RETRY_WINDOW_SECONDS="${AGENT_LIMIT_RETRY_WINDOW_SECONDS:-43200}"
 
 echo "[$TIMESTAMP] === Monitor check ===" >> "$LOG"
 
@@ -176,7 +189,7 @@ reconcile_completed_agents_to_mc() {
     synced_at=$(jq -r ".[] | select(.id == \"$task_id\") | .completionSyncedAt // empty" "$REGISTRY" 2>/dev/null)
 
     local task_json
-    task_json=$(curl -s "$MC_URL/api/tasks/$mc_task_id" 2>/dev/null)
+    task_json=$(mc_curl GET "/api/tasks/$mc_task_id" -s 2>/dev/null)
     [ -z "$task_json" ] && continue
 
     local task_type mc_status
@@ -206,22 +219,57 @@ reconcile_completed_agents_to_mc() {
       continue
     fi
 
-    # Fallback for implementation tasks: the agent declared completion but MC is
-    # still active (in_progress/assigned) and the tmux pane is gone — e.g. a
-    # change-request relaunch finished, or the live CI-gated flow never closed it
-    # out before the session died (a benign failing check, a crash). Without this
-    # the task orphans in in_progress forever. Only fire when no live session
-    # remains, so we never race the live monitor flow.
-    if [[ "$mc_status" =~ ^(in_progress|assigned)$ ]]; then
+    # Process completion is only a claim. Implementations become reviewable when a
+    # PR exists (or the task was explicitly dispatched in no-PR mode). If the agent
+    # exited successfully without that deliverable, put it back on the normal dead-
+    # session retry path so the preserved worktree can finish the workflow.
+    # A stale planner escalation can leave the MC ticket in planning even after
+    # the implementation agent produced a PR (MET-644). The PR is the completion
+    # evidence, so planning must be reconcilable here too.
+    if [[ "$mc_status" =~ ^(in_progress|assigned|planning)$ ]]; then
       local session
       session=$(jq -r ".[] | select(.id == \"$task_id\") | .tmuxSession // empty" "$REGISTRY" 2>/dev/null)
       if [ -n "$session" ] && tmux has-session -t "$session" 2>/dev/null; then
         echo "[$TIMESTAMP] RECONCILE: $task_id — completed_by_agent but tmux $session still live; observing" >> "$LOG"
         continue
       fi
-      if mc_complete_task "$mc_task_id" "Agent completed; reconciled to review (session ended)" "review"; then
+
+      local repo branch no_pr_mode pr_json pr_url pr_num completion_action completion_retries
+      repo=$(jq -r ".[] | select(.id == \"$task_id\") | .repo // empty" "$REGISTRY" 2>/dev/null)
+      branch=$(jq -r ".[] | select(.id == \"$task_id\") | .branch // empty" "$REGISTRY" 2>/dev/null)
+      no_pr_mode=$(jq -r ".[] | select(.id == \"$task_id\") | .noPrMode // false" "$REGISTRY" 2>/dev/null)
+      pr_url=""
+      pr_num=""
+      if [ -n "$repo" ] && [ -n "$branch" ] && [ -d "$repo" ]; then
+        pr_json=$(cd "$repo" && gh pr list --head "$branch" --state all --json number,url --limit 1 2>/dev/null || true)
+        pr_url=$(printf '%s' "$pr_json" | jq -r '.[0].url // empty' 2>/dev/null)
+        pr_num=$(printf '%s' "$pr_json" | jq -r '.[0].number // empty' 2>/dev/null)
+      fi
+
+      policy_args=(--task-type "$task_type" --pr-url "$pr_url")
+      [ "$no_pr_mode" = "true" ] && policy_args+=(--no-pr)
+      completion_action=$(python3 "$COMPLETION_POLICY" "${policy_args[@]}" 2>/dev/null || echo resume)
+      if [ "$completion_action" = "resume" ]; then
+        completion_retries=$(jq -r ".[] | select(.id == \"$task_id\") | .completionRetryCount // 0" "$REGISTRY" 2>/dev/null)
+        if [ "$completion_retries" -ge 3 ]; then
+          state_update "$task_id" '{"status": "failed", "lastError": "completed_without_pr_retries_exhausted"}' "completion-missing-pr-exhausted"
+          mc_post_activity "$mc_task_id" "needs_human" "Agent repeatedly exited without the required PR; partial work remains preserved for manual redispatch"
+          echo "[$TIMESTAMP] RECONCILE: $task_id — completion rejected (no PR); completion retries exhausted" >> "$LOG"
+          continue
+        fi
+        completion_retries=$((completion_retries + 1))
+        state_update "$task_id" "{\"status\": \"running\", \"lastError\": \"completed_without_pr\", \"completionSyncedAt\": null, \"completionRetryCount\": $completion_retries}" "completion-missing-pr"
+        mc_post_activity "$mc_task_id" "updated" "Agent exited without the required PR; resuming from the preserved worktree (completion retry $completion_retries/3)"
+        echo "[$TIMESTAMP] RECONCILE: $task_id — completion rejected (no PR); queued preserved worktree for retry $completion_retries/3" >> "$LOG"
+        continue
+      fi
+
+      if [ -n "$pr_url" ]; then
+        mc_add_deliverable "$mc_task_id" "Pull Request #${pr_num:-unknown}" "$pr_url"
+      fi
+      if mc_complete_task "$mc_task_id" "Agent completed with required deliverable; reconciled to review" "review" "$pr_url" "$no_pr_mode"; then
         mc_post_activity "$mc_task_id" "updated" "Monitor reconciled completed agent to review (tmux session ended)"
-        echo "[$TIMESTAMP] RECONCILE: $task_id — implementation completed_by_agent → review (session gone)" >> "$LOG"
+        echo "[$TIMESTAMP] RECONCILE: $task_id — implementation completed_by_agent → review (deliverable verified)" >> "$LOG"
         state_update "$task_id" "{\"status\": \"ready\", \"completionSyncedAt\": \"$TIMESTAMP\"}" "completion-reconcile-impl"
       else
         echo "[$TIMESTAMP] WARN: $task_id — failed to sync implementation completion to MC (will retry)" >> "$LOG"
@@ -234,7 +282,7 @@ mc_post_activity() {
   local task_id="$1"
   local activity_type="$2"
   local message="$3"
-  curl -s -X POST "$MC_URL/api/tasks/$task_id/activities" \
+  mc_curl POST "/api/tasks/$task_id/activities" -s \
     -H "Content-Type: application/json" \
     -d "{\"activity_type\": \"$activity_type\", \"message\": \"$message\"}" \
     > /dev/null 2>&1
@@ -244,9 +292,9 @@ mc_add_deliverable() {
   local task_id="$1"
   local title="$2"
   local url="$3"
-  curl -s -X POST "$MC_URL/api/tasks/$task_id/deliverables" \
+  mc_curl POST "/api/tasks/$task_id/deliverables" -fsS \
     -H "Content-Type: application/json" \
-    -d "{\"deliverable_type\": \"url\", \"title\": \"$title\", \"path\": \"$url\"}" \
+    -d "{\"deliverable_type\": \"pr\", \"title\": \"$title\", \"path\": \"$url\"}" \
     > /dev/null 2>&1
 }
 
@@ -254,13 +302,86 @@ mc_complete_task() {
   local task_id="$1"
   local summary="$2"
   local status="${3:-review}"
-  curl -s -X POST "$MC_URL/api/webhooks/agent-completion" \
+  local pr_url="${4:-}"
+  local no_pr="${5:-false}"
+  local payload
+  payload=$(jq -n \
+    --arg task_id "$task_id" --arg summary "$summary" --arg status "$status" --arg pr_url "$pr_url" --arg no_pr "$no_pr" \
+    '{task_id: $task_id, summary: $summary, status: $status}
+     + (if $pr_url == "" then {} else {pr_url: $pr_url} end)
+     + (if $no_pr == "true" then {no_pr: true} else {} end)')
+  mc_curl POST "/api/webhooks/agent-completion" -fsS \
     -H "Content-Type: application/json" \
-    -d "{\"task_id\": \"$task_id\", \"summary\": \"$summary\", \"status\": \"$status\"}" \
+    -d "$payload" \
     > /dev/null 2>&1
 }
 
+retry_rate_limited_agents() {
+  local ids now_ms retry_window_ms
+  ids=$(jq -r '.[] | select(.status == "rate_limited") | .id' "$REGISTRY" 2>/dev/null)
+  [ -z "$ids" ] && return
+  now_ms=$(($(date +%s) * 1000))
+  retry_window_ms=$((AGENT_LIMIT_RETRY_WINDOW_SECONDS * 1000))
+
+  while read -r task_id; do
+    [ -z "$task_id" ] && continue
+    local next_retry deadline mc_task_id worktree repo session launcher_info launcher env_exports launcher_path
+    next_retry=$(jq -r --arg id "$task_id" '.[] | select(.id == $id) | .nextRateLimitRetryAt // 0' "$REGISTRY")
+    deadline=$(jq -r --arg id "$task_id" --argjson window "$retry_window_ms" \
+      '.[] | select(.id == $id) | (.rateLimitDeadlineAt // ((.rateLimitFirstAt // 0) + $window))' "$REGISTRY")
+    mc_task_id=$(jq -r --arg id "$task_id" '.[] | select(.id == $id) | .mcTaskId // empty' "$REGISTRY")
+
+    if [ "$deadline" -gt 0 ] 2>/dev/null && [ "$now_ms" -ge "$deadline" ] 2>/dev/null; then
+      state_update "$task_id" "{\"status\":\"failed\",\"lastError\":\"session_limit_retry_window_exhausted\",\"failedAt\":$now_ms,\"nextRateLimitRetryAt\":null}" "rate-limit-window-exhausted"
+      [ -n "$mc_task_id" ] && mc_post_activity "$mc_task_id" "needs_human" \
+        "Agent account limit did not clear within 12 hours; preserved work requires manual intervention."
+      echo "[$TIMESTAMP] RATE-LIMIT: $task_id — 12-hour retry window exhausted" >> "$LOG"
+      continue
+    fi
+    if [ "$next_retry" -le 0 ] 2>/dev/null || [ "$now_ms" -lt "$next_retry" ] 2>/dev/null; then
+      continue
+    fi
+
+    worktree=$(jq -r --arg id "$task_id" '.[] | select(.id == $id) | .worktree // empty' "$REGISTRY")
+    repo=$(jq -r --arg id "$task_id" '.[] | select(.id == $id) | .repo // empty' "$REGISTRY")
+    session=$(jq -r --arg id "$task_id" '.[] | select(.id == $id) | .tmuxSession // empty' "$REGISTRY")
+    if [ -z "$worktree" ] || [ ! -d "$worktree" ]; then
+      state_update "$task_id" "{\"status\":\"failed\",\"lastError\":\"worktree_missing\",\"failedAt\":$now_ms}" "rate-limit-worktree-missing"
+      [ -n "$mc_task_id" ] && mc_post_activity "$mc_task_id" "needs_human" \
+        "Account limit cleared for retry, but the preserved worktree is missing."
+      continue
+    fi
+
+    launcher_info=$(build_agent_env_exports "$task_id")
+    launcher="${launcher_info%%|*}"
+    env_exports="${launcher_info#*|}"
+    launcher_path=$(resolve_launcher_path "$launcher")
+    tmux kill-session -t "$session" 2>/dev/null || true
+    tmux new-session -d -s "$session" -c "${worktree:-$repo}" \
+      "bash -lc '${env_exports}exec $launcher_path $task_id'"
+    state_update "$task_id" "{\"status\":\"running\",\"lastError\":null,\"lastRespawnAt\":$now_ms,\"runStartedAt\":$now_ms,\"lastHeartbeatAt\":$now_ms,\"nextRateLimitRetryAt\":null,\"completionSyncedAt\":null}" "rate-limit-retry"
+    if [ -n "$mc_task_id" ]; then
+      mc_curl PATCH "/api/tasks/$mc_task_id" -fsS \
+        -H "Content-Type: application/json" -d '{"status":"in_progress"}' >/dev/null 2>&1 || true
+      mc_post_activity "$mc_task_id" "updated" \
+        "Retrying the agent after account-limit backoff; continuing from the preserved worktree."
+    fi
+    echo "[$TIMESTAMP] RATE-LIMIT: $task_id — retry launched from preserved worktree" >> "$LOG"
+  done <<< "$ids"
+}
+
+retry_rate_limited_agents
 reconcile_completed_agents_to_mc
+
+# Ticket completion owns the terminal lifecycle. Release its checkout before the
+# running-agent loop below can respawn a dead session or continue reviewing work
+# the user has already closed. The cleaner fails closed on dirty/unmanaged paths
+# and retains local branches for recovery.
+if [ -f "$CLEANUP_TOOL" ]; then
+  if ! /bin/bash "$CLEANUP_TOOL" --mc-url "$MC_URL" >> "$LOG" 2>&1; then
+    echo "[$TIMESTAMP] WARN: completed worktree cleanup deferred; see results above" >> "$LOG"
+  fi
+fi
 
 # Validate GSD artifacts in worktree. Returns 0 if valid, 1 if missing/failed.
 # Sets GSD_STATUS to "passed", "gaps_found", "missing", or "no_planning".
@@ -622,6 +743,16 @@ echo "$RUNNING_IDS" | while read -r TASK_ID; do
   WORKTREE=$(jq -r ".[] | select(.id == \"$TASK_ID\") | .worktree" "$REGISTRY")
   MC_TASK_ID=$(jq -r ".[] | select(.id == \"$TASK_ID\") | .mcTaskId // empty" "$REGISTRY")
 
+  if [ -n "$MC_TASK_ID" ]; then
+    MC_LIFECYCLE_STATUS=$(mc_curl GET "/api/tasks/$MC_TASK_ID" -s 2>/dev/null | jq -r '.status // "unknown"' 2>/dev/null)
+    if [ "$MC_LIFECYCLE_STATUS" = "on_hold" ]; then
+      state_update "$TASK_ID" '{"status":"paused","lastError":null}' "board-hold-reconcile"
+      tmux kill-session -t "=$SESSION" 2>/dev/null || true
+      echo "[$TIMESTAMP] HOLD: $TASK_ID — stopped runtime because the MC ticket is on hold" >> "$LOG"
+      continue
+    fi
+  fi
+
   STARTED_AT=$(jq -r ".[] | select(.id == \"$TASK_ID\") | .startedAt // .lastAttemptAt // .lastRespawnAt // 0" "$REGISTRY")
   if [ "$STARTED_AT" -eq 0 ] 2>/dev/null; then
     echo "[$TIMESTAMP] SKIP HEALTH: $TASK_ID — no start timestamp available" >> "$LOG"
@@ -662,17 +793,27 @@ echo "$RUNNING_IDS" | while read -r TASK_ID; do
     continue
   fi
 
+  # A dashboard comment launches a dedicated change-request run and clears
+  # completionSyncedAt. Do not let CI/review automation kill and replace that
+  # live human-feedback session before its result has been reconciled.
+  CHANGE_REQUEST_AT=$(jq -r ".[] | select(.id == \"$TASK_ID\") | .changeRequestAt // empty" "$REGISTRY")
+  COMPLETION_SYNCED_AT=$(jq -r ".[] | select(.id == \"$TASK_ID\") | .completionSyncedAt // empty" "$REGISTRY")
+  if [ -n "$CHANGE_REQUEST_AT" ] && [ -z "$COMPLETION_SYNCED_AT" ]; then
+    echo "[$TIMESTAMP] HUMAN FOLLOW-UP RUNNING: $TASK_ID — deferring CI/review automation until completion is synced" >> "$LOG"
+    continue
+  fi
+
   PR_NUM=$(cd "$REPO" && gh pr list --head "$BRANCH" --json number -q '.[0].number' 2>/dev/null)
 
   # Check if this is an investigation task (no PR expected)
   TASK_TYPE=""
   if [ -n "$MC_TASK_ID" ]; then
-    TASK_TYPE=$(curl -s "$MC_URL/api/tasks/$MC_TASK_ID" 2>/dev/null | jq -r '.task_type // "implementation"' 2>/dev/null)
+    TASK_TYPE=$(mc_curl GET "/api/tasks/$MC_TASK_ID" -s 2>/dev/null | jq -r '.task_type // "implementation"' 2>/dev/null)
   fi
 
   if [ "$TASK_TYPE" = "investigation" ]; then
     # Investigation tasks don't produce PRs — check if agent completed via webhook
-    MC_STATUS=$(curl -s "$MC_URL/api/tasks/$MC_TASK_ID" 2>/dev/null | jq -r '.status // "unknown"' 2>/dev/null)
+    MC_STATUS=$(mc_curl GET "/api/tasks/$MC_TASK_ID" -s 2>/dev/null | jq -r '.status // "unknown"' 2>/dev/null)
     if [ "$MC_STATUS" = "done" ] || [ "$MC_STATUS" = "review" ]; then
       echo "[$TIMESTAMP] INVESTIGATION DONE: $TASK_ID — agent reported findings" >> "$LOG"
       state_update "$TASK_ID" '{"status": "ready"}' "investigation-ready"
@@ -775,7 +916,7 @@ echo "$RUNNING_IDS" | while read -r TASK_ID; do
     [ -n "$AGENT_SUMMARY" ] && summary_text+=$'\n'"$AGENT_SUMMARY"
 
     mc_add_deliverable "$MC_TASK_ID" "Pull Request #$PR_NUM" "$PR_URL"
-    mc_complete_task "$MC_TASK_ID" "$summary_text"
+    mc_complete_task "$MC_TASK_ID" "$summary_text" "review" "$PR_URL"
   fi
 
   # Distill knowledge from task artifacts into Context Fabrica

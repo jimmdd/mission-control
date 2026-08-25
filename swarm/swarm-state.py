@@ -196,6 +196,12 @@ def cmd_snapshot_create(args: argparse.Namespace) -> int:
                 continue
         payload["eventsTail"] = parsed
     _atomic_write_json(snapshot, payload)
+    try:
+        keep = max(1, int(os.environ.get("SWARM_SNAPSHOT_KEEP_COUNT", "168")))
+    except ValueError:
+        keep = 168
+    for stale in sorted(snapshot_dir.glob("snapshot-*.json"), reverse=True)[keep:]:
+        stale.unlink(missing_ok=True)
     print(str(snapshot))
     return 0
 

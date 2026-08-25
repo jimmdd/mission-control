@@ -70,6 +70,16 @@ test("GSD tasks become steps the map can draw", () => {
   rmSync(dir, { recursive: true, force: true });
 });
 
+test("multiline verify blocks remain complete runnable shell commands", () => {
+  const verify = "cd apps/new-ui &&\nbun run check &&\nbun test";
+  const dir = withPlans({ "01-01-PLAN.md": planFile(1, [
+    { title: "Run the application gates", files: ["apps/new-ui"], verify },
+  ]) });
+  const p = importPlans(dir);
+  assert.equal(p.steps[0].verify_command, verify);
+  rmSync(dir, { recursive: true, force: true });
+});
+
 test("the numbering is not repeated on every node", () => {
   // "Task 3: Do the thing" would print the position twice — the step already
   // carries its number.

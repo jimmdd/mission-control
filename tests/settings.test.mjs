@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdtempSync, rmSync, readFileSync, existsSync } from "node:fs";
+import { mkdtempSync, mkdirSync, rmSync, readFileSync, existsSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { Readable } from "node:stream";
@@ -75,18 +75,30 @@ test("settings POST writes only allowlisted keys to .env", async () => {
       mockReq({
         url: "/api/settings",
         method: "POST",
-        body: { CONTEXT_FABRICA_DSN: "postgresql://localhost/cf", PATH: "/evil", FOO: "bar" },
+        body: {
+          CONTEXT_FABRICA_DSN: "postgresql://localhost/cf",
+          MC_PREVIEW_API_RUNNER_ROOT: "/trusted/backend",
+          MC_PREVIEW_PROD_READ_DATABASE_URL: "postgresql://reader@prod/db",
+          PATH: "/evil",
+          FOO: "bar",
+        },
       }),
       res,
     );
     assert.equal(res.statusCode, 200);
     const payload = JSON.parse(res.body);
-    assert.deepEqual(payload.updated, ["CONTEXT_FABRICA_DSN"]);
+    assert.deepEqual(payload.updated, [
+      "CONTEXT_FABRICA_DSN",
+      "MC_PREVIEW_API_RUNNER_ROOT",
+      "MC_PREVIEW_PROD_READ_DATABASE_URL",
+    ]);
     assert.ok(payload.rejected.includes("PATH"));
     assert.ok(payload.rejected.includes("FOO"));
 
     const envText = existsSync(join(dir, ".env")) ? readFileSync(join(dir, ".env"), "utf-8") : "";
     assert.match(envText, /CONTEXT_FABRICA_DSN=postgresql:\/\/localhost\/cf/);
+    assert.match(envText, /MC_PREVIEW_API_RUNNER_ROOT=\/trusted\/backend/);
+    assert.match(envText, /MC_PREVIEW_PROD_READ_DATABASE_URL=postgresql:\/\/reader@prod\/db/);
     assert.ok(!envText.includes("PATH=/evil"), "allowlist must block arbitrary env keys");
   });
 });
@@ -107,5 +119,30 @@ test("settings POST with no allowlisted keys is a 400", async () => {
     const res = mockRes();
     await handler(mockReq({ url: "/api/settings", method: "POST", body: { NOPE: "x" } }), res);
     assert.equal(res.statusCode, 400);
+  });
+});
+
+test("ticket repository choices exclude worktrees and external repos and honor the allowlist", async () => {
+  await withHandler(async (handler, _db, dir) => {
+    const root = join(dir, "GitProjects");
+    for (const rel of ["backend", "staging-dashboard", "external/mission-control", "worktrees/MET-650-backend"]) {
+      mkdirSync(join(root, rel, ".git"), { recursive: true });
+    }
+    await handler(mockReq({
+      url: "/api/settings", method: "POST",
+      body: { REPO_WATCH_ROOT: root, REPO_WATCH_REPOS: "GitProjects/backend" },
+    }), mockRes());
+
+    const choices = mockRes();
+    await handler(mockReq({ url: "/api/repos" }), choices);
+    assert.deepEqual(JSON.parse(choices.body).repos, [
+      { project: "GitProjects", repo: "backend", domain: "GitProjects/backend" },
+    ]);
+
+    const metadata = mockRes();
+    await handler(mockReq({ url: "/api/repos/meta" }), metadata);
+    assert.deepEqual(JSON.parse(metadata.body).repos.map(r => r.domain).sort(), [
+      "GitProjects/backend", "GitProjects/staging-dashboard",
+    ]);
   });
 });

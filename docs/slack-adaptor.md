@@ -1,9 +1,10 @@
 # Slack adaptor — design notes
 
-> Status: **partly built.** A DM-scoped Slack surface (Socket Mode, outbound alerts +
-> inbound commands) shipped with the message bus — see `docs/message-bus.md`. What is
-> still design-only is everything below that needs identity: **thread = ticket**,
-> channel ingestion, approve/deny buttons, and the `actors` / `actor_tokens` schema.
+> Status: **partly built.** DM alerts/commands and the narrow **thread = ticket** path
+> have shipped: an allowlisted user's mention in an allowlisted channel creates a ticket,
+> and later replies in that thread become ticket input. What is still design-only is
+> broad channel ingestion, multi-user actor identity, approve/deny buttons, and the
+> `actors` / `actor_tokens` schema. See `docs/message-bus.md`.
 > Captured 10 Aug 2026. See the approved plan at `~/.claude/plans/kind-mixing-pixel.md`.
 
 ## Framing — what this is and is not
@@ -69,7 +70,7 @@ The load-bearing decision. `@mc add rate limiting to the API` in `#backend` crea
 `backend` scope; the bot replies in-thread, and from then on **that thread is ENG-482**. Research
 questions get posted there, answers come back as activities, approvals appear as buttons.
 
-New table:
+Shipped table:
 
 ```sql
 CREATE TABLE IF NOT EXISTS task_surface_threads (
@@ -77,11 +78,16 @@ CREATE TABLE IF NOT EXISTS task_surface_threads (
   surface     TEXT NOT NULL,          -- 'slack' | 'telegram' | 'linear'
   channel_id  TEXT NOT NULL,
   thread_ts   TEXT NOT NULL,          -- telegram: reply_to_message_id
+  created_by_external_id TEXT,
   created_at  TEXT DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')),
   PRIMARY KEY (surface, channel_id, thread_ts)
 );
 CREATE INDEX IF NOT EXISTS idx_surface_threads_task ON task_surface_threads(task_id);
 ```
+
+Authorization is intentionally narrower than the eventual actor model: both the Slack user id and channel
+id must be configured allowlists. That makes channel ticket creation safe before roles
+and scoped actor tokens exist.
 
 ### DM is deliberately not a ticket
 

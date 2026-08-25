@@ -10,9 +10,38 @@ import { stdin as input, stdout as outputStream } from "node:process";
 
 type Json = Record<string, unknown> | unknown[];
 
+const MC_HOME = process.env.MC_HOME ?? join(homedir(), ".mission-control");
+try {
+  process.loadEnvFile(join(MC_HOME, ".env"));
+} catch (error) {
+  if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+}
 const MC_URL = process.env.MISSION_CONTROL_URL ?? "http://127.0.0.1:18900";
 const API_PREFIX = "/api";
-const MC_HOME = process.env.MC_HOME ?? join(homedir(), ".mission-control");
+
+function firstApiToken(...names: string[]): string {
+  for (const name of names) {
+    const value = (process.env[name] ?? "").trim();
+    if (value) return value;
+  }
+  return "";
+}
+
+function apiTokenFor(method: string, path: string): string {
+  const fallback = firstApiToken("MISSION_CONTROL_ACCESS_TOKEN", "MISSION_CONTROL_READ_ACCESS_TOKEN");
+  if ((process.env.MISSION_CONTROL_AUTH_MODE ?? "simple").trim().toLowerCase() !== "scoped") return fallback;
+  const segments = path.replace(/^\/api\/?/, "").split("/").filter(Boolean);
+  if (segments[0] === "webhooks") {
+    return firstApiToken("MISSION_CONTROL_WEBHOOK_SECRET", "MISSION_CONTROL_WRITE_TOKEN") || fallback;
+  }
+  if (["GET", "HEAD", "OPTIONS"].includes(method.toUpperCase())) {
+    return firstApiToken("MISSION_CONTROL_READ_TOKEN") || fallback;
+  }
+  if (method.toUpperCase() === "DELETE") {
+    return firstApiToken("MISSION_CONTROL_ADMIN_TOKEN", "MISSION_CONTROL_WRITE_TOKEN") || fallback;
+  }
+  return firstApiToken("MISSION_CONTROL_WRITE_TOKEN") || fallback;
+}
 
 type ParsedArgs = {
   positionals: string[];
@@ -185,9 +214,13 @@ function runInteractive(command: string, args: string[]): Promise<void> {
 
 async function mcFetch(method: string, path: string, body?: unknown): Promise<Json> {
   const url = new URL(path, MC_URL);
+  const token = apiTokenFor(method, url.pathname);
+  const headers: Record<string, string> = {};
+  if (body) headers["Content-Type"] = "application/json";
+  if (token) headers.Authorization = `Bearer ${token}`;
   const response = await fetch(url, {
     method,
-    headers: body ? { "Content-Type": "application/json" } : undefined,
+    headers,
     body: body ? JSON.stringify(body) : undefined,
   });
 

@@ -16,5 +16,17 @@ export interface IncomingChatMessage {
   /** Who sent it, for attribution in the activity trail. */
   userId: string;
   userName?: string;
+  /** Stable transport delivery id when the surface supplies one. */
+  messageId?: string;
+  text: string;
+}
+
+export interface SlackChannelMessage {
+  kind: "mention" | "reply";
+  channelId: string;
+  /** The parent message timestamp that durably identifies the ticket thread. */
+  threadTs: string;
+  messageTs: string;
+  userId: string;
   text: string;
 }

@@ -41,10 +41,18 @@ export interface SchedulerOptions {
 }
 
 // The launchd cadences these mirror, so behaviour does not change when the
-// scheduler takes over: linear-sync 300s, check-agents 600s, repo-watcher 1800s.
+// scheduler takes over: linear-sync 300s, check-agents 600s, repo-watcher 1800s,
+// cleanup-worktrees 600s.
+//
+// cleanup-worktrees runs behind linear-sync deliberately. linear-sync is what
+// writes `done` when a Linear issue is completed, cancelled, or deleted; this is
+// what acts on that status, releasing the ticket's tmux session and worktree. Two
+// halves of one loop — without the second, a ticket closed in Linear left its
+// agent running and its checkout on disk indefinitely.
 export const DEFAULT_JOBS: SchedulerJob[] = [
   { name: "linear-sync", segments: ["integrations", "linear", "linear-sync.py"], intervalMs: 300_000, interpreter: "python" },
   { name: "check-agents", segments: ["swarm", "check-agents.sh"], intervalMs: 600_000, interpreter: "bash" },
+  { name: "cleanup-worktrees", segments: ["swarm", "cleanup-worktrees.sh"], intervalMs: 600_000, interpreter: "bash" },
   { name: "repo-watcher", segments: ["swarm", "repo-watcher.py"], intervalMs: 1_800_000, interpreter: "python" },
 ];
 

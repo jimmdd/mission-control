@@ -33,23 +33,13 @@ from planner import _call_llm, _parse_json_response  # noqa: E402
 
 # --- Mission Control HTTP (self-contained; no bridge import to avoid cycles) ---
 
-def _mc_token() -> str:
-    return (
-        os.environ.get("MISSION_CONTROL_ACCESS_TOKEN")
-        or os.environ.get("MISSION_CONTROL_WRITE_TOKEN")
-        or os.environ.get("MISSION_CONTROL_READ_ACCESS_TOKEN")
-        or ""
-    ).strip()
+from mc_api import headers_for
 
 
 def mc_request(method: str, path: str, body: Optional[dict] = None):
     url = f"{MC_BASE_URL}{path}"
     payload = json.dumps(body).encode() if body is not None else None
-    headers = {"Content-Type": "application/json"} if payload else {}
-    # Same-origin marker so the server's CSRF guard treats us as a trusted client.
-    token = _mc_token()
-    if token:
-        headers["Authorization"] = f"Bearer {token}"
+    headers = headers_for(method, path, json_body=payload is not None)
     req = urllib.request.Request(url, data=payload, method=method, headers=headers)
     with urllib.request.urlopen(req, timeout=30) as resp:
         raw = resp.read()

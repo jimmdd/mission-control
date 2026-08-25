@@ -73,11 +73,21 @@ def parse_plan_file(path: Path) -> Dict:
         # and an em dash, so every node on MET-640's map read "T1 — …".
         title = re.sub(r"^(?:task|t)\s*\d+\s*[:.\-–—]\s*", "", title, flags=re.I)
         verify = VERIFY.search(block)
+        # A GSD verify block is commonly a multiline shell program, for example:
+        #
+        #   cd apps/new-ui &&
+        #   bun run check &&
+        #   bun test
+        #
+        # Keeping only its first line turns that into a dangling `&&`, which MC's
+        # gate probe correctly rejects forever. Preserve the complete command;
+        # subprocess' shell runner accepts embedded newlines.
+        verify_command = verify.group(1).strip() if verify else ""
         tasks.append({
             "title": title or "(untitled task)",
             "kind": dict(ATTR.findall(attrs or "")).get("type", ""),
             "files": _files_of(block),
-            "verify_command": (verify.group(1).strip().splitlines() or [""])[0] if verify else "",
+            "verify_command": verify_command,
         })
     # The plan's own id ("01-02"). Frontmatter first, file name as the fallback —
     # it is what `progress.step_label` names when the agent reports which plan it is

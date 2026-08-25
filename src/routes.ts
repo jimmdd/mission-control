@@ -1,5 +1,5 @@
 import { readFileSync, writeFileSync, existsSync, readdirSync, mkdirSync, renameSync } from "node:fs";
-import { join, dirname } from "node:path";
+import { basename, join, dirname } from "node:path";
 import { homedir, cpus, totalmem, freemem, loadavg } from "node:os";
 import { fileURLToPath } from "node:url";
 import { execFile, spawn } from "node:child_process";
@@ -33,8 +33,90 @@ export interface McLogger {
   error: (message: string, ...args: unknown[]) => void;
 }
 
+export interface ResetPullRequestResult {
+  url: string;
+  state: "OPEN" | "CLOSED" | "MERGED";
+  closed: boolean;
+}
+
+export interface CreateLinearIssueInput {
+  title: string;
+  description: string;
+  requestId: string;
+  teamKey?: string;
+  assignee?: string;
+}
+
+export interface CreatedLinearIssue {
+  id: string;
+  identifier: string;
+  title: string;
+  description?: string;
+  url: string;
+  priority?: number;
+  team?: { id?: string; key?: string; name?: string };
+  assignee?: { id?: string; name?: string; email?: string } | null;
+}
+
+export interface RouteDependencies {
+  resetPullRequest?: (url: string) => Promise<ResetPullRequestResult>;
+  createLinearIssue?: (input: CreateLinearIssueInput) => Promise<{ created: boolean; issue: CreatedLinearIssue }>;
+  transitionTaskRuntime?: (
+    taskId: string,
+    transition: "hold" | "delete",
+  ) => Promise<TaskRuntimeTransitionResult>;
+}
+
+export interface TaskRuntimeTransitionResult {
+  matched: number;
+  stopped: number;
+}
+
 const consoleLogger: McLogger = { info: console.log, error: console.error };
 const MAX_JSON_BODY_BYTES = Number.parseInt(process.env.MISSION_CONTROL_MAX_BODY_BYTES ?? "1048576", 10);
+
+function githubPullRequestTarget(url: string): { repo: string; number: string } | null {
+  const match = /^https?:\/\/github\.com\/([^/]+\/[^/]+)\/pull\/(\d+)(?:[/?#].*)?$/i.exec(url.trim());
+  return match ? { repo: match[1], number: match[2] } : null;
+}
+
+function runGh(args: string[]): Promise<string> {
+  return new Promise((resolve, reject) => {
+    execFile("gh", args, { timeout: 30_000 }, (error, stdout, stderr) => {
+      if (error) {
+        const detail = String(stderr || error.message).trim();
+        reject(new Error(detail || "GitHub CLI command failed"));
+        return;
+      }
+      resolve(String(stdout));
+    });
+  });
+}
+
+/** Close the active PR before a review ticket is reset.
+ *
+ * Resetting is intentionally fail-closed here: returning the ticket to the inbox
+ * while GitHub still has an open PR recreates the orphan lifecycle this operation
+ * is meant to prevent. Closed PRs retain their branch and can be reopened by the
+ * bridge when re-triage selects the same repository.
+ */
+export async function closePullRequestForReset(url: string): Promise<ResetPullRequestResult> {
+  const target = githubPullRequestTarget(url);
+  if (!target) throw new Error("The task's pull-request URL is not a supported GitHub PR URL");
+
+  const raw = await runGh(["pr", "view", target.number, "--repo", target.repo, "--json", "state"]);
+  const state = String((JSON.parse(raw || "{}") as { state?: unknown }).state ?? "").toUpperCase();
+  if (state !== "OPEN" && state !== "CLOSED" && state !== "MERGED") {
+    throw new Error(`GitHub returned an unknown pull-request state: ${state || "empty"}`);
+  }
+  if (state !== "OPEN") return { url, state, closed: false };
+
+  await runGh([
+    "pr", "close", target.number, "--repo", target.repo,
+    "--comment", "Mission Control reset this ticket for re-triage. The PR will be reopened if the next run targets this repository.",
+  ]);
+  return { url, state: "CLOSED", closed: true };
+}
 
 // Canned follow-up instructions for a review-state PR. Used by the ticket quick-action
 // buttons (manual) AND the check-agents auto-monitors (automatic) — keep the wording in
@@ -444,6 +526,17 @@ function sanitizeProgressInput(body: Record<string, unknown>): UpsertProgressInp
 
 const TERMINAL_TASK_STATUSES = new Set(["review", "done"]);
 
+function emitTerminalCompletion(
+  events: McEventBus,
+  taskId: string,
+  previousStatus: string,
+  nextStatus: string,
+): void {
+  if (previousStatus !== "done" && nextStatus === "done") {
+    events.emit("task_completed", { taskId, status: "done" });
+  }
+}
+
 // When a delegated child task reaches a terminal state, record the result on its
 // parent and — if the parent was paused waiting on its children — resume the
 // parent once every child is terminal. This lets a stuck agent spin up a
@@ -515,6 +608,30 @@ function resolveCheckpointAndResume(
     message: response ? `Checkpoint ${newStatus}: ${response}` : `Checkpoint ${newStatus}.`,
     metadata: JSON.stringify({ checkpoint_id: checkpointId, decision: newStatus }),
   });
+
+  const draftPrUrl = existing.prompt.match(/https?:\/\/github\.com\/[^\s]+\/pull\/\d+/i)?.[0] ?? "";
+  const draftPrDecision = String(response ?? "").trim();
+  if (draftPrUrl && draftPrDecision === "Move to review (I'll finish the PR myself)") {
+    db.updateTask(taskId, { status: "review" });
+    db.upsertProgress(taskId, { state: "waiting", blocked_reason: null });
+    db.createActivity({
+      task_id: taskId,
+      activity_type: "status_changed",
+      message: `Draft PR kept for human review (${draftPrUrl}).`,
+      metadata: JSON.stringify({ pr_url: draftPrUrl }),
+    });
+    events.emit("checkpoint_resolved", { taskId, checkpointId, decision: newStatus });
+    return { ok: true, checkpoint: resolved };
+  }
+
+  if (draftPrUrl && draftPrDecision === "Let an agent continue on top of this PR") {
+    db.createActivity({
+      task_id: taskId,
+      activity_type: "pr_reuse_requested",
+      message: `Continue the task on the existing draft PR (${draftPrUrl}).`,
+      metadata: JSON.stringify({ pr_url: draftPrUrl, pr_disposition: "reuse_if_same_repo" }),
+    });
+  }
 
   const task = db.getTask(taskId);
   if (task && task.status === "on_hold" && db.countPendingCheckpoints(taskId) === 0) {
@@ -601,6 +718,74 @@ export async function getSwarmAgentStatusMap(
   }
 
   return byTask;
+}
+
+function execRuntimeFile(command: string, args: string[]): Promise<void> {
+  return new Promise((resolve, reject) => {
+    execFile(command, args, { timeout: 10_000 }, (error, _stdout, stderr) => {
+      if (!error) {
+        resolve();
+        return;
+      }
+      const detail = String(stderr || error.message).trim();
+      reject(new Error(detail || `${command} failed`));
+    });
+  });
+}
+
+/**
+ * Move every swarm entry for a board ticket out of the runnable state before the
+ * board transition is committed. Worktrees and branches are preserved; hold is
+ * resumable, while delete leaves a terminal marker for the bounded cleaner.
+ */
+export async function transitionTaskRuntime(
+  taskId: string,
+  transition: "hold" | "delete",
+): Promise<TaskRuntimeTransitionResult> {
+  const mcHome = process.env.MC_HOME ?? join(homedir(), ".mission-control");
+  const registryPath = join(mcHome, "swarm", "active-tasks.json");
+  if (!existsSync(registryPath)) return { matched: 0, stopped: 0 };
+
+  const parsed = JSON.parse(readFileSync(registryPath, "utf8")) as unknown;
+  if (!Array.isArray(parsed)) throw new Error("Swarm registry is not an array");
+  const entries = parsed.filter(
+    (entry): entry is Record<string, unknown> =>
+      Boolean(entry) && typeof entry === "object" && (entry as Record<string, unknown>).mcTaskId === taskId,
+  );
+  if (entries.length === 0) return { matched: 0, stopped: 0 };
+
+  const stateTool = resolveRuntimePath("swarm", "swarm-state.py");
+  const now = new Date().toISOString();
+  const status = transition === "hold" ? "paused" : "deleted";
+  for (const entry of entries) {
+    const runtimeId = typeof entry.id === "string" ? entry.id : "";
+    if (!runtimeId) throw new Error(`Swarm entry for ${taskId} has no runtime id`);
+    const patch = transition === "hold"
+      ? { status, heldAt: now, lastError: null }
+      : { status, deletedAt: now, lastError: null };
+    await execRuntimeFile(resolvePythonBin(), [
+      stateTool,
+      "--registry", registryPath,
+      "update",
+      "--task-id", runtimeId,
+      "--patch-json", JSON.stringify(patch),
+      "--reason", `task-${transition}`,
+    ]);
+  }
+
+  let stopped = 0;
+  for (const entry of entries) {
+    const session = typeof entry.tmuxSession === "string" ? entry.tmuxSession.trim() : "";
+    if (!session) continue;
+    try {
+      await execRuntimeFile("tmux", ["kill-session", "-t", `=${session}`]);
+      stopped += 1;
+    } catch (error) {
+      const detail = error instanceof Error ? error.message : String(error);
+      if (!/no server running|can't find session|session not found/i.test(detail)) throw error;
+    }
+  }
+  return { matched: entries.length, stopped };
 }
 
 function getDashboardHtml(): string | null {
@@ -757,10 +942,54 @@ function archivePlanFiles(taskId: string): boolean {
   return moved;
 }
 
+/** Stop and archive a detached planning run before re-triage starts.
+ *
+ * The planner is launched in its own process group so the bridge can stay
+ * responsive. A reset that leaves that group alive does not actually restart the
+ * ticket: the next run finds the old job file, waits on its PID, and can later
+ * consume a plan written from the discarded triage answers.
+ */
+function archivePlanningJob(taskId: string): { archived: boolean; stopped: boolean } {
+  if (!/^[A-Za-z0-9_-]+$/.test(taskId)) return { archived: false, stopped: false };
+  const live = resolveRuntimePath("bridge", "plan-stage", `${taskId}.job.json`);
+  if (!existsSync(live)) return { archived: false, stopped: false };
+
+  let stopped = false;
+  try {
+    const state = JSON.parse(readFileSync(live, "utf8")) as { state?: unknown; pid?: unknown };
+    const pid = typeof state.pid === "number" ? state.pid : Number.parseInt(String(state.pid ?? ""), 10);
+    if (state.state === "running" && Number.isSafeInteger(pid) && pid > 1) {
+      try {
+        // plan_stage_runner.py is started with start_new_session=True. Killing the
+        // group also stops any research subprocesses it launched.
+        process.kill(-pid, "SIGTERM");
+        stopped = true;
+      } catch (err) {
+        const code = (err as NodeJS.ErrnoException).code;
+        if (code !== "ESRCH") throw err;
+      }
+    }
+  } catch {
+    // A malformed/stale receipt should still be archived so it cannot wedge the
+    // next run. We only signal a PID read from valid JSON above.
+  }
+
+  try {
+    const stamp = new Date().toISOString().replace(/[:.]/g, "-");
+    const archiveDir = resolveRuntimePath("bridge", "archive", "plan-stage");
+    mkdirSync(archiveDir, { recursive: true });
+    renameSync(live, join(archiveDir, `${taskId}.${stamp}.job.json`));
+    return { archived: true, stopped };
+  } catch {
+    return { archived: false, stopped };
+  }
+}
+
 export function createHandler(
   db: MissionControlDB,
   logger?: McLogger,
   events: McEventBus = new McEventBus(),
+  dependencies: RouteDependencies = {},
 ): (req: IncomingMessage, res: ServerResponse) => Promise<void> {
   const log = logger ?? consoleLogger;
   return async (req: IncomingMessage, res: ServerResponse): Promise<void> => {
@@ -828,7 +1057,7 @@ export function createHandler(
 
     // API routes
     if (resolveApiRoutePath(pathname) !== null) {
-      await handleApiRequest(req, res, url, db, log, events);
+      await handleApiRequest(req, res, url, db, log, events, dependencies);
       return;
     }
 
@@ -845,11 +1074,13 @@ async function handleApiRequest(
   db: MissionControlDB,
   logger: McLogger,
   events: McEventBus,
+  dependencies: RouteDependencies = {},
 ): Promise<void> {
   try {
     const pathname = url.pathname;
     const method = req.method ?? "GET";
     const readOnly = isTruthyEnv("MISSION_CONTROL_READ_ONLY");
+    const runtimeTransition = dependencies.transitionTaskRuntime ?? transitionTaskRuntime;
 
     const routePath = resolveApiRoutePath(pathname);
     if (routePath === null) {
@@ -872,7 +1103,60 @@ async function handleApiRequest(
       return;
     }
 
+    if (segments[0] === "surface-threads" && segments.length === 1) {
+      if (method === "GET") {
+        const surface = url.searchParams.get("surface")?.trim() ?? "";
+        const channelId = url.searchParams.get("channel_id")?.trim() ?? "";
+        const threadTs = url.searchParams.get("thread_ts")?.trim() ?? "";
+        if (!surface || !channelId || !threadTs) {
+          sendJson(res, 400, { error: "surface, channel_id and thread_ts are required" });
+          return;
+        }
+        const thread = db.getSurfaceThread(surface, channelId, threadTs);
+        const task = thread ? db.getTask(thread.task_id) : undefined;
+        if (!thread || !task) {
+          sendJson(res, 404, { error: "Surface thread not found" });
+          return;
+        }
+        sendJson(res, 200, { thread, task });
+        return;
+      }
+
+      if (method === "POST") {
+        const body = await parseBody(req);
+        const surface = isRecord(body) && typeof body.surface === "string" ? body.surface.trim() : "";
+        const channelId = isRecord(body) && typeof body.channel_id === "string" ? body.channel_id.trim() : "";
+        const threadTs = isRecord(body) && typeof body.thread_ts === "string" ? body.thread_ts.trim() : "";
+        const title = isRecord(body) && typeof body.title === "string" ? body.title.trim() : "";
+        if (surface !== "slack" || !/^C[A-Z0-9]+$/i.test(channelId) || !/^\d+\.\d+$/.test(threadTs) || !title) {
+          sendJson(res, 400, { error: "Valid Slack surface, channel_id, thread_ts and title are required" });
+          return;
+        }
+        const result = db.createTaskForSurfaceThread({
+          surface,
+          channel_id: channelId,
+          thread_ts: threadTs,
+          created_by_external_id:
+            isRecord(body) && typeof body.created_by_external_id === "string"
+              ? body.created_by_external_id.trim()
+              : undefined,
+          title,
+          description: isRecord(body) && typeof body.description === "string" ? body.description : undefined,
+          source: "slack",
+        });
+        sendJson(res, result.created ? 201 : 200, result);
+        return;
+      }
+    }
+
     if (segments[0] === "tasks") {
+      if (segments.length === 2 && segments[1] === "pending-chat" && method === "GET") {
+        const requested = Number.parseInt(url.searchParams.get("limit") ?? "20", 10);
+        const limit = Number.isFinite(requested) ? requested : 20;
+        sendJson(res, 200, db.listPendingChatMessages(limit));
+        return;
+      }
+
       if (segments.length === 2 && segments[1] === "claim" && method === "POST") {
         const body = await parseBody(req);
         const owner = isRecord(body) && typeof body.owner === "string" ? body.owner.trim() : "";
@@ -979,7 +1263,16 @@ async function handleApiRequest(
 
               const needsTriageCheck = typeof body.triage_state === "string";
               const needsPriorityCheck = typeof body.priority === "string" && ["urgent", "high"].includes(body.priority);
-              const oldTask = (needsTriageCheck || needsPriorityCheck) ? db.getTask(taskId) : null;
+              const needsCompletionCheck = body.status === "done";
+              const needsRuntimeCheck = body.status === "on_hold";
+              const oldTask = (needsTriageCheck || needsPriorityCheck || needsCompletionCheck || needsRuntimeCheck)
+                ? db.getTask(taskId)
+                : null;
+
+              if (needsRuntimeCheck && !oldTask) {
+                sendJson(res, 404, { error: "Task not found" });
+                return;
+              }
 
               if (needsPriorityCheck && oldTask) {
                 // Escalating priority fast-tracks a parked task back to the inbox for
@@ -990,6 +1283,10 @@ async function handleApiRequest(
                 if (stalled.includes(oldTask.status) && !["urgent", "high"].includes(oldTask.priority)) {
                   body.status = "inbox";
                 }
+              }
+
+              if (needsRuntimeCheck && oldTask?.status !== "on_hold") {
+                await runtimeTransition(taskId, "hold");
               }
 
               const task = db.updateTask(taskId, body as unknown as UpdateTaskInput);
@@ -1009,6 +1306,9 @@ async function handleApiRequest(
               if (typeof body.status === "string" && TERMINAL_TASK_STATUSES.has(body.status)) {
                 rollUpDelegation(db, taskId, events);
               }
+              if (oldTask && typeof body.status === "string") {
+                emitTerminalCompletion(events, taskId, oldTask.status, body.status);
+              }
 
               sendJson(res, 200, task);
               return;
@@ -1016,6 +1316,11 @@ async function handleApiRequest(
 
             if (segments.length === 2 && method === "DELETE") {
               const task = db.getTask(taskId);
+              if (!task) {
+                sendJson(res, 404, { error: "Task not found" });
+                return;
+              }
+              await runtimeTransition(taskId, "delete");
               const deleted = db.deleteTask(taskId);
               if (!deleted) {
                 sendJson(res, 404, { error: "Task not found" });
@@ -1076,7 +1381,11 @@ async function handleApiRequest(
               }
 
               if (task.status === "done") {
-                sendJson(res, 200, { success: true, alreadyDone: true, task });
+                // Re-run the terminal invariant even for idempotent completion.
+                // This repairs checkpoints created by an older process or another
+                // path before terminal checkpoint cleanup was introduced.
+                const reconciled = db.updateTask(taskId, { status: "done" } as unknown as UpdateTaskInput) ?? task;
+                sendJson(res, 200, { success: true, alreadyDone: true, task: reconciled });
                 return;
               }
 
@@ -1098,6 +1407,7 @@ async function handleApiRequest(
               });
 
               rollUpDelegation(db, taskId, events);
+              emitTerminalCompletion(events, taskId, task.status, updated.status);
 
               sendJson(res, 200, { success: true, task: updated });
               return;
@@ -1199,13 +1509,64 @@ async function handleApiRequest(
                     typeof body.agent_id === "string" ? body.agent_id : undefined,
                   metadata:
                     typeof body.metadata === "string" ? body.metadata : undefined,
+                  expects_reply: body.expects_reply === true,
+                  reply_to_activity_id:
+                    typeof body.reply_to_activity_id === "string"
+                      ? body.reply_to_activity_id
+                      : undefined,
                 };
+                // `needs_human` is a product contract, not just notification styling:
+                // if MC interrupts a person, the ticket must contain something they can
+                // resolve. Older callers only posted an activity, which produced the
+                // MET-642 alert after its draft PR was already in review but left no
+                // question or button anywhere in MC. Convert that legacy signal into a
+                // pending checkpoint at ingestion, deduped for retrying callers.
+                let escalationCheckpoint;
+                if (input.activity_type === "needs_human") {
+                  const task = db.getTask(taskId);
+                  escalationCheckpoint = db.findPendingCheckpoint(taskId, input.message) ?? db.createCheckpoint({
+                    task_id: taskId,
+                    kind: Array.isArray(body.options) ? "choice" : "question",
+                    prompt: input.message,
+                    options: Array.isArray(body.options) ? JSON.stringify(body.options) : undefined,
+                  });
+
+                  // A review-stage decision should remain attached to the draft PR.
+                  // Active implementation work, however, really is stopped by a human
+                  // escalation unless the caller explicitly marks it non-pausing.
+                  const pause = body.pause !== false && task && !["review", "done"].includes(task.status);
+                  if (pause) {
+                    await runtimeTransition(taskId, "hold");
+                    db.updateTask(taskId, { status: "on_hold" });
+                    db.upsertProgress(taskId, {
+                      state: "waiting",
+                      blocked_reason: input.message.slice(0, 500),
+                    });
+                  }
+
+                  let metadata: Record<string, unknown> = {};
+                  if (input.metadata) {
+                    try {
+                      const parsed = JSON.parse(input.metadata);
+                      if (isRecord(parsed)) metadata = parsed;
+                      else metadata.source_metadata = input.metadata;
+                    } catch {
+                      metadata.source_metadata = input.metadata;
+                    }
+                  }
+                  input.metadata = JSON.stringify({ ...metadata, checkpoint_id: escalationCheckpoint.id });
+                }
+
                 const activity = db.createActivity(input);
 
-                // Surface agent escalations as a push notification, not just a
-                // board entry the human has to go look at.
+                // Surface agent escalations as a push notification, now with the id of
+                // the decision the notification leads to.
                 if (input.activity_type === "needs_human") {
-                  events.emit("needs_human", { taskId, message: input.message });
+                  events.emit("needs_human", {
+                    taskId,
+                    message: input.message,
+                    checkpointId: escalationCheckpoint?.id,
+                  });
                 }
 
                 // A new triage question appeared after earlier ones were answered (e.g. the
@@ -1296,6 +1657,13 @@ async function handleApiRequest(
                 activityType = "question_asked";
                 activityMessage = `Question "${String(question.question ?? questionId).slice(0, 120)}" — asked back: ${text}`;
               } else if (action === "delegate") {
+                // A double click or a stale render must not create a new activity
+                // every time. The pending handoff remains visible until the bridge
+                // records an answer, so repeating it has no additional meaning.
+                if (question.delegate_requested === true) {
+                  sendJson(res, 200, { success: true, triage_state: state });
+                  return;
+                }
                 question.delegate_requested = true;
                 question.deferred = false;
                 activityType = "question_delegated";
@@ -1313,6 +1681,7 @@ async function handleApiRequest(
                 question.answered_at = null;
                 question.answered_by = null;
                 question.delegate_requested = false;
+                question.delegated_answer = false;
                 question.deferred = false;
                 activityMessage = wasDeferred
                   ? `Question "${String(question.question ?? questionId).slice(0, 120)}" is back in play.`
@@ -1330,6 +1699,31 @@ async function handleApiRequest(
             }
 
             if (segments.length === 3 && segments[2] === "reset-triage" && method === "POST") {
+              const beforeReset = db.getTask(taskId);
+              if (!beforeReset) {
+                sendJson(res, 404, { error: "Task not found" });
+                return;
+              }
+              const prUrl = db.listDeliverables(taskId).find((deliverable) =>
+                ["pr", "pull_request"].includes(deliverable.deliverable_type.toLowerCase()) &&
+                typeof deliverable.path === "string" &&
+                deliverable.path.length > 0
+              )?.path ?? null;
+              let prReset: ResetPullRequestResult | null = null;
+              if (prUrl) {
+                try {
+                  prReset = await (dependencies.resetPullRequest ?? closePullRequestForReset)(prUrl);
+                } catch (error) {
+                  const detail = error instanceof Error ? error.message : String(error);
+                  logger.error(`triage reset refused for ${taskId}: could not close ${prUrl}: ${detail}`);
+                  sendJson(res, 502, {
+                    error: `Reset stopped because the existing pull request could not be closed: ${detail}`,
+                    pr_url: prUrl,
+                  });
+                  return;
+                }
+              }
+
               const task = db.resetTriage(taskId);
               if (!task) {
                 sendJson(res, 404, { error: "Task not found" });
@@ -1345,13 +1739,30 @@ async function handleApiRequest(
               // Archived rather than deleted, to match the activity history this
               // reset already keeps as an audit trail.
               const archived = archivePlanFiles(taskId);
+              const planningJob = archivePlanningJob(taskId);
 
               db.createActivity({
                 task_id: taskId,
-                activity_type: "updated",
-                message: archived
-                  ? "Triage reset — task returned to inbox for re-triage. The previous plan and its progress were archived."
-                  : "Triage reset — task returned to inbox for re-triage.",
+                activity_type: "triage_reset",
+                message: [
+                  planningJob.stopped
+                    ? "Triage reset — task returned to inbox for re-triage. The active planning run was stopped and archived."
+                    : archived || planningJob.archived
+                      ? "Triage reset — task returned to inbox for re-triage. The previous planning state was archived."
+                      : "Triage reset — task returned to inbox for re-triage.",
+                  prReset?.closed
+                    ? `Draft PR closed for reset (${prReset.url}); the same PR will be reopened if this run keeps the repository.`
+                    : prReset?.state === "CLOSED"
+                      ? `The recorded PR was already closed (${prReset.url}).`
+                      : prReset?.state === "MERGED"
+                        ? `The recorded PR was already merged (${prReset.url}).`
+                        : "",
+                ].filter(Boolean).join(" "),
+                metadata: prReset ? JSON.stringify({
+                  pr_url: prReset.url,
+                  pr_state: prReset.state,
+                  pr_disposition: prReset.state === "CLOSED" ? "reuse_if_same_repo" : "inactive",
+                }) : undefined,
               });
               events.emit("triage_reset", { taskId });
               sendJson(res, 200, task);
@@ -1371,7 +1782,7 @@ async function handleApiRequest(
                 db.createActivity({
                   task_id: taskId,
                   activity_type: "updated",
-                  message: `Started local preview: ${state.app} at ${state.url}`,
+                  message: `Started local preview: ${state.app} at ${state.url}${state.apiReadOnly ? " · local API · production data · read-only" : ""}`,
                 });
                 sendJson(res, 200, state);
               } catch (err) {
@@ -1546,6 +1957,7 @@ async function handleApiRequest(
 
               const wait = body.wait === true;
               if (wait) {
+                await runtimeTransition(parent.id, "hold");
                 db.updateTask(parent.id, { status: "on_hold" });
                 db.upsertProgress(parent.id, {
                   state: "waiting",
@@ -1569,14 +1981,20 @@ async function handleApiRequest(
                 return;
               }
               if (method === "POST") {
+                const body = await parseBody(req);
+                if (!isRecord(body) || typeof body.prompt !== "string" || !body.prompt.trim()) {
+                  sendJson(res, 400, { error: "Checkpoint prompt is required" });
+                  return;
+                }
+                // Read task state after the asynchronous body parse so completion
+                // cannot race with checkpoint creation on the same event loop.
                 const task = db.getTask(taskId);
                 if (!task) {
                   sendJson(res, 404, { error: "Task not found" });
                   return;
                 }
-                const body = await parseBody(req);
-                if (!isRecord(body) || typeof body.prompt !== "string" || !body.prompt.trim()) {
-                  sendJson(res, 400, { error: "Checkpoint prompt is required" });
+                if (task.status === "done") {
+                  sendJson(res, 409, { error: "Completed tasks cannot accept new checkpoints" });
                   return;
                 }
                 const kind =
@@ -1589,6 +2007,7 @@ async function handleApiRequest(
 
                 const pause = body.pause !== false; // default: pause the task
                 if (pause) {
+                  await runtimeTransition(taskId, "hold");
                   db.updateTask(taskId, { status: "on_hold" });
                   db.upsertProgress(taskId, { state: "waiting", blocked_reason: body.prompt.trim().slice(0, 500) });
                 }
@@ -1816,39 +2235,81 @@ async function handleApiRequest(
               sendJson(res, 404, { error: "Task not found" });
               return;
             }
+            if (task.status === "on_hold") {
+              sendJson(res, 409, { error: "Task is on hold; completion callback ignored" });
+              return;
+            }
 
             const newStatus = (typeof body.status === "string" && ["testing", "review", "done"].includes(body.status)
               ? body.status
               : "review") as TaskStatus;
 
-            // Whether this call is the one that finished the task. The status update
-            // was already guarded, but the announcement below was not — so every
-            // repeat call re-emitted `task_completed` for a task that had completed
-            // long ago. Anything that re-posts the webhook (a completion sync that
-            // has not recorded `completionSyncedAt`, a retried agent) turned into a
-            // stream of "✅ task_completed" alerts, and on MET-640 they were also
-            // untrue: the run had stopped on its turn limit with work unfinished.
-            const alreadyFinished = ["review", "done"].includes(task.status);
-            if (!alreadyFinished) {
+            // Review/testing means an agent run has handed work back; only `done`
+            // closes the ticket. Preserve a task already in review/done on repeated
+            // review webhooks, while still allowing an explicit review -> done move.
+            const alreadyAtOrBeyondRequestedStatus =
+              task.status === "done" || (newStatus !== "done" && task.status === "review");
+            const suppliedPrUrl = typeof body.pr_url === "string" &&
+              /^https?:\/\/[^/]+\/[^/]+\/[^/]+\/pull\/\d+(?:[/?#].*)?$/.test(body.pr_url)
+              ? body.pr_url
+              : undefined;
+            const existingPr = db.listDeliverables(task.id, 100).find(
+              (deliverable) =>
+                ["pr", "pull_request"].includes(deliverable.deliverable_type) &&
+                typeof deliverable.path === "string" &&
+                deliverable.path.length > 0
+            );
+            const explicitlyNoPr = body.no_pr === true;
+
+            // A process exit is not implementation evidence. Requiring either a
+            // recorded PR or an explicit no-PR dispatch keeps an empty/partial run
+            // from moving into review merely because its CLI returned success.
+            if (
+              !alreadyAtOrBeyondRequestedStatus &&
+              task.task_type === "implementation" &&
+              !suppliedPrUrl &&
+              !existingPr &&
+              !explicitlyNoPr
+            ) {
+              sendJson(res, 409, {
+                error: "Implementation completion requires pr_url or explicit no_pr mode",
+              });
+              return;
+            }
+
+            if (suppliedPrUrl && !existingPr) {
+              db.createDeliverable({
+                task_id: task.id,
+                deliverable_type: "pr",
+                title: "Pull request",
+                path: suppliedPrUrl,
+              });
+            }
+
+            if (!alreadyAtOrBeyondRequestedStatus) {
               db.updateTask(task.id, { status: newStatus });
             }
 
             if (TERMINAL_TASK_STATUSES.has(newStatus)) {
               rollUpDelegation(db, task.id, events);
             }
-            // Announce a transition, not a re-notification.
-            if (!alreadyFinished) {
-              events.emit("task_completed", { taskId: task.id, status: newStatus });
+            // Agent runs may complete many times while automated review sends them
+            // back for another pass. Telegram should announce the ticket exactly when
+            // it becomes done, not each time a run returns it to review.
+            if (!alreadyAtOrBeyondRequestedStatus) {
+              emitTerminalCompletion(events, task.id, task.status, newStatus);
             }
 
             db.createEvent({
-              type: "task_completed",
+              type: newStatus === "done" ? "task_completed" : "agent_run_completed",
               task_id: task.id,
               agent_id: task.assigned_agent_id ?? undefined,
               message:
                 typeof body.summary === "string"
                   ? body.summary
-                  : `Task ${task.id} completed`,
+                  : newStatus === "done"
+                    ? `Task ${task.id} completed`
+                    : `Agent run completed; task moved to ${newStatus}`,
             });
 
             if (task.assigned_agent_id) {
@@ -1901,7 +2362,7 @@ async function handleApiRequest(
             }
 
             db.createEvent({
-              type: "task_completed",
+              type: "agent_run_completed",
               task_id: activeTask.id,
               agent_id: session.agent_id ?? undefined,
               message: completionMatch[1].trim(),
@@ -2105,6 +2566,22 @@ async function handleApiRequest(
           const usedMem = totalMem - freeMem;
           const load = loadavg();
           const numCpus = cpus().length;
+          const envConfig = readEnvConfig();
+          let configuredClaude = 10;
+          let configuredCodex = 3;
+          try {
+            const mcHome = process.env.MC_HOME ?? join(homedir(), ".mission-control");
+            const raw = JSON.parse(readFileSync(join(mcHome, "swarm", "swarm-config.json"), "utf-8"));
+            const profiles = isRecord(raw?.agents) && isRecord(raw.agents.profiles) ? raw.agents.profiles : {};
+            const claudeProfile = isRecord(profiles.claude) ? profiles.claude : {};
+            const codexProfile = isRecord(profiles.codex) ? profiles.codex : {};
+            const legacyClaude = isRecord(raw?.claude) ? raw.claude : {};
+            const legacyCodex = isRecord(raw?.codex) ? raw.codex : {};
+            configuredClaude = Number(claudeProfile.maxAgents ?? legacyClaude.maxAgents ?? configuredClaude);
+            configuredCodex = Number(codexProfile.maxAgents ?? legacyCodex.maxAgents ?? configuredCodex);
+          } catch {
+            // Defaults remain available when the optional swarm config is absent.
+          }
           sendJson(res, 200, {
             cpu: {
               cores: numCpus,
@@ -2119,8 +2596,8 @@ async function handleApiRequest(
               usagePercent: Math.round((usedMem / totalMem) * 100),
             },
             concurrency: {
-              maxClaude: parseInt(process.env.MAX_CLAUDE_AGENTS || "10", 10),
-              maxCodex: parseInt(process.env.MAX_CODEX_AGENTS || "3", 10),
+              maxClaude: parseInt(process.env.MAX_CLAUDE_AGENTS || envConfig.MAX_CLAUDE_AGENTS || String(configuredClaude), 10),
+              maxCodex: parseInt(process.env.MAX_CODEX_AGENTS || envConfig.MAX_CODEX_AGENTS || String(configuredCodex), 10),
             },
           });
           return;
@@ -2170,23 +2647,7 @@ async function handleApiRequest(
           }
         }
         if (segments[0] === "repos" && segments.length === 1 && method === "GET") {
-          const gitProjectsDir = join(homedir(), "GitProjects");
-          const repos: Array<{ project: string; repo: string }> = [];
-          try {
-            const projects = readdirSync(gitProjectsDir, { withFileTypes: true })
-              .filter(d => d.isDirectory() && !d.name.startsWith("."));
-            for (const proj of projects) {
-              const projPath = join(gitProjectsDir, proj.name);
-              const children = readdirSync(projPath, { withFileTypes: true })
-                .filter(d => d.isDirectory() && !d.name.startsWith(".") && d.name !== "worktrees");
-              for (const child of children) {
-                if (existsSync(join(projPath, child.name, ".git"))) {
-                  repos.push({ project: proj.name, repo: child.name });
-                }
-              }
-            }
-          } catch {}
-          sendJson(res, 200, { repos });
+          sendJson(res, 200, discoverExecutionRepos());
           return;
         }
 
@@ -2542,6 +3003,84 @@ async function handleApiRequest(
           return;
         }
 
+        if (segments[0] === "linear" && segments[1] === "issues" && segments.length === 2 && method === "POST") {
+          const body = await parseBody(req);
+          if (!isRecord(body) || typeof body.title !== "string" || !body.title.trim()) {
+            sendJson(res, 400, { error: "title is required" });
+            return;
+          }
+          const title = body.title.trim();
+          if (title.length > 255) {
+            sendJson(res, 400, { error: "title must be 255 characters or fewer" });
+            return;
+          }
+          const description = typeof body.description === "string" ? body.description.trim() : "";
+          const requestId = typeof body.request_id === "string" ? body.request_id.trim() : "";
+          if (!requestId) {
+            sendJson(res, 400, { error: "request_id is required" });
+            return;
+          }
+
+          try {
+            const createIssue = dependencies.createLinearIssue ?? createLinearIssueWithScript;
+            const linear = await createIssue({
+              title,
+              description,
+              requestId,
+              teamKey: typeof body.team_key === "string" ? body.team_key.trim() : undefined,
+              assignee: typeof body.assignee === "string" ? body.assignee.trim() : undefined,
+            });
+            const issue = linear.issue;
+            let task = db.getTaskByExternalId(issue.id);
+            let taskCreated = false;
+            if (!task) {
+              const descriptionParts = description ? [description] : [];
+              descriptionParts.push(`\n---\n*Synced from Linear: [${issue.identifier}](${issue.url})*`);
+              if (issue.assignee?.name) descriptionParts.push(`*Linear assignee: ${issue.assignee.name}*`);
+              try {
+                task = db.createTask({
+                  title: `[${issue.identifier}] ${issue.title}`,
+                  description: descriptionParts.join("\n"),
+                  status: "inbox",
+                  priority: ({ 1: "urgent", 2: "high", 4: "low" } as Record<number, "urgent" | "high" | "low">)[issue.priority ?? 0] ?? "normal",
+                  external_id: issue.id,
+                  external_url: issue.url,
+                  source: "linear",
+                  task_type: "implementation",
+                });
+                taskCreated = true;
+              } catch (error) {
+                // The scheduled Linear poll may have imported the deterministic issue
+                // between our lookup and insert. Its unique external-id index decides;
+                // recover that task instead of reporting a false failure.
+                task = db.getTaskByExternalId(issue.id);
+                if (!task) throw error;
+              }
+            }
+            if (taskCreated) {
+              db.createActivity({
+                task_id: task.id,
+                activity_type: "created",
+                message: `Created from Telegram and synced to Linear as ${issue.identifier}`,
+                metadata: JSON.stringify({
+                  source: "telegram",
+                  actor: typeof body.actor === "string" ? body.actor : null,
+                  request_id: requestId,
+                }),
+              });
+            }
+            sendJson(res, taskCreated ? 201 : 200, {
+              created: taskCreated,
+              linear_created: linear.created,
+              issue,
+              task,
+            });
+          } catch (error) {
+            sendJson(res, 502, { error: error instanceof Error ? error.message : String(error) });
+          }
+          return;
+        }
+
         if (segments[0] === "linear" && segments[1] === "sync" && segments.length === 2 && method === "POST") {
           // Run a full Linear sync once now, instead of waiting for the scheduled cycle.
           const result = await runPythonRaw([resolveRuntimePath("integrations", "linear", "linear-sync.py")]);
@@ -2865,6 +3404,13 @@ export async function getConnectionsReport(): Promise<Record<string, unknown>> {
 // Keys the Settings UI may write to ~/.mission-control/.env. Allowlisted so the
 // endpoint can never set arbitrary environment (e.g. PATH).
 const SETTABLE_KEYS = [
+  "MISSION_CONTROL_ACCESS_TOKEN",
+  "MISSION_CONTROL_READ_ACCESS_TOKEN",
+  "MISSION_CONTROL_AUTH_MODE",
+  "MISSION_CONTROL_READ_TOKEN",
+  "MISSION_CONTROL_WRITE_TOKEN",
+  "MISSION_CONTROL_ADMIN_TOKEN",
+  "MISSION_CONTROL_WEBHOOK_SECRET",
   "ANTHROPIC_API_KEY",
   "OPENAI_API_KEY",
   "GOOGLE_GENERATIVE_AI_API_KEY",
@@ -2880,6 +3426,8 @@ const SETTABLE_KEYS = [
   "LINEAR_TRIAGE_LABEL",
   "LINEAR_TEAM_KEYS",
   "LINEAR_ASSIGNEES",
+  "LINEAR_CREATE_TEAM_KEY",
+  "LINEAR_CREATE_ASSIGNEE",
   "REPO_WATCH_ROOT",
   "REPO_WATCH_REPOS",
   "MISSION_CONTROL_NOTIFY_WEBHOOK",
@@ -2892,8 +3440,12 @@ const SETTABLE_KEYS = [
   "SLACK_BOT_TOKEN",
   "SLACK_APP_TOKEN",
   "SLACK_ALLOWED_USER_IDS",
+  "SLACK_ALLOWED_CHANNEL_IDS",
   "SLACK_INTERACTION",
   "SLACK_EVENTS",
+  // Dedicated trusted API checkout and production reader for local previews.
+  "MC_PREVIEW_API_RUNNER_ROOT",
+  "MC_PREVIEW_PROD_READ_DATABASE_URL",
 ];
 
 // Non-secret settings whose current value is safe to return to the UI (so a
@@ -2904,6 +3456,8 @@ const VALUE_KEYS = [
   "LINEAR_TRIAGE_LABEL",
   "LINEAR_TEAM_KEYS",
   "LINEAR_ASSIGNEES",
+  "LINEAR_CREATE_TEAM_KEY",
+  "LINEAR_CREATE_ASSIGNEE",
   "REPO_WATCH_ROOT",
   "REPO_WATCH_REPOS",
   "TELEGRAM_ALLOWED_CHAT_IDS",
@@ -2911,8 +3465,10 @@ const VALUE_KEYS = [
   "TELEGRAM_EVENTS",
   "TELEGRAM_ASSISTANT",
   "SLACK_ALLOWED_USER_IDS",
+  "SLACK_ALLOWED_CHANNEL_IDS",
   "SLACK_INTERACTION",
   "SLACK_EVENTS",
+  "MC_PREVIEW_API_RUNNER_ROOT",
 ];
 
 function envFilePath(): string {
@@ -2982,6 +3538,26 @@ function runPython(args: string[]): Promise<Record<string, unknown>> {
   });
 }
 
+async function createLinearIssueWithScript(
+  input: CreateLinearIssueInput,
+): Promise<{ created: boolean; issue: CreatedLinearIssue }> {
+  const args = [
+    resolveRuntimePath("integrations", "linear", "linear-sync.py"),
+    "--create-issue",
+    "--title", input.title,
+    "--description", input.description,
+    "--request-id", input.requestId,
+  ];
+  if (input.teamKey) args.push("--team-key", input.teamKey);
+  if (input.assignee) args.push("--assignee", input.assignee);
+  const result = await runPython(args);
+  if (!isRecord(result.issue)) throw new Error("Linear issue creation returned no issue");
+  return {
+    created: result.created === true,
+    issue: result.issue as unknown as CreatedLinearIssue,
+  };
+}
+
 // Run a Python helper that logs (not JSON) and return its tail + exit status.
 function runPythonRaw(args: string[], timeoutMs = 600000): Promise<{ ok: boolean; output: string }> {
   return new Promise((resolve) => {
@@ -2994,8 +3570,9 @@ function runPythonRaw(args: string[], timeoutMs = 600000): Promise<{ ok: boolean
   });
 }
 
-// Discover git repos under the repo-watcher root (group/repo with a .git dir),
-// for the Settings picker. Lists all repos — the allowlist is applied at scan time.
+// Discover git repos under the repo-watcher root for Settings and ticket routing.
+// Both layouts are real here: ~/GitProjects/backend is flat, while
+// ~/GitProjects/external/mission-control is nested.
 function discoverRepos(): { repos: { domain: string }[]; root: string } {
   const env = readEnvConfig();
   const root = (env.REPO_WATCH_ROOT || process.env.REPO_WATCH_ROOT || join(homedir(), "GitProjects")).trim();
@@ -3003,7 +3580,12 @@ function discoverRepos(): { repos: { domain: string }[]; root: string } {
   try {
     for (const group of readdirSync(root, { withFileTypes: true })) {
       if (!group.isDirectory()) continue;
+      if (group.name === "worktrees" || group.name === "external") continue;
       const gpath = join(root, group.name);
+      if (existsSync(join(gpath, ".git"))) {
+        repos.push({ domain: `${basename(root)}/${group.name}` });
+        continue;
+      }
       try {
         for (const repo of readdirSync(gpath, { withFileTypes: true })) {
           if (repo.isDirectory() && existsSync(join(gpath, repo.name, ".git"))) {
@@ -3014,4 +3596,29 @@ function discoverRepos(): { repos: { domain: string }[]; root: string } {
     }
   } catch { /* root missing/unreadable */ }
   return { repos, root };
+}
+
+// Ticket routing uses the operator's repo-watcher allowlist as its execution
+// boundary. Settings still receives every canonical checkout from discoverRepos()
+// so the allowlist can be changed without editing a file by hand.
+function discoverExecutionRepos(): { repos: { project: string; repo: string; domain: string }[]; root: string } {
+  const discovered = discoverRepos();
+  const env = readEnvConfig();
+  const allowlist = new Set(
+    (env.REPO_WATCH_REPOS || process.env.REPO_WATCH_REPOS || "")
+      .split(",")
+      .map(label => label.trim())
+      .filter(Boolean),
+  );
+  const repos = discovered.repos
+    .filter(({ domain }) => !allowlist.size || allowlist.has(domain))
+    .map(({ domain }) => {
+      const slash = domain.indexOf("/");
+      return {
+        project: slash >= 0 ? domain.slice(0, slash) : "",
+        repo: slash >= 0 ? domain.slice(slash + 1) : domain,
+        domain,
+      };
+    });
+  return { repos, root: discovered.root };
 }

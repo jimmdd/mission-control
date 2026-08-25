@@ -485,6 +485,45 @@ print(json.dumps(out))
   assert.deepEqual(r.error, [false, ""]);
 });
 
+test("a written plan survives spawn failure and is consumed only after spawn succeeds", () => {
+  const r = python(`
+import json, pathlib, tempfile, bridge
+root = pathlib.Path(tempfile.mkdtemp())
+job = root / "task-plan.json"
+job.write_text(json.dumps({
+    "state": "done",
+    "worktree": str(root / "planning-worktree"),
+    "verdict": {"outcome": "plan_written", "stages": []},
+}))
+
+calls = []
+bridge._stage_planning_enabled = lambda: True
+bridge.find_repo_path = lambda project, repo: root
+bridge._planning_job_path = lambda tid: job
+bridge.route_plan_stage_outcome = lambda task, verdict: calls.append(verdict["outcome"]) or True
+
+first = bridge.stage_planning({"id": "task-plan"}, [{"project": "p", "repo": "r"}])
+still_there_after_failure = job.exists()
+second = bridge.stage_planning({"id": "task-plan"}, [{"project": "p", "repo": "r"}])
+bridge._consume_planning_job("task-plan")
+
+print(json.dumps({
+    "first": first,
+    "second": second,
+    "routed": calls,
+    "still_there_after_failure": still_there_after_failure,
+    "exists_after_success": job.exists(),
+}))
+`);
+
+  assert.equal(r.first[0], true);
+  assert.match(r.first[1], /planning-worktree$/);
+  assert.deepEqual(r.second, r.first);
+  assert.deepEqual(r.routed, ["plan_written"], "retry must not re-route or re-run a completed plan");
+  assert.equal(r.still_there_after_failure, true);
+  assert.equal(r.exists_after_success, false);
+});
+
 test("staging turned off carries nothing and still proceeds", () => {
   const r = python(`
 import json, bridge
@@ -712,6 +751,39 @@ print(json.dumps(json.load(open(job))))
   assert.match(r.verdict.reason, /crashed/);
 });
 
+test("the runner preserves a ticket-specific MCP planning provider", () => {
+  const r = python(`
+import json, os, tempfile, plan_stage_runner, plan_stage
+job = os.path.join(tempfile.mkdtemp(), "j.json")
+open(job, "w").write(json.dumps({
+    "task": {"id": "t"}, "worktree": "/tmp", "state": "running",
+    "provider": "codex", "supercut_mcp": True,
+}))
+seen = {}
+def capture(*args, **kwargs):
+    seen.update(kwargs)
+    return {"outcome": "plan_written", "stages": []}
+plan_stage.plan_in_worktree = capture
+plan_stage_runner.main([job])
+print(json.dumps(seen))
+`);
+  assert.equal(r.provider, "codex");
+  assert.equal(r.supercut_mcp, true);
+});
+
+test("Codex planning exposes only Supercut's read-only MCP tools", () => {
+  const r = python(`
+import json, plan_stage
+print(json.dumps(plan_stage.build_command(
+    "codex", "PROMPT", supercut_mcp=True)))
+`);
+  const command = r.join(" ");
+  assert.match(command, /mcp_servers\.supercut\.enabled_tools/);
+  assert.match(command, /get-recording/);
+  assert.match(command, /get-frame/);
+  assert.doesNotMatch(command, /add-playlist-recording|remove-playlist-recording/);
+});
+
 // ─────────── planning is a contract, not a runtime ───────────
 // GSD ships as Claude Code skills, so /gsd-plan-phase resolves there and nowhere
 // else. But the workflows are markdown documents, and any agent that can read a file
@@ -736,8 +808,67 @@ print(json.dumps({"text": gsd_backend.plan_step_text(mode="mvp", brief="/tmp/B.m
   assert.match(t, /<name>/);
   assert.match(t, /<verify>/);
   assert.match(t, /wave:/, "the field that decides what runs together");
+  assert.match(t, /phases\/01-<slug>\/01-01-PLAN\.md/, "GSD's resolvable phase directory shape");
+  assert.match(t, /Never `cd` to this temporary planning worktree/, "plans survive the worktree handoff");
+  assert.doesNotMatch(t, /phases\/phase-1-<slug>/, "the legacy shape blocks execute-phase");
   // And it must say what does NOT count, since that is the mistake actually made.
   assert.match(t, /### T1|headings/, "names the improvised form as not a plan");
+});
+
+test("legacy phase directories and planning-worktree paths are repaired before execution", () => {
+  const r = python(`
+import json, pathlib, tempfile, gsd_backend
+root = pathlib.Path(tempfile.mkdtemp())
+planning_root = pathlib.Path("/tmp/planning-ticket")
+phase = root / ".planning" / "phases" / "phase-1-ticket-slug"
+phase.mkdir(parents=True)
+(phase / "01-01-PLAN.md").write_text("""---
+phase: phase-1-ticket-slug
+wave: 1
+---
+<task><name>Ship</name><files>x</files><verify>
+cd /tmp/planning-ticket && test -f x
+</verify></task>
+Output: .planning/phases/phase-1-ticket-slug/01-01-SUMMARY.md
+""")
+(root / ".planning" / "STATE.md").write_text(
+    "Current: .planning/phases/phase-1-ticket-slug/01-01-PLAN.md\\n")
+repairs = gsd_backend.normalize_plan_layout(str(root))
+rebased = gsd_backend.rebase_plan_paths(str(root), str(planning_root), str(root))
+plan = root / ".planning" / "phases" / "01-ticket-slug" / "01-01-PLAN.md"
+print(json.dumps({
+    "repairs": repairs,
+    "rebased": rebased,
+    "plan": plan.read_text(),
+    "state": (root / ".planning" / "STATE.md").read_text(),
+    "legacy_exists": phase.exists(),
+}))
+`);
+  assert.equal(r.repairs.length, 1);
+  assert.equal(r.legacy_exists, false);
+  assert.match(r.plan, /^phase: 1$/m);
+  assert.match(r.plan, /\.planning\/phases\/01-ticket-slug\/01-01-SUMMARY\.md/);
+  assert.match(r.plan, new RegExp(`cd ${r.repairs[0].to.split("/.planning/")[0].replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}`));
+  assert.doesNotMatch(r.plan, /planning-ticket|phase-1-ticket-slug/);
+  assert.match(r.state, /phases\/01-ticket-slug/);
+});
+
+test("phase normalization never merges into an existing destination", () => {
+  const r = python(`
+import json, pathlib, tempfile, gsd_backend
+root = pathlib.Path(tempfile.mkdtemp())
+phases = root / ".planning" / "phases"
+(phases / "phase-1-ticket").mkdir(parents=True)
+(phases / "01-ticket").mkdir()
+try:
+    gsd_backend.normalize_plan_layout(str(root))
+    result = "missed"
+except RuntimeError as error:
+    result = str(error)
+print(json.dumps({"result": result, "legacy": (phases / "phase-1-ticket").exists()}))
+`);
+  assert.match(r.result, /destination already exists/);
+  assert.equal(r.legacy, true, "the source is preserved when repair would overwrite data");
 });
 
 test("each runtime gets an invocation it can actually run", () => {

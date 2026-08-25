@@ -792,10 +792,13 @@
         };
 
         const renderFilters = () => {
-            const counts = { all: state.tasks.length };
+            // Card filters describe top-level tickets. Delegated child processes are
+            // rendered inside their parent card and must not inflate these counts.
+            const cardTasks = state.tasks.filter(task => !task.parent_task_id);
+            const counts = { all: cardTasks.length };
             STATUSES.forEach(status => counts[status] = 0);
             
-            state.tasks.forEach(task => {
+            cardTasks.forEach(task => {
                 if (counts[task.status] !== undefined) {
                     counts[task.status]++;
                 }
@@ -844,12 +847,14 @@
         };
 
         const getProcessedTasks = () => {
-            // Filter
-            let filtered = state.tasks;
+            // Main cards are always top-level tickets. Filter parents first so a child
+            // whose parent is hidden (for example, a live child under a done ticket)
+            // can never be promoted into a misleading standalone card.
+            let filtered = state.tasks.filter(task => !task.parent_task_id);
             if (state.filter !== 'all') {
-                filtered = state.tasks.filter(t => t.status === state.filter);
+                filtered = filtered.filter(t => t.status === state.filter);
             } else if (!state.showDoneCards) {
-                filtered = state.tasks.filter(t => t.status !== 'done');
+                filtered = filtered.filter(t => t.status !== 'done');
             }
 
             // Sort
@@ -868,16 +873,13 @@
                 return 0;
             });
 
-            // Organize parent/child
-            const taskMap = new Map(filtered.map(t => [t.id, { ...t, children: [] }]));
-            const rootTasks = [];
-
-            // First pass: assign children
-            taskMap.forEach(task => {
-                if (task.parent_task_id && taskMap.has(task.parent_task_id)) {
-                    taskMap.get(task.parent_task_id).children.push(task);
-                } else {
-                    rootTasks.push(task);
+            // Attach every child to a visible parent. Building parents from the
+            // filtered roots keeps child status independent from the card filter.
+            const rootTasks = filtered.map(t => ({ ...t, children: [] }));
+            const rootMap = new Map(rootTasks.map(task => [task.id, task]));
+            state.tasks.forEach(task => {
+                if (task.parent_task_id && rootMap.has(task.parent_task_id)) {
+                    rootMap.get(task.parent_task_id).children.push({ ...task, children: [] });
                 }
             });
 
@@ -1123,7 +1125,8 @@
                 let previewHtml = '';
                 const previewable = ['in_progress', 'review', 'testing', 'done'].includes(task.status);
                 if (task.preview && task.preview.url) {
-                    previewHtml = `<a href="${escapeHtml(task.preview.url)}" target="_blank" rel="noopener" onclick="event.stopPropagation()" class="badge" title="Open local preview (${escapeHtml(task.preview.app || '')})" style="background: rgba(34,197,94,0.18); color:#86efac; font-size:9px; padding:1px 6px; font-weight:600; text-decoration:none;">▶ :${task.preview.port}</a><button onclick="stopPreview(event, '${task.id}')" class="badge" title="Stop local preview" style="background: rgba(255,255,255,0.08); color: var(--text-secondary); font-size:9px; padding:1px 5px; font-weight:600; border:none; cursor:pointer;">✕</button>`;
+                    const previewSafety = task.preview.apiReadOnly ? ' · production data · read-only' : '';
+                    previewHtml = `<a href="${escapeHtml(task.preview.url)}" target="_blank" rel="noopener" onclick="event.stopPropagation()" class="badge" title="Open local preview (${escapeHtml(task.preview.app || '')})${previewSafety}" style="background: rgba(34,197,94,0.18); color:#86efac; font-size:9px; padding:1px 6px; font-weight:600; text-decoration:none;">▶ :${task.preview.port}${task.preview.apiReadOnly ? ' · RO' : ''}</a><button onclick="stopPreview(event, '${task.id}')" class="badge" title="Stop local preview" style="background: rgba(255,255,255,0.08); color: var(--text-secondary); font-size:9px; padding:1px 5px; font-weight:600; border:none; cursor:pointer;">✕</button>`;
                 } else if (previewable) {
                     previewHtml = `<button onclick="previewTask(event, '${task.id}')" class="badge" title="Run this branch locally to verify" style="background: rgba(34,197,94,0.12); color:#86efac; font-size:9px; padding:1px 6px; font-weight:600; border:none; cursor:pointer;">▶ Preview</button>`;
                 }
@@ -1242,6 +1245,28 @@
                     // fix wrong agent-suggested answers before anything is dispatched.
                     const locked = state.readOnly || confirmed;
 
+                    const executionTarget = triageState.execution_target || {};
+                    const targetRepos = (executionTarget.repos || []).length
+                        ? executionTarget.repos
+                        : (triageState.triage_repos || []).map(r => ({
+                            ...r, label: `${r.project}/${r.repo}`,
+                        }));
+                    const targetApps = executionTarget.apps || [];
+                    const targetHtml = targetRepos.length ? `
+                        <div style="margin-bottom:16px; padding:14px 16px; border:1px solid rgba(0,212,255,0.28); background:rgba(0,212,255,0.05); border-radius:8px;">
+                            <div style="font-size:10px; letter-spacing:.12em; text-transform:uppercase; color:var(--text-secondary); margin-bottom:8px;">Execution target — confirm this before starting</div>
+                            ${targetRepos.map(r => `
+                                <div style="font-size:12px; line-height:1.65; color:var(--text-secondary);">
+                                    repo <b style="color:var(--text-primary);">${escapeHtml(r.label || `${r.project}/${r.repo}`)}</b>
+                                    ${r.base_branch ? ` · base <b style="color:var(--text-primary);">${escapeHtml(r.base_branch)}</b>` : ''}
+                                    ${r.branch ? ` · branch <b style="color:var(--text-primary);">${escapeHtml(r.branch)}</b>` : ''}
+                                </div>`).join('')}
+                            ${targetApps.length ? `<div style="font-size:12px; line-height:1.65; color:var(--text-secondary);">app <b style="color:var(--text-primary);">${escapeHtml(targetApps.join(', '))}</b></div>` : ''}
+                        </div>` : `
+                        <div style="margin-bottom:16px; padding:14px 16px; border:1px solid rgba(255,176,32,0.4); background:rgba(255,176,32,0.06); border-radius:8px; color:var(--text-secondary); font-size:12px;">
+                            Execution target is not resolved yet. Do not confirm until a repository is shown.
+                        </div>`;
+
                     const questionsHtml = qs.map((q, idx) => {
                         const ans = q.answer || '';
                         const hasOptions = q.options && q.options.length > 0;
@@ -1308,7 +1333,7 @@
                         }
                     }
 
-                    contentEl.innerHTML = questionsHtml + footerHtml + resetFooterHtml;
+                    contentEl.innerHTML = targetHtml + questionsHtml + footerHtml + resetFooterHtml;
                 }
             } catch (e) {
                 console.error('Failed to parse triage_state', e);
@@ -1322,7 +1347,7 @@
                 alert('Read-only mode: editing is disabled.');
                 return;
             }
-            if (!confirm('Reset triage? This clears the triage questions/answers and sends the task back to the inbox for the bridge to re-triage. Activity history is kept.')) {
+            if (!confirm('Reset triage? This clears the triage questions/answers and sends the task back to the inbox for the bridge to re-triage. Activity history is kept. If the ticket is in review, its PR is closed first and will be reopened if the next run keeps the same repository.')) {
                 return;
             }
             try {
@@ -1859,7 +1884,9 @@
                     headers: { 'Content-Type': 'application/json' },
                     body: JSON.stringify({
                         activity_type: activityType,
-                        message: text
+                        message: text,
+                        metadata: JSON.stringify({ source: 'human', via: 'dashboard' }),
+                        expects_reply: true
                     })
                 });
                 

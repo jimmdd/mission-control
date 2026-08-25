@@ -128,6 +128,7 @@ export function startTelegramListener(opts: TelegramListenerOptions): () => void
             target: String(chatId),
             userId: message?.from?.id === undefined ? "" : String(message.from.id),
             userName: message?.from?.username,
+            messageId: String(update.update_id),
             text,
           });
         }

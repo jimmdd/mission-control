@@ -5,8 +5,11 @@ set -euo pipefail
 TASK_NAME=$1
 MC_HOME="${MC_HOME:-$HOME/.mission-control}"
 SWARM_DIR="$MC_HOME/swarm"
+if [ -f "$MC_HOME/.env" ]; then set -a; source "$MC_HOME/.env"; set +a; fi
 CONFIG="$SWARM_DIR/swarm-config.json"
 STATE_TOOL="$SWARM_DIR/swarm-state.py"
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+source "$SCRIPT_DIR/mc-api.sh"
 
 CFG_MODEL=${AGENT_MODEL:-$(jq -r '.agents.profiles.pi.model // "google/gemini-2.5-pro"' "$CONFIG" 2>/dev/null || echo "google/gemini-2.5-pro")}
 CFG_PROVIDER=${AGENT_PROVIDER:-$(jq -r '.agents.profiles.pi.provider // "google"' "$CONFIG" 2>/dev/null || echo "google")}
@@ -61,7 +64,7 @@ start_heartbeat() {
       now_ms=$(($(date +%s) * 1000))
       update_registry_json "{\"lastHeartbeatAt\": $now_ms, \"heartbeatIntervalSec\": $HEARTBEAT_INTERVAL_SECONDS}"
       msg="Agent heartbeat: task $TASK_NAME running (attempt $attempt/$MAX_RETRIES)."
-      curl -s -X POST "$MC_URL/api/tasks/$MC_TASK_ID/activities" \
+      mc_curl POST "/api/tasks/$MC_TASK_ID/activities" -s \
         -H "Content-Type: application/json" \
         -d "{\"activity_type\":\"updated\",\"message\":$(printf '%s' "$msg" | jq -Rs .)}" \
         > /dev/null 2>&1 || true

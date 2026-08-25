@@ -11,7 +11,8 @@
 #   MC_MAX_CONCURRENT_AGENTS — ceiling on running agents across all profiles
 #                              (default: .agents.maxConcurrent in swarm-config.json, 0 = off)
 #   MC_TASK_ID        — Mission Control task ID (for monitor → webhook callback)
-#   BASE_BRANCH       — base branch for worktree (default: origin/main)
+#   BASE_BRANCH       — PR/review base branch (default: origin/main)
+#   WORKTREE_BASE_REF — ref used to create a new worktree (existing-PR handoffs use origin/<head>)
 set -euo pipefail
 
 # launchd/cron hand us a minimal PATH; make common per-user tool dirs (bun, etc.)
@@ -24,11 +25,14 @@ BRANCH_NAME=$3
 DESCRIPTION=${5:-$1}
 MC_HOME="${MC_HOME:-$HOME/.mission-control}"
 SWARM_DIR="$MC_HOME/swarm"
+if [ -f "$MC_HOME/.env" ]; then set -a; source "$MC_HOME/.env"; set +a; fi
 MC_URL="${MISSION_CONTROL_URL:-http://localhost:18900}"
 WORKTREE_BASE="$(dirname "$REPO_PATH")/worktrees"
 WORKTREE_PATH="$WORKTREE_BASE/$TASK_ID"
 REGISTRY="$SWARM_DIR/active-tasks.json"
 STATE_TOOL="$SWARM_DIR/swarm-state.py"
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+source "$SCRIPT_DIR/mc-api.sh"
 
 CONFIG="$SWARM_DIR/swarm-config.json"
 DEFAULT_PROFILE=$(jq -r '.agents.defaultProfile // "codex"' "$CONFIG" 2>/dev/null || echo codex)
@@ -137,8 +141,17 @@ if [ "$RUNNING_PROFILE" -ge "$AGENT_MAX_AGENTS" ]; then
     AGENT_ENV_JSON=$(echo "$PROFILE_JSON" | jq -c '.env // {}')
   else
     echo "ERROR: Agent profile '$AGENT_PROFILE' is full ($RUNNING_PROFILE/$AGENT_MAX_AGENTS)"
-    exit 2
+    exit 3
   fi
+fi
+
+# A fallback profile has its own ceiling. Re-check it after switching; otherwise a
+# full Codex pool could overflow the Claude pool (or vice versa) and the configured
+# 8/5 split would only be a label, not an enforced capacity boundary.
+RUNNING_PROFILE=$(jq --arg profile "$AGENT_PROFILE" '[.[] | select(.status == "running" and (.agentProfile // .agent) == $profile)] | length' "$REGISTRY" 2>/dev/null || echo 0)
+if [ "$RUNNING_PROFILE" -ge "$AGENT_MAX_AGENTS" ]; then
+  echo "ERROR: Agent profile '$AGENT_PROFILE' is full ($RUNNING_PROFILE/$AGENT_MAX_AGENTS)"
+  exit 3
 fi
 
 TMUX_SESSION="${AGENT_PROFILE}-${TASK_ID}"
@@ -174,42 +187,7 @@ fi
 mkdir -p "$WORKTREE_BASE"
 cd "$REPO_PATH"
 git fetch origin
-WORKTREE_BASE_REF="${BASE_BRANCH:-origin/main}"
-# Remove any leftover worktree/branch from a previous failed attempt so a retry
-# doesn't abort on "already exists".
-git worktree remove --force "$WORKTREE_PATH" 2>/dev/null || true
-# ...and any worktree elsewhere that still has this branch checked out. Removing only
-# the path we are about to use was not enough: `git branch -D` refuses while a branch
-# is checked out anywhere, that refusal is swallowed by `|| true`, and the add then
-# dies on "fatal: a branch named 'feature/MET-642-backend' already exists" — which it
-# did for MET-642, on every retry, because a previous attempt left the branch checked
-# out under a different path. Found by ref, since the stale path is not knowable from
-# the one we want.
-git worktree list --porcelain 2>/dev/null \
-  | awk -v ref="refs/heads/$BRANCH_NAME" '
-      /^worktree /{wt = substr($0, 10)}
-      /^branch /{if (substr($0, 8) == ref && wt != "") print wt}' \
-  | while IFS= read -r stale; do
-      [ -n "$stale" ] || continue
-      # The main clone is a worktree too and cannot be removed. If the branch is
-      # checked out there, say so plainly rather than logging a release that git
-      # will refuse — the add below then fails with a reason someone can act on.
-      if [ "$stale" = "$REPO_PATH" ]; then
-        echo "  WARNING: $BRANCH_NAME is checked out in the main clone ($stale)."
-        echo "           Switch it off that branch, or the worktree cannot be created."
-        continue
-      fi
-      echo "  Releasing stale worktree holding $BRANCH_NAME: $stale"
-      git worktree remove --force "$stale" 2>/dev/null || true
-    done
-git worktree prune 2>/dev/null || true
-# Only now can this succeed: nothing has the branch checked out any more.
-git branch -D "$BRANCH_NAME" 2>/dev/null || true
-git worktree add "$WORKTREE_PATH" -b "$BRANCH_NAME" "$WORKTREE_BASE_REF"
-
-# A worktree carries tracked files only, so local `.env` config does not come with
-# it and anything that compiles or boots the app fails on missing environment —
-# which reads as the agent's work being broken. Mirror it in from the source clone.
+WORKTREE_BASE_REF="${WORKTREE_BASE_REF:-${BASE_BRANCH:-origin/main}}"
 # Resolve through the symlink at $MC_HOME/swarm to reach the helper in the repo.
 SCRIPT_SRC="${BASH_SOURCE[0]}"
 while [ -L "$SCRIPT_SRC" ]; do
@@ -220,6 +198,23 @@ while [ -L "$SCRIPT_SRC" ]; do
   esac
 done
 SCRIPT_DIR="$(cd "$(dirname "$SCRIPT_SRC")" && pwd)"
+
+# Redispatch is also recovery. A prior attempt may have committed work or left dirty
+# files before hitting a quota/turn boundary; deleting that worktree would silently
+# turn a recoverable interruption into data loss. The helper only rebuilds a clean
+# branch and otherwise returns the existing branch holder for the new session.
+WORKTREE_REPORT=$(python3 "$SCRIPT_DIR/worktree_prepare.py" \
+  --repo "$REPO_PATH" --worktree "$WORKTREE_PATH" \
+  --branch "$BRANCH_NAME" --base "$WORKTREE_BASE_REF")
+WORKTREE_PATH=$(printf '%s' "$WORKTREE_REPORT" | jq -r '.path')
+if [ "$(printf '%s' "$WORKTREE_REPORT" | jq -r '.reused')" = "true" ]; then
+  echo "  Reusing preserved worktree: $WORKTREE_PATH"
+  echo "  Preserved $(printf '%s' "$WORKTREE_REPORT" | jq -r '.ahead') commit(s) and $(printf '%s' "$WORKTREE_REPORT" | jq -r '.dirty') dirty path(s)"
+fi
+
+# A worktree carries tracked files only, so local `.env` config does not come with
+# it and anything that compiles or boots the app fails on missing environment —
+# which reads as the agent's work being broken. Mirror it in from the source clone.
 if [ -f "$SCRIPT_DIR/worktree_env.py" ]; then
   python3 "$SCRIPT_DIR/worktree_env.py" "$REPO_PATH" "$WORKTREE_PATH" \
     || echo "  warning: env seeding failed (agent may hit missing environment)"
@@ -231,8 +226,25 @@ fi
 # building against a spec nobody approved. Copied rather than shared: the agent
 # commits its own progress against the plan, and must not write into the worktree a
 # retry will re-plan from.
-if [ -n "${MC_PLANNING_DIR:-}" ] && [ -d "${MC_PLANNING_DIR}/.planning" ]; then
+if [ -n "${MC_PLANNING_DIR:-}" ] && [ -d "${MC_PLANNING_DIR}/.planning" ] && [ ! -e "$WORKTREE_PATH/.planning" ]; then
   if cp -R "${MC_PLANNING_DIR}/.planning" "$WORKTREE_PATH/.planning" 2>/dev/null; then
+    # Plans are authored in a temporary planning worktree. Older planners also used
+    # MC's former `phase-1-*` example, which GSD cannot resolve. Repair both handoff
+    # details before the execution agent sees the plan.
+    python3 - "$SCRIPT_DIR" "$WORKTREE_PATH" "$MC_PLANNING_DIR" "$MC_HOME" "${MC_TASK_ID:-}" <<'PY'
+import sys
+from pathlib import Path
+sys.path.insert(0, sys.argv[1])
+import gsd_backend
+import gsd_plan_import
+
+worktree, planning_worktree, mc_home, mc_task_id = sys.argv[2:6]
+gsd_backend.normalize_plan_layout(worktree)
+gsd_backend.rebase_plan_paths(worktree, planning_worktree, worktree)
+if mc_task_id:
+    plan_files = sorted(Path(worktree).rglob("*PLAN.md"))
+    gsd_plan_import.write_mc_plan(Path(mc_home), mc_task_id, plan_files)
+PY
     echo "  Carried in the plan from ${MC_PLANNING_DIR}"
   else
     echo "  warning: could not carry in .planning (agent will plan for itself)"
@@ -302,12 +314,15 @@ add_session_env AGENT_THINKING     "${AGENT_THINKING:-}"
 add_session_env AGENT_FALLBACK_MODEL "${AGENT_FALLBACK_MODEL:-}"
 add_session_env AGENT_EFFORT       "${AGENT_EFFORT:-}"
 add_session_env BASE_BRANCH        "${BASE_BRANCH:-}"
+add_session_env WORKTREE_BASE_REF  "${WORKTREE_BASE_REF:-}"
 # MC_TASK_ID/MC_URL are required for run-claude.sh's heartbeat loop and completion
 # webhook — without MC_TASK_ID the heartbeat early-exits, so the agent runs but never
 # shows up as live in Swarm Ops. PR_BASE_BRANCH carries the PR target through.
 add_session_env MC_TASK_ID         "${MC_TASK_ID:-}"
 add_session_env MC_URL             "${MC_URL:-}"
 add_session_env PR_BASE_BRANCH     "${PR_BASE_BRANCH:-}"
+add_session_env MC_NO_PR_MODE      "${MC_NO_PR_MODE:-}"
+add_session_env MC_EXISTING_PR_URL "${MC_EXISTING_PR_URL:-}"
 
 # Optional: give agents a SEPARATE git identity (a bot) so their commits and PRs
 # aren't attributed to your local user. Read only these keys from MC_HOME/.env and
@@ -368,6 +383,7 @@ TASK_JSON=$(jq -n \
   --arg branch "$BRANCH_NAME" \
   --arg baseBranch "$WORKTREE_BASE_REF" \
   --arg mcTaskId "${MC_TASK_ID:-}" \
+  --argjson noPrMode "$([ "${MC_NO_PR_MODE:-0}" = "1" ] && echo true || echo false)" \
   --arg fallbackModel "${AGENT_FALLBACK_MODEL:-${FALLBACK_MODEL:-}}" \
   --argjson startedAt "$(date +%s)000" \
   --argjson agentTeams "$([ -n "${AGENTS_JSON:-}" ] && echo true || echo false)" \
@@ -391,6 +407,7 @@ TASK_JSON=$(jq -n \
     branch: $branch,
     baseBranch: $baseBranch,
     mcTaskId: $mcTaskId,
+    noPrMode: $noPrMode,
     startedAt: $startedAt,
     status: "running",
     notifyOnComplete: true,
@@ -413,7 +430,7 @@ echo "$TASK_JSON" | jq -c '. + {"spawnedAt": "'"$(date -u +%Y-%m-%dT%H:%M:%SZ)"'
 if [ -n "${MC_TASK_ID:-}" ]; then
   PROMPT_CONTENT=$(cat "$SWARM_DIR/prompts/${TASK_ID}.md" 2>/dev/null | head -c 4000)
   if [ -n "$PROMPT_CONTENT" ]; then
-    curl -s -X POST "$MC_URL/api/tasks/$MC_TASK_ID/activities" \
+    mc_curl POST "/api/tasks/$MC_TASK_ID/activities" -s \
       -H "Content-Type: application/json" \
       -d "{\"activity_type\":\"prompt_sent\",\"message\":$(echo "$PROMPT_CONTENT" | jq -Rs .)}" \
       > /dev/null 2>&1 || true

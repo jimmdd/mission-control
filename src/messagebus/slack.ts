@@ -1,4 +1,5 @@
-// Slack transport, scoped to DMs with named users.
+// Slack transport, scoped to DMs with named users plus explicitly allowlisted
+// public-channel ticket threads.
 //
 // Outbound: conversations.open to get the DM channel for a user id, then
 // chat.postMessage. Inbound: Socket Mode — an OUTBOUND WebSocket Slack pushes events
@@ -7,7 +8,7 @@
 // inbound public URL is not acceptable here (see docs/slack-adaptor.md).
 //
 // Dependency-free: Web API is fetch, Socket Mode uses Node's global WebSocket (>=22).
-import type { IncomingChatMessage, Logger } from "./types.js";
+import type { IncomingChatMessage, Logger, SlackChannelMessage } from "./types.js";
 
 const API = "https://slack.com/api";
 
@@ -72,12 +73,31 @@ export async function sendSlackMessage(botToken: string, target: string, text: s
   await slackCall(botToken, "chat.postMessage", { channel, text: body, mrkdwn: false });
 }
 
+export async function sendSlackThreadMessage(
+  botToken: string,
+  channelId: string,
+  threadTs: string,
+  text: string,
+): Promise<void> {
+  const body = text.length > 3900 ? `${text.slice(0, 3900)}\n… (truncated)` : text;
+  await slackCall(botToken, "chat.postMessage", {
+    channel: channelId,
+    thread_ts: threadTs,
+    reply_broadcast: false,
+    text: body,
+    mrkdwn: false,
+  });
+}
+
 export interface SlackListenerOptions {
   botToken: string;
   appToken: string;
-  /** User ids allowed to command. Their DMs are the only accepted input. */
+  /** User ids allowed to command in DMs or admitted public channels. */
   userIds: string[];
+  /** Explicitly admitted channel ids. Empty keeps the existing DM-only behavior. */
+  channelIds?: string[];
   onMessage: (message: IncomingChatMessage) => Promise<void> | void;
+  onChannelMessage?: (message: SlackChannelMessage) => Promise<void> | void;
   logger?: Logger;
 }
 
@@ -93,8 +113,74 @@ interface SocketEnvelope {
       text?: string;
       bot_id?: string;
       subtype?: string;
+      ts?: string;
+      thread_ts?: string;
     };
     event_id?: string;
+  };
+}
+
+export interface SlackEnvelopeClassifierOptions {
+  botUserId: string;
+  userIds: string[];
+  channelIds: string[];
+}
+
+function stripBotMention(text: string, botUserId: string): string {
+  return text
+    .split(`<@${botUserId}>`)
+    .join(" ")
+    .replace(/^\s*[:,;\-]\s*/, "")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
+/** Pure event gate: explicit mentions start a thread; only replies in a thread may follow it. */
+export function classifySlackEnvelope(
+  envelope: SocketEnvelope,
+  opts: SlackEnvelopeClassifierOptions,
+): SlackChannelMessage | null {
+  if (envelope.type !== "events_api") return null;
+  const event = envelope.payload?.event;
+  if (!event || event.subtype || event.bot_id) return null;
+
+  const channelId = (event.channel ?? "").toUpperCase();
+  const userId = (event.user ?? "").toUpperCase();
+  const messageTs = event.ts ?? "";
+  const allowedUsers = new Set(opts.userIds.map((id) => id.toUpperCase()));
+  const allowedChannels = new Set(opts.channelIds.map((id) => id.toUpperCase()));
+  if (!channelId || !userId || !messageTs) return null;
+  if (!allowedUsers.has(userId) || !allowedChannels.has(channelId)) return null;
+  if (userId === opts.botUserId.toUpperCase()) return null;
+
+  const text = typeof event.text === "string" ? event.text.trim() : "";
+  if (event.type === "app_mention") {
+    return {
+      kind: "mention",
+      channelId,
+      threadTs: event.thread_ts || messageTs,
+      messageTs,
+      userId,
+      text: stripBotMention(text, opts.botUserId),
+    };
+  }
+
+  if (
+    event.type !== "message" ||
+    event.channel_type !== "channel" ||
+    !event.thread_ts ||
+    event.thread_ts === messageTs ||
+    text.includes(`<@${opts.botUserId}>`)
+  ) {
+    return null;
+  }
+  return {
+    kind: "reply",
+    channelId,
+    threadTs: event.thread_ts,
+    messageTs,
+    userId,
+    text,
   };
 }
 
@@ -103,7 +189,7 @@ interface SocketEnvelope {
  *
  * Slack redelivers an envelope that is not acked, and reconnects are routine (it asks
  * for one roughly every hour), so envelopes are acked immediately and deduped by
- * event_id — otherwise one "/done" could be executed several times.
+ * message identity — otherwise one "/done" or channel reply could execute several times.
  */
 export function startSlackListener(opts: SlackListenerOptions): () => void {
   const allowed = new Set(opts.userIds.map((id) => id.toUpperCase()));
@@ -113,11 +199,30 @@ export function startSlackListener(opts: SlackListenerOptions): () => void {
   let socket: WebSocket | null = null;
   let retryTimer: ReturnType<typeof setTimeout> | null = null;
   let backoffMs = 1_000;
+  let botUserId = "";
+
+  const alreadySeen = (key: string | undefined): boolean => {
+    if (!key) return false;
+    if (seenEventIds.has(key)) return true;
+    seenEventIds.add(key);
+    // Bounded memory: the id only needs to outlive Slack's retry window.
+    if (seenEventIds.size > 500) {
+      for (const id of seenEventIds) {
+        seenEventIds.delete(id);
+        if (seenEventIds.size <= 250) break;
+      }
+    }
+    return false;
+  };
 
   const connect = async () => {
     if (stopped) return;
     try {
-      const out = await slackCall(opts.appToken, "apps.connections.open");
+      const [out, auth] = await Promise.all([
+        slackCall(opts.appToken, "apps.connections.open"),
+        slackAuthTest(opts.botToken),
+      ]);
+      botUserId = auth.userId ?? botUserId;
       const url = typeof out.url === "string" ? out.url : "";
       if (!url) throw new Error("apps.connections.open returned no url");
 
@@ -155,20 +260,23 @@ export function startSlackListener(opts: SlackListenerOptions): () => void {
         }
         if (envelope.type !== "events_api") return;
 
+        const event = envelope.payload?.event;
         const eventId = envelope.payload?.event_id;
-        if (eventId) {
-          if (seenEventIds.has(eventId)) return;
-          seenEventIds.add(eventId);
-          // Bounded memory: the id only needs to outlive Slack's retry window.
-          if (seenEventIds.size > 500) {
-            for (const id of seenEventIds) {
-              seenEventIds.delete(id);
-              if (seenEventIds.size <= 250) break;
-            }
-          }
+        const dedupeKey = event?.channel && event.ts ? `${event.channel}:${event.ts}` : eventId;
+
+        const channelMessage = botUserId && opts.onChannelMessage
+          ? classifySlackEnvelope(envelope, {
+              botUserId,
+              userIds: opts.userIds,
+              channelIds: opts.channelIds ?? [],
+            })
+          : null;
+        if (channelMessage) {
+          if (alreadySeen(dedupeKey)) return;
+          void opts.onChannelMessage?.(channelMessage);
+          return;
         }
 
-        const event = envelope.payload?.event;
         if (!event || event.type !== "message") return;
         // Ignore edits/joins/etc and anything the bot itself said.
         if (event.subtype || event.bot_id) return;
@@ -180,6 +288,7 @@ export function startSlackListener(opts: SlackListenerOptions): () => void {
           log?.info?.(`[messagebus] slack: ignored DM from ${user} (not allowlisted)`);
           return;
         }
+        if (alreadySeen(dedupeKey)) return;
         void opts.onMessage({
           surface: "slack",
           target: event.channel ?? user,

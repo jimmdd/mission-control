@@ -20,7 +20,7 @@ import type { Logger } from "./types.js";
 const READ_ONLY = new Set(["help", "status", "tasks", "task", "search", "find", "checkpoints", "agents"]);
 
 // Anything that changes the board. Always confirmed by a human first.
-const WRITES = new Set(["answer", "confirm", "approve", "deny", "reject", "followup", "preview", "done"]);
+const WRITES = new Set(["create", "answer", "confirm", "approve", "deny", "reject", "followup", "preview", "hold", "unhold", "done"]);
 
 const SYSTEM = `You are the Mission Control assistant, reached over a private Telegram DM by the single
 operator who runs this instance. Mission Control orchestrates coding agents against real repos.
@@ -34,6 +34,7 @@ Tickets are named by Linear key (MET-639). Refer to them that way, never by UUID
 When the operator asks you to DO something, do not describe it — propose exactly one command:
 
   /status                          board counts, what needs a human
+  /create [TEAM] <title> | <desc>  create a linked Mission Control + Linear ticket; one GitHub PR URL makes it an existing-PR handoff
   /tasks [status]                  list tickets
   /search <words>                  keyword search over key, title, description
   /task <ref>                      one ticket in detail
@@ -45,6 +46,8 @@ When the operator asks you to DO something, do not describe it — propose exact
   /deny <ref|number> <reason>      reject one, with a reason
   /followup <ref> <action>          review_comments | merge_conflicts | ci_lint | rebuild_design
   /preview <ref>                   start a local preview of the branch
+  /hold <ref>                      pause a ticket while preserving its work
+  /unhold <ref>                    return a held ticket to the dispatch inbox
   /done <ref> [reason]             close a ticket
   /agents                          agent roster
 
@@ -56,7 +59,7 @@ Rules:
 - Put the human-readable intent in "reply" and keep it short — this is a chat message, not a report.
 - Only set "command" when the operator wants something done or fetched. For a question you can
   answer from context, set it to null.
-- Never propose /done, /approve or /deny unless the operator clearly asked for that outcome.
+- Never propose /hold, /unhold, /done, /approve or /deny unless the operator clearly asked for that outcome.
 - Quote the operator's own words when passing text to /answer. Do not rewrite their instruction.`;
 
 export interface AssistantReply {

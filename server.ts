@@ -3,9 +3,20 @@ import { MissionControlDB } from "./src/db.js";
 import { createHandler, getSwarmAgentStatusMap, getConnectionsReport } from "./src/routes.js";
 import { McEventBus } from "./src/events.js";
 import { startLivenessReaper } from "./src/reaper.js";
+import { startPreviewReaper } from "./src/preview.js";
 import { startNotifier } from "./src/notifier.js";
 import { startMessageBus } from "./src/messagebus/index.js";
 import { isInternalSchedulerEnabled, startJobScheduler } from "./src/scheduler.js";
+
+// launchd intentionally receives a minimal environment. Load the MC config file
+// before reading auth/bind settings so credentials configured through setup or
+// the Settings UI protect the server itself as well as child integrations.
+const BOOTSTRAP_MC_HOME = process.env.MC_HOME ?? `${process.env.HOME}/.mission-control`;
+try {
+  process.loadEnvFile(`${BOOTSTRAP_MC_HOME}/.env`);
+} catch (error) {
+  if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+}
 
 // Config
 const PORT = parseInt(process.env.MC_PORT ?? "18900", 10);
@@ -60,6 +71,23 @@ const stopReaper = REAPER_DISABLED
       getStatusMap: () => getSwarmAgentStatusMap(logger),
       intervalMs: Number.parseInt(process.env.MISSION_CONTROL_REAPER_INTERVAL_MS ?? "30000", 10),
       staleHeartbeatMs: Number.parseInt(process.env.MISSION_CONTROL_STALE_HEARTBEAT_MS ?? "300000", 10),
+    });
+
+// Close previews that have outlived their TTL. The TTL was already enforced, but
+// only inside request handlers — so a preview expired while the dashboard was
+// open and polling, and ran forever once the tab was closed. This makes expiry
+// independent of anyone watching, which is the case it exists for.
+const PREVIEW_REAPER_DISABLED = ["1", "true", "yes", "on"].includes(
+  (process.env.MISSION_CONTROL_DISABLE_PREVIEW_REAPER ?? "").trim().toLowerCase(),
+);
+const stopPreviewReaper = PREVIEW_REAPER_DISABLED
+  ? () => {}
+  : startPreviewReaper({
+      intervalMs: Number.parseInt(process.env.MC_PREVIEW_REAPER_INTERVAL_MS ?? "60000", 10),
+      onReap: ({ ticket, taskId, reason, ageMs }) =>
+        logger.info(
+          `[mc] preview ${reason}: ${ticket || taskId} after ${Math.round(ageMs / 60000)}m — sessions stopped`,
+        ),
     });
 
 // Drive the periodic Python jobs from here when launchd cannot. Opt-in, because
@@ -142,6 +170,7 @@ server.listen(PORT, HOST, () => {
 function shutdown(signal: string) {
   console.log(`[mc] ${signal} received, shutting down`);
   stopReaper();
+  stopPreviewReaper();
   stopNotifier();
   stopMessageBus();
   stopScheduler();

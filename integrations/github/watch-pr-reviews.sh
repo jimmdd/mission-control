@@ -6,6 +6,7 @@ set -euo pipefail
 
 MC_HOME="${MC_HOME:-$HOME/.mission-control}"
 SWARM_DIR="$MC_HOME/swarm"
+if [ -f "$MC_HOME/.env" ]; then set -a; source "$MC_HOME/.env"; set +a; fi
 REGISTRY="$SWARM_DIR/active-tasks.json"
 STATE_TOOL="$SWARM_DIR/swarm-state.py"
 LOG="$SWARM_DIR/logs/pr-reviews.log"
@@ -13,6 +14,10 @@ STATE_DIR="$SWARM_DIR/pr-review-state"
 MC_URL="${MISSION_CONTROL_URL:-http://localhost:18900}"
 LAUNCHER="$SWARM_DIR/run-claude.sh"
 TIMESTAMP=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+MC_API_SH="$SWARM_DIR/mc-api.sh"
+[ -f "$MC_API_SH" ] || MC_API_SH="$SCRIPT_DIR/../../swarm/mc-api.sh"
+source "$MC_API_SH"
 
 # Bot markers — comments from our system to ignore
 BOT_MARKERS=("Mission Control" "mc-bot" "TASK_COMPLETE" "codex-review")
@@ -39,7 +44,7 @@ write_state_file() {
 
 mc_post_activity() {
   local task_id="$1" type="$2" msg="$3"
-  curl -s -X POST "$MC_URL/api/tasks/$task_id/activities" \
+  mc_curl POST "/api/tasks/$task_id/activities" -s \
     -H "Content-Type: application/json" \
     -d "{\"activity_type\":\"$type\",\"message\":$(echo "$msg" | jq -Rs .)}" > /dev/null 2>&1 || true
 }
@@ -197,7 +202,7 @@ PROMPT
 
   # Update MC
   mc_post_activity "$mc_task_id" "updated" "GitHub PR review detected — reviewer feedback on PR #${pr_num}. Agent relaunched to address comments."
-  curl -s -X PATCH "$MC_URL/api/tasks/$mc_task_id" \
+  mc_curl PATCH "/api/tasks/$mc_task_id" -s \
     -H "Content-Type: application/json" \
     -d '{"status":"in_progress"}' > /dev/null 2>&1 || true
 

@@ -267,11 +267,80 @@ bridge.subprocess = type("S", (), {
     "run": staticmethod(lambda *a, **k: type("R", (), {"returncode": 0, "stdout": "", "stderr": ""})()),
     "TimeoutExpired": Exception, "DEVNULL": None,
 })
-bridge.spawn_agent("t", "lbl", pathlib.Path("/tmp"), "BODY", base_branch="origin/coda/new-ui", draft_pr=True)
+bridge.spawn_agent("t", "lbl", pathlib.Path("/tmp"), "BODY", base_branch="origin/coda/new-ui", draft_pr=True,
+                   task_title="[MET-646] Apply UI fixes")
 print(json.dumps((bridge.SWARM_DIR / "prompts" / "lbl.md").read_text()))
 `, LADDER);
   assert.match(prompt, /gh pr create --draft --base coda\/new-ui/);
+  assert.match(prompt, /--title '\[MET-646\] Apply UI fixes'/);
   assert.doesNotMatch(prompt, /Do not run `git push`/);
+});
+
+test("PR titles contain one canonical ticket prefix", () => {
+  const titles = python(`
+import json, bridge
+task = {"id": "internal-id", "title": "[MET-646] Apply UI fixes"}
+print(json.dumps([
+    bridge._required_pr_title(task),
+    bridge._required_pr_title(task, "Apply UI fixes"),
+    bridge._required_pr_title(task, "MET-646: Apply UI fixes"),
+    bridge._required_pr_title(task, "[MET-646] Apply UI fixes"),
+]))
+`, LADDER);
+  assert.deepEqual(titles, Array(4).fill("[MET-646] Apply UI fixes"));
+});
+
+test("an already-recorded agent PR is still title-normalized", () => {
+  const result = python(`
+import json, bridge
+seen = []
+bridge.mc_request = lambda method, path, body=None: ([{
+    "deliverable_type": "pr", "path": "https://github.com/metaDAOproject/backend/pull/646"
+}] if method == "GET" else None)
+bridge._ensure_pr_title = lambda task, url, current_title="": seen.append((task["title"], url)) or "[MET-646] Fix"
+bridge._find_agent_registry_entry = lambda task_id: (_ for _ in ()).throw(AssertionError("must not need registry"))
+bridge._capture_pr_for_task({"id": "t1", "title": "[MET-646] Fix"})
+print(json.dumps(seen))
+`, LADDER);
+  assert.deepEqual(result, [["[MET-646] Fix", "https://github.com/metaDAOproject/backend/pull/646"]]);
+});
+
+test("a missing ticket prefix is repaired on GitHub", () => {
+  const result = python(`
+import json, bridge
+calls = []
+class Result:
+    returncode = 0
+    stdout = ""
+    stderr = ""
+bridge._gh_bin = lambda: "gh"
+bridge.subprocess.run = lambda argv, **kwargs: calls.append(argv) or Result()
+title = bridge._ensure_pr_title(
+    {"id": "t1", "title": "[MET-646] Apply UI fixes"},
+    "https://github.com/metaDAOproject/backend/pull/646",
+    "Apply UI fixes",
+)
+print(json.dumps({"title": title, "calls": calls}))
+`, LADDER);
+  assert.equal(result.title, "[MET-646] Apply UI fixes");
+  assert.deepEqual(result.calls[0], [
+    "gh", "pr", "edit", "646", "--repo", "metaDAOproject/backend",
+    "--title", "[MET-646] Apply UI fixes",
+  ]);
+});
+
+test("completion reports carry the evidence required by the webhook", () => {
+  const result = python(`
+import json, bridge
+task = {"id": "t1", "title": "ship it", "description": ""}
+bridge._pr_is_disabled = lambda task: False
+normal = bridge.generate_prompt(task, "ctx", "p", "r")
+bridge._pr_is_disabled = lambda task: True
+local_only = bridge.generate_prompt(task, "ctx", "p", "r")
+print(json.dumps({"normal": normal, "local": local_only}))
+`, LADDER);
+  assert.match(result.normal, /"pr_url": "PASTE_THE_CREATED_PR_URL_HERE"/);
+  assert.match(result.local, /"no_pr": true/);
 });
 
 // The gate check used to run once, inside _plan_and_dispatch. That covered a step's
@@ -404,17 +473,31 @@ print(json.dumps({"floor": floor, "old_suppressed": old < floor, "new_kept": new
   assert.equal(r.new_kept, true, "a genuine escalation from this run still counts");
 });
 
-test("with no agent running there is no floor, so nothing is suppressed", () => {
+test("a finished attempt still fences off escalations from an older run", () => {
   const r = python(`
 import json, bridge
 bridge._find_agent_registry_entry = lambda t: None
 a = bridge._escalation_floor("t1")
-bridge._find_agent_registry_entry = lambda t: {"status": "done", "startedAt": 1787100371000}
+bridge._find_agent_registry_entry = lambda t: {"status": "completed_by_agent", "startedAt": 1787100371000}
 b = bridge._escalation_floor("t1")
 print(json.dumps({"none": a, "finished": b}))
 `);
   assert.equal(r.none, null);
-  assert.equal(r.finished, null, "a finished agent is not a floor for a new escalation");
+  assert.equal(r.finished, 1787100371, "terminal status must not revive a superseded planner failure");
+});
+
+test("the newest attempt timestamp is the escalation floor", () => {
+  const r = python(`
+import json, bridge
+bridge._find_agent_registry_entry = lambda t: {
+    "status": "completed_by_agent",
+    "startedAt": 1787100000000,
+    "lastAttemptAt": 1787100371000,
+    "runStartedAt": 1787100500000,
+}
+print(json.dumps(bridge._escalation_floor("t1")))
+`);
+  assert.equal(r, 1787100500);
 });
 
 test("timestamps are compared numerically, not as strings", () => {
@@ -434,3 +517,42 @@ print(json.dumps({
   assert.equal(r.missing, null);
 });
 
+test("routine automation comments are not treated as review feedback", () => {
+  const r = python(`
+import json, bridge
+cases = {
+    "linear": bridge._review_comment_actionable("linear[bot]", "Bot", "NONE"),
+    "vercel": bridge._review_comment_actionable("vercel[bot]", "Bot", "NONE"),
+    "actions": bridge._review_comment_actionable("github-actions[bot]", "Bot", "NONE"),
+    "human": bridge._review_comment_actionable("reviewer", "User", "MEMBER"),
+    "review_bot": bridge._review_comment_actionable("coderabbitai[bot]", "Bot", "NONE"),
+}
+print(json.dumps(cases))
+`);
+  assert.deepEqual(r, {
+    linear: false,
+    vercel: false,
+    actions: false,
+    human: true,
+    review_bot: true,
+  });
+});
+
+test("review-service lifecycle notices are not actionable feedback", () => {
+  const r = python(`
+import json, bridge
+marker = "<!-- meta-bot-ship:pr-review -->"
+print(json.dumps({
+    "reviewing": bridge._review_body_actionable(marker + " meta-bot-ship is reviewing the latest changes…"),
+    "clean": bridge._review_body_actionable(marker + " Looking good — no blocking issues found."),
+    "finding": bridge._review_body_actionable(marker + " Blocking: Pagination.svelte ignores disabled state."),
+    "human": bridge._review_body_actionable("Please fix the disabled state."),
+}))
+`);
+  assert.deepEqual(r, {
+    reviewing: false,
+    clean: false,
+    finding: true,
+    human: true,
+  });
+});

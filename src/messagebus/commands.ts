@@ -7,6 +7,7 @@
 // feedback, resuming a task on checkpoint approval, rolling up delegation on done)
 // happen identically from chat.
 import type { SurfaceKind } from "./types.js";
+import { randomUUID } from "node:crypto";
 import { linearKey, normalizeRef, takeRef, taskLabel, taskTitle } from "./ref.js";
 
 export interface ApiClient {
@@ -20,6 +21,8 @@ export interface CommandContext {
   surface: SurfaceKind;
   /** Who is asking, e.g. "telegram:@jinglun" — recorded as activity metadata. */
   actor: string;
+  /** Stable transport delivery id, used to make create-ticket retries idempotent. */
+  requestId?: string;
 }
 
 type TaskRecord = Record<string, unknown>;
@@ -30,6 +33,7 @@ const HELP = [
   "Mission Control commands",
   "",
   "/status — board counts, what needs you",
+  "/create [TEAM] <title> | <description> — create a linked MC + Linear ticket; include one GitHub PR URL to continue it",
   "/tasks [status] — list tickets (default: the ones needing attention)",
   "/search <words> — keyword search over key, title and description",
   "/task <ref> — one ticket: status, open questions, last activity",
@@ -41,6 +45,8 @@ const HELP = [
   "/followup <ref> <action> — queue a canned follow-up and relaunch:",
   `    ${FOLLOWUP_ACTIONS.join(", ")}`,
   "/preview <ref> — start a local preview of the ticket's branch",
+  "/hold <ref> — pause a ticket without deleting its plan, history, branch, or worktree",
+  "/unhold <ref> — return a held ticket to the inbox for dispatch",
   "/done <ref> [reason] — mark a ticket done",
   "/agents — agent roster and what each is on",
   "",
@@ -68,6 +74,10 @@ const ALL_STATUSES = new Set([
 
 function asArray(value: unknown): Record<string, unknown>[] {
   return Array.isArray(value) ? (value.filter((v) => v && typeof v === "object") as Record<string, unknown>[]) : [];
+}
+
+function asRecord(value: unknown): Record<string, unknown> {
+  return value && typeof value === "object" && !Array.isArray(value) ? value as Record<string, unknown> : {};
 }
 
 function str(value: unknown): string {
@@ -185,6 +195,40 @@ async function cmdStatus(ctx: CommandContext): Promise<string> {
   ].join("\n");
 }
 
+async function cmdCreate(ctx: CommandContext, rest: string): Promise<string> {
+  let input = rest.trim();
+  if (!input) return "Usage: /create [MET] <title> | <description>";
+
+  let teamKey = "";
+  const team = /^\[([A-Za-z][A-Za-z0-9_-]{1,15})\]\s*/.exec(input);
+  if (team) {
+    teamKey = team[1].toUpperCase();
+    input = input.slice(team[0].length).trim();
+  }
+
+  const divider = input.indexOf("|");
+  const title = (divider >= 0 ? input.slice(0, divider) : input).trim();
+  const description = divider >= 0 ? input.slice(divider + 1).trim() : "";
+  if (!title) return "Usage: /create [MET] <title> | <description>";
+  if (title.length > 255) return "The Linear title must be 255 characters or fewer; put the rest after | as the description.";
+
+  const result = asRecord(await ctx.api.post("/linear/issues", {
+    title,
+    description,
+    ...(teamKey ? { team_key: teamKey } : {}),
+    request_id: ctx.requestId ?? randomUUID(),
+    actor: ctx.actor,
+  }));
+  const issue = asRecord(result.issue);
+  const task = asRecord(result.task);
+  if (!issue.identifier || !issue.url || !task.id) throw new Error("ticket creation returned an incomplete link");
+  return [
+    `${result.created === false ? "Already created" : "Created"} ${str(issue.identifier)} · ${taskTitle(task) || title}`,
+    str(issue.url),
+    "Mission Control is linked and will triage it now.",
+  ].join("\n");
+}
+
 function listLines(tasks: Record<string, unknown>[], limit = 20): string {
   const lines = tasks.slice(0, limit).map((t) => `${taskLabel(t)} · ${str(t.status)} · ${taskTitle(t).slice(0, 60)}`);
   const more = tasks.length > limit ? `\n… ${tasks.length - limit} more` : "";
@@ -267,6 +311,18 @@ async function cmdAnswer(ctx: CommandContext, rest: string): Promise<string> {
 
   const { task, error } = await resolveTask(ctx.api, ref);
   if (!task) return error ?? "Not found.";
+  return submitTaskInput(ctx, task, text);
+}
+
+/**
+ * Route human input into the same triage/feedback path regardless of whether it was
+ * addressed with `/answer` in a DM or arrived as a reply in a linked Slack thread.
+ */
+export async function submitTaskInput(
+  ctx: CommandContext,
+  task: TaskRecord,
+  text: string,
+): Promise<string> {
   const taskId = str(task.id);
   const label = taskLabel(task);
   const triage = parseTriage(task);
@@ -453,6 +509,26 @@ async function cmdPreview(ctx: CommandContext, rest: string): Promise<string> {
   return url ? `Preview up for ${taskLabel(task)}: ${url}` : `Preview started for ${taskLabel(task)}.`;
 }
 
+async function cmdHold(ctx: CommandContext, rest: string): Promise<string> {
+  const { task, error } = await resolveTask(ctx.api, rest);
+  if (!task) return error ?? "Not found.";
+  const label = taskLabel(task);
+  if (task.status === "on_hold") return `${label} is already on hold.`;
+  if (task.status === "done") return `${label} is done; completed tickets cannot be put on hold.`;
+  await ctx.api.patch(`/tasks/${str(task.id)}`, { status: "on_hold" });
+  return `Put ${label} on hold. Its plan, history, branch, and worktree are preserved.`;
+}
+
+async function cmdUnhold(ctx: CommandContext, rest: string): Promise<string> {
+  const { task, error } = await resolveTask(ctx.api, rest);
+  if (!task) return error ?? "Not found.";
+  const label = taskLabel(task);
+  if (task.status === "done") return `${label} is done; completed tickets cannot be resumed.`;
+  if (task.status !== "on_hold") return `${label} is ${str(task.status) || "not on hold"}; only held tickets can be resumed.`;
+  await ctx.api.patch(`/tasks/${str(task.id)}`, { status: "inbox" });
+  return `Resumed ${label} — moved it back to the inbox for dispatch.`;
+}
+
 async function cmdDone(ctx: CommandContext, rest: string): Promise<string> {
   const { ref, rest: reason } = takeRef(rest);
   const { task, error } = await resolveTask(ctx.api, ref);
@@ -497,6 +573,7 @@ const KNOWN_COMMANDS = new Set([
   "help",
   "start",
   "status",
+  "create",
   "tasks",
   "task",
   "search",
@@ -509,6 +586,8 @@ const KNOWN_COMMANDS = new Set([
   "reject",
   "followup",
   "preview",
+  "hold",
+  "unhold",
   "done",
   "agents",
 ]);
@@ -524,6 +603,8 @@ export async function executeCommand(text: string, ctx: CommandContext): Promise
         return HELP;
       case "status":
         return await cmdStatus(ctx);
+      case "create":
+        return await cmdCreate(ctx, parsed.rest);
       case "tasks":
         return await cmdTasks(ctx, parsed.rest);
       case "search":
@@ -546,6 +627,10 @@ export async function executeCommand(text: string, ctx: CommandContext): Promise
         return await cmdFollowup(ctx, parsed.rest);
       case "preview":
         return await cmdPreview(ctx, parsed.rest);
+      case "hold":
+        return await cmdHold(ctx, parsed.rest);
+      case "unhold":
+        return await cmdUnhold(ctx, parsed.rest);
       case "done":
         return await cmdDone(ctx, parsed.rest);
       case "agents":

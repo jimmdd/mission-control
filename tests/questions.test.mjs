@@ -74,6 +74,7 @@ test("an agent's pick records why, and clears the delegation", () => {
   assert.equal(out.answered_by, "agent");
   assert.equal(out.reason, "covers a scroll");
   assert.equal(out.delegate_requested, false);
+  assert.equal(out.delegated_answer, true, "the UI can keep the returned answer visible");
 });
 
 test("answering a deferred question un-defers it", () => {
@@ -87,6 +88,7 @@ test("taking an answer back keeps the reasoning that justified it", () => {
   const out = call("reopen", [answered]);
   assert.equal(out.answer, null);
   assert.equal(out.answered_by, null);
+  assert.equal(out.delegated_answer, false);
   // The person overriding the pick should be able to read why it was made.
   assert.equal(out.reason, "easiest to reverse");
 });

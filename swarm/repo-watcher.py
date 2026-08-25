@@ -30,6 +30,7 @@ from mc_explore_common import (
 )
 # OpenRouter routing (same single-key path the planner/triage/distill use).
 from planner import _call_openrouter, call_openrouter_fallback
+from repo_discovery import discover_repo_paths
 
 # === Config ===
 
@@ -168,31 +169,13 @@ def _repo_allowlist() -> set:
 
 
 def discover_repos() -> List[Dict]:
-    """Walk <root>/*/* for .git dirs, filtered by the optional allowlist."""
-    repos = []
+    """Discover both ``<root>/<repo>`` and ``<root>/<group>/<repo>`` layouts."""
     root = _repo_root()
     allow = _repo_allowlist()
     if not root.is_dir():
         logging.warning(f"Repo root not found: {root}")
-        return repos
-    for project_dir in sorted(root.iterdir()):
-        if not project_dir.is_dir():
-            continue
-        project = project_dir.name
-        for repo_dir in sorted(project_dir.iterdir()):
-            if not repo_dir.is_dir():
-                continue
-            if (repo_dir / ".git").is_dir():
-                domain = f"{project}/{repo_dir.name}"
-                if allow and domain not in allow:
-                    continue
-                repos.append({
-                    "project": project,
-                    "repo": repo_dir.name,
-                    "path": repo_dir,
-                    "domain": domain,
-                })
-    return repos
+        return []
+    return discover_repo_paths(root, allow)
 
 
 # === Non-Architectural Detection ===

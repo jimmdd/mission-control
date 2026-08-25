@@ -1,8 +1,8 @@
 # Message bus — the chat interface
 
-> Status: **shipped.** Telegram and Slack DM, outbound alerts and inbound commands.
-> The deeper Slack model (thread = ticket, actor identity, approve buttons) is still a
-> design: see `docs/slack-adaptor.md`.
+> Status: **shipped.** Telegram and Slack DM, outbound alerts and inbound commands;
+> allowlisted Slack channel mentions can create tickets whose replies stay linked to
+> the ticket. Actor identity, broad channel ingestion, and approve buttons remain design work.
 
 Mission Control pings you where you already are, and takes instructions back. The point
 is that no one has to sit watching the board: when an agent is blocked, a question needs
@@ -45,7 +45,7 @@ Two properties are deliberate:
 
 | Scope | Types |
 |---|---|
-| `action` (default) | `needs_human`, `awaiting_approval`, `new_triage_question`, `agent_exited`, `agent_stalled`, `task_completed` |
+| `action` (default) | `needs_human`, `awaiting_approval`, `new_triage_question`, `agent_exited`, `agent_stalled`, `task_completed` (only when the ticket becomes `done`) |
 | `all` | adds `delegated`, `subtask_completed`, `parent_resumed`, `checkpoint_resolved`, `objective_created`, `objective_scope_approved` |
 | never | `progress`, `liveness`, `settings_updated` — at any scope |
 
@@ -80,6 +80,7 @@ Linear key and title, and every ref the bot suggests can be typed back verbatim.
 | Command | What it does |
 |---|---|
 | `/status` | board counts, pending approvals, tickets with unanswered questions |
+| `/create [TEAM] <title> \| <description>` | create the Linear issue and linked MC task together. `TEAM` is optional when `LINEAR_CREATE_TEAM_KEY` is configured; Telegram delivery retries resolve the same issue instead of duplicating it. Put exactly one GitHub PR URL in the description to hand off that open draft/ready PR to the engineer; MC reuses its head branch and PR instead of creating another one |
 | `/tasks [status]` | list tickets; bare = the ones where a human is the bottleneck; a non-status argument is treated as a search |
 | `/search <words>` | keyword search over key, title and description — every word must match, so more words narrow. `/find` is an alias. Title hits and open tickets rank first |
 | `/task <ref>` | one ticket: status, triage progress, next question, recent activity |
@@ -90,13 +91,25 @@ Linear key and title, and every ref the bot suggests can be typed back verbatim.
 | `/deny <ref> <reason>` | reject it — the reason is required, since that is what the agent acts on. A bare `/deny wrong repo` is read as a reason, not a ref |
 | `/followup <ref> <action>` | queue a canned follow-up + relaunch: `review_comments`, `merge_conflicts`, `ci_lint`, `rebuild_design` |
 | `/preview <ref>` | start a local preview of the ticket's branch |
+| `/hold <ref>` | pause an active ticket while preserving its plan, history, branch, and worktree; repeated holds are safe, and completed tickets stay done |
+| `/unhold <ref>` | move a held ticket back to `inbox` so normal dispatch can resume it; active and completed tickets are left unchanged |
 | `/done <ref> [reason]` | close a ticket |
 | `/agents` | roster and status |
 
 `/answer` is one verb on purpose: in chat you type your input and expect the system to
 know where it belongs. The status decides — that mirrors the dashboard's note box exactly.
 
+The review monitor permits three automated `review_comments` fix rounds for an open PR.
+If fresh actionable feedback arrives for a fourth round, Mission Control moves the ticket
+to `on_hold`, records a `needs_human` checkpoint, and sends the normal action alert instead
+of relaunching again. After reviewing the loop, `/unhold <ref>` returns it to dispatch.
+
 An unrecognised `/command` gets pointed at `/help`.
+
+For chat-created tickets, set `LINEAR_INTERACTION=updates` (or `full`),
+`LINEAR_CREATE_TEAM_KEY`, and optionally `LINEAR_CREATE_ASSIGNEE`. The command replies
+with the new Linear key and URL; normal triage-question and lifecycle sync starts from
+that point.
 
 ## Talking to it (Telegram only)
 
@@ -155,17 +168,35 @@ Env keys: `TELEGRAM_BOT_TOKEN`, `TELEGRAM_ALLOWED_CHAT_IDS`, `TELEGRAM_INTERACTI
 (`off|notify|command`), `TELEGRAM_EVENTS` (`action|all`), `TELEGRAM_ASSISTANT`
 (`on|off`, default on — the natural-language fallback above).
 
-## Setup — Slack (DM-scoped)
+## Setup — Slack (DMs + allowlisted ticket channels)
 
-1. Create a Slack app with a **bot user**. Bot scopes: `chat:write`, `im:write`,
-   `im:history`.
-2. For commands, enable **Socket Mode** and generate an **app-level token** (`xapp-`,
-   scope `connections:write`), plus event subscription `message.im`.
+1. Create or update the Slack app from [`slack-app-manifest.json`](./slack-app-manifest.json).
+   Its minimal scopes are `chat:write`, `im:write`, `im:history`, `app_mentions:read`,
+   and `channels:history`; its events are `message.im`, `app_mention`, and
+   `message.channels`.
+2. Enable **Socket Mode** and generate an **app-level token** (`xapp-`, scope
+   `connections:write`). Reinstall the app after adding scopes or event subscriptions.
 3. Get your own user id (Slack profile → ⋮ → Copy member ID, `U…`).
-4. Settings → **Message bus — Slack DM**: paste both tokens + your user id, **Send test**.
+4. Invite the bot to each public channel it may use. Copy each channel id from the
+   channel's **View channel details → About** panel.
+5. Settings → **Message bus — Slack**: paste both tokens, your user id, and the allowed
+   channel ids; set interaction to **Command**, then **Send test**.
 
 Env keys: `SLACK_BOT_TOKEN`, `SLACK_APP_TOKEN`, `SLACK_ALLOWED_USER_IDS`,
-`SLACK_INTERACTION`, `SLACK_EVENTS`.
+`SLACK_ALLOWED_CHANNEL_IDS`, `SLACK_INTERACTION`, `SLACK_EVENTS`.
+
+### Channel behavior
+
+- A top-level `@mission-control <request>` in an allowlisted public channel creates one
+  inbox ticket and posts the ticket reference as a reply. The Slack root timestamp is
+  the durable ticket-thread identity, so a retried mention cannot create a second task.
+- Later replies in that thread go through the same input path as `/answer`: they answer
+  open triage questions, become planning input, or become review feedback according to
+  the ticket's current status.
+- Top-level chatter, unallowlisted users, unallowlisted channels, bot messages, and
+  replies in threads that Mission Control has not linked are ignored.
+- Replies stay in-thread (`reply_broadcast=false`). Mission Control does not ingest the
+  rest of the channel or treat a Slack conversation as an agent session.
 
 Socket Mode is not a preference. Mission Control binds to `127.0.0.1` and runs agents
 with `--dangerously-skip-permissions`; the Events API would require exposing that box to
@@ -174,12 +205,14 @@ the internet. Socket Mode is an outbound WebSocket — no tunnel, no inbound por
 ## Security model
 
 - **Allowlist is the authorization.** Telegram chat ids / Slack user ids on the list can
-  command; everything else is dropped silently (a reply would confirm the bot exists).
+  command; Slack channel behavior additionally requires an exact channel id allowlist.
+  Everything else is dropped silently (a reply would confirm the bot exists).
 - Inbound only runs at `interaction=command`; `notify` is outbound-only, `off` is silent.
-- Slack input is accepted **only from DMs** (`channel_type=im`). Channels are excluded
-  precisely because anyone in a channel could otherwise click an approve — the identity
-  and scopes work that makes channels safe is the `docs/slack-adaptor.md` phase.
-- Slack envelopes are acked immediately and deduped by `event_id`; Telegram updates are
+- Slack commands are accepted from DMs. Public channels have the narrower ticket-thread
+  contract above: an allowlisted user's mention creates or addresses a ticket, and only
+  replies in that linked thread are ingested. Interactive approvals are still excluded.
+- Slack envelopes are acked immediately and deduped by channel + message timestamp (with
+  `event_id` as fallback); Telegram updates are
   primed past the existing backlog on start, so a stale `/done` from yesterday is never
   replayed.
 

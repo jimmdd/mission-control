@@ -71,6 +71,7 @@ def canonical(q: Dict, index: int = 1) -> Dict:
         "reason": q.get("reason", ""),
         "deferred": bool(q.get("deferred")),
         "delegate_requested": bool(q.get("delegate_requested")),
+        "delegated_answer": bool(q.get("delegated_answer")),
         "thread": [
             {
                 "role": "you" if m.get("role") == "you" else "research",
@@ -178,11 +179,13 @@ def record_answer(q: Dict, answer: str, by: str = "you", reason: str = "") -> Di
     Delegation is cleared so a re-opened question does not silently re-delegate,
     and a deferred question that gets answered stops being deferred.
     """
+    was_delegated = bool(q.get("delegate_requested"))
     q["answer"] = answer
     q["answered_at"] = _now()
     q["answered_by"] = "agent" if by == "agent" else "you"
     if reason:
         q["reason"] = reason
+    q["delegated_answer"] = bool(by == "agent" and was_delegated)
     q["delegate_requested"] = False
     q["deferred"] = False
     return q
@@ -198,6 +201,7 @@ def reopen(q: Dict) -> Dict:
     q["answered_at"] = None
     q["answered_by"] = None
     q["delegate_requested"] = False
+    q["delegated_answer"] = False
     return q
 
 

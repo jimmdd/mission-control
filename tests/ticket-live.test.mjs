@@ -1,6 +1,6 @@
 // The page re-renders by replacing all of #root and polls every 15 seconds, so a
-// poll landing while someone was typing threw the sentence away. The composer is
-// one field for the whole conversation, so draft handling has to follow it.
+// poll landing while someone was typing threw the sentence away. Chat and inline
+// question answers are separate fields, so draft handling has to preserve both.
 
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
@@ -12,10 +12,10 @@ const BODY = /<script>([\s\S]*)<\/script>/.exec(HTML)[1].split("// ---- BOOTSTRA
 /** A DOM stub with a settable active element and a set of fields. */
 function withDom(fields, activeTag = null) {
   const nodes = fields.map((f) => ({
-    id: f.say ? "say" : "",
-    dataset: f.say ? {} : { free: f.id },
+    id: f.say ? "say" : f.checkpoint ? "checkpoint-reply" : "",
+    dataset: (f.say || f.checkpoint) ? {} : { free: f.id },
     value: f.value ?? "",
-    tagName: f.say ? "INPUT" : "TEXTAREA",
+    tagName: (f.say || f.checkpoint) ? "INPUT" : "TEXTAREA",
   }));
   const shim = `
     const __nodes = ${JSON.stringify(nodes)};
@@ -23,6 +23,7 @@ function withDom(fields, activeTag = null) {
       activeElement: ${activeTag ? `{ tagName: ${JSON.stringify(activeTag)} }` : "null"},
       querySelector: (sel) => {
         if (sel === "#say") return __nodes.find(n => n.id === "say") || null;
+        if (sel === "#checkpoint-reply") return __nodes.find(n => n.id === "checkpoint-reply") || null;
         const m = /\\[data-(free|ask)="([^"]+)"\\]/.exec(sel);
         return m ? (__nodes.find(n => n.dataset[m[1]] === m[2]) || null) : null;
       },
@@ -50,8 +51,7 @@ test("empty fields with nothing focused do not block the poll", () => {
 });
 
 test("what is typed in the composer survives a render", () => {
-  // The composer is one field for the whole conversation, so it keys on itself:
-  // the text belongs to the person typing, not to whichever question was in focus.
+  // Chat belongs to the conversation, not to the answer field above it.
   const m = withDom([{ say: true, value: "what changes between them?" }]);
   const drafts = m.captureDrafts();
   assert.deepEqual(Object.keys(drafts), ["say"]);
@@ -59,6 +59,26 @@ test("what is typed in the composer survives a render", () => {
   m.__nodes.forEach((n) => { n.value = ""; });
   m.restoreDrafts(drafts);
   assert.equal(m.__nodes[0].value, "what changes between them?");
+});
+
+test("what is typed as an inline answer survives a render", () => {
+  const m = withDom([{ id: "p1", value: "Dalton Maag Host & Link" }]);
+  const drafts = m.captureDrafts();
+  assert.deepEqual(Object.keys(drafts), ["free:p1"]);
+
+  m.__nodes[0].value = "";
+  m.restoreDrafts(drafts);
+  assert.equal(m.__nodes[0].value, "Dalton Maag Host & Link");
+});
+
+test("a checkpoint answer survives a render", () => {
+  const m = withDom([{ checkpoint: true, value: "Plain outline" }]);
+  const drafts = m.captureDrafts();
+  assert.deepEqual(Object.keys(drafts), ["checkpoint-reply"]);
+
+  m.__nodes[0].value = "";
+  m.restoreDrafts(drafts);
+  assert.equal(m.__nodes[0].value, "Plain outline");
 });
 
 test("restore never overwrites what the new render already put there", () => {
@@ -72,10 +92,20 @@ test("restore never overwrites what the new render already put there", () => {
 test("the poll is unforced and deliberate actions are forced", () => {
   // The interval must not pass force, or skipping while typing is pointless; and an
   // action must reload even though the field it just used still has text in it.
-  assert.match(HTML, /setInterval\(\(\) => load\(\), 15000\)/);
+  assert.match(HTML, /setInterval\(\(\) => refreshRailTasks\(\)\.catch\(\(\) => \{\}\)\.then\(\(\) => load\(\)\), 15000\)/);
   assert.doesNotMatch(HTML, /setInterval\(load,/);
   assert.match(HTML, /if \(!force && isEditing\(\)\) return;/);
   assert.ok((HTML.match(/load\(\{ force: true \}\)/g) || []).length >= 3);
+});
+
+test("the ticket page reacts to progress events and keeps polling as fallback", () => {
+  assert.match(HTML, /new EventSource\("\/api\/stream"\)/);
+  assert.match(HTML, /affectedTask && affectedTask !== taskId/,
+    "events for other tickets do not redraw the active ticket");
+  assert.match(HTML, /setTimeout\(async \(\) => \{[\s\S]*?load\(\);[\s\S]*?\}, 250\)/,
+    "bursty progress events are coalesced into a prompt refresh");
+  assert.match(HTML, /setInterval\(\(\) => refreshRailTasks\(\)\.catch\(\(\) => \{\}\)\.then\(\(\) => load\(\)\), 15000\)/,
+    "polling remains available when the event stream drops");
 });
 
 test("the click handler is delegated once, not attached per render", () => {
@@ -158,7 +188,8 @@ test("load builds the page without calling anything that no longer exists", asyn
   // "Couldn't load this ticket" — so an error string in #root is the assertion.
   assert.doesNotMatch(html, /Couldn't load this ticket/, html.slice(0, 200));
   assert.match(html, /Which licence\?/, "the question reached the page");
-  assert.match(html, /id="say"/, "and so did the composer");
+  assert.match(html, /data-free="p1"/, "the question owns its answer field");
+  assert.match(html, /id="say"/, "and the separate chat composer still rendered");
 });
 
 // The page replaced all of #root every fifteen seconds whether or not anything had
@@ -167,6 +198,8 @@ test("load builds the page without calling anything that no longer exists", asyn
 
 test("a poll that changes nothing does not touch the DOM", () => {
   assert.match(HTML, /const key = JSON\.stringify\(/);
+  assert.match(HTML, /planData\.progress, agentProgress,/,
+    "live agent progress participates in render change detection");
   assert.match(HTML, /if \(!force && key === lastRenderKey\) return;/);
   // Forced loads still render: they follow an action that changed something.
   const idx = HTML.indexOf("key === lastRenderKey");

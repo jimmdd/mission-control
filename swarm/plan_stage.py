@@ -79,7 +79,9 @@ def question_protocol() -> str:
         "\n"
         "Only ask what a human alone can answer. Anything you could determine by reading\n"
         "the repo, running a command, or following a documented step is not a question —\n"
-        "do that instead. Do not ask for permission to proceed, and do not ask about\n"
+        "do that instead. Never ask the human for a file path, component name, symbol\n"
+        "location, framework, or data source that repository inspection can reveal.\n"
+        "Do not ask for permission to proceed, and do not ask about\n"
         "missing setup: report that as a prerequisite by saying what is missing.\n"
     )
 
@@ -376,6 +378,24 @@ def classify(worktree: str, output: str, returncode: Optional[int],
         return {"outcome": "questions_raised", "plan_path": None, "questions": questions,
                 "reason": f"{len(questions)} question(s) only a human can answer"}
 
+    # Nothing written this run and nothing asked. Before calling that a failure,
+    # look again without the run floor: a planner handed a worktree that already
+    # holds a complete plan from an earlier attempt may verify it and correctly
+    # decline to rewrite it. That is a success whose deliverable is the plan on
+    # disk, not a planner that produced nothing. MET-658 failed exactly this way —
+    # 8 plan files, 39 tasks, 40/40 requirements covered, reported as "no plan".
+    #
+    # Deliberately placed *after* the question check so the floor keeps doing its
+    # real job (see find_plan): a question raised by this run must still outrank a
+    # stale plan. Only when this run asked nothing does the existing plan stand.
+    if since is not None:
+        existing = find_plan(worktree, since=None)
+        if existing:
+            return {"outcome": "plan_written", "plan_path": str(existing),
+                    "questions": [],
+                    "reason": f"existing plan at {existing} verified, not rewritten, by this run",
+                    "plan_files": [str(p) for p in sorted(existing.parent.glob("*PLAN.md"))]}
+
     # No plan and no question. If the project was never initialised, that is a
     # prerequisite the system fixes — never something to ask a person about.
     if not gsd_backend.project_initialised(worktree):
@@ -433,7 +453,8 @@ def text_from_stream(raw: str) -> str:
     return "\n".join(p for p in parts if p) if saw_json else raw
 
 
-def build_command(provider: str, prompt: str, model: str = "", effort: str = "") -> List[str]:
+def build_command(provider: str, prompt: str, model: str = "", effort: str = "",
+                  supercut_mcp: bool = False) -> List[str]:
     """The CLI invocation for a runtime. Raises ValueError for one we cannot drive.
 
     Both need tools and write access: these stages read the repo and create
@@ -453,6 +474,11 @@ def build_command(provider: str, prompt: str, model: str = "", effort: str = "")
             cmd += ["--model", model]
         if effort:
             cmd += ["-c", f"model_reasoning_effort={effort}"]
+        if supercut_mcp:
+            # Keep the planning process on the same bounded read-only tool surface
+            # used by the successful preflight. Playlist mutation is not exposed.
+            import supercut
+            cmd += ["-c", "mcp_servers.supercut.enabled_tools=" + json.dumps(supercut.READ_TOOLS)]
         # Planning writes into the worktree, so the read-only sandbox will not do.
         cmd += ["--dangerously-bypass-approvals-and-sandbox", prompt]
         return cmd
@@ -461,7 +487,8 @@ def build_command(provider: str, prompt: str, model: str = "", effort: str = "")
 
 
 def _run_cli(worktree: str, prompt: str, transcript: Path, timeout: int,
-             model: str = "", provider: str = "claude", effort: str = "") -> Dict:
+             model: str = "", provider: str = "claude", effort: str = "",
+             supercut_mcp: bool = False) -> Dict:
     """Run one tool-using planning process in a worktree, streaming to disk.
 
     Provider-agnostic on purpose. The verdict never reads the transcript to decide
@@ -477,7 +504,7 @@ def _run_cli(worktree: str, prompt: str, transcript: Path, timeout: int,
     Returns `{"output", "returncode", "timed_out", "duration_s", "failed"}`.
     """
     try:
-        cmd = build_command(provider, prompt, model, effort)
+        cmd = build_command(provider, prompt, model, effort, supercut_mcp)
     except ValueError as e:
         return {"output": "", "returncode": None, "timed_out": False,
                 "duration_s": 0, "failed": str(e)}
@@ -545,7 +572,8 @@ def _cli_refusal(transcript: Path) -> str:
 
 
 def run_init_stage(worktree: str, task: Dict, context: str = "", provider: str = "",
-                   timeout: int = INIT_TIMEOUT, model: str = "") -> Dict:
+                   timeout: int = INIT_TIMEOUT, model: str = "",
+                   supercut_mcp: bool = False) -> Dict:
     """Create the GSD project. Verdict is `initialised` or `prerequisite_missing`.
 
     Its own stage because it is expensive and it happens once: on MET-635 it read
@@ -562,8 +590,11 @@ def run_init_stage(worktree: str, task: Dict, context: str = "", provider: str =
 
     transcript = _transcript_path(task["id"], "init")
     provider = provider or _planning_provider()
+    cli_options = {"provider": provider, "effort": _planning_effort()}
+    if supercut_mcp:
+        cli_options["supercut_mcp"] = True
     run = _run_cli(worktree, build_init_prompt(task, context, provider), transcript,
-                   timeout, model, provider=provider, effort=_planning_effort())
+                   timeout, model, **cli_options)
     ran, detail = gsd_backend.workflow_ran(worktree)
 
     if gsd_backend.project_initialised(worktree):
@@ -589,7 +620,8 @@ def run_init_stage(worktree: str, task: Dict, context: str = "", provider: str =
 
 def run_plan_stage(worktree: str, task: Dict, context: str = "", provider: str = "", mode: str = "",
                    timeout: int = PLAN_TIMEOUT, model: str = "",
-                   questions: Optional[List[Dict]] = None) -> Dict:
+                   questions: Optional[List[Dict]] = None,
+                   supercut_mcp: bool = False) -> Dict:
     """Plan in `worktree` as its own process. Assumes the GSD project exists."""
     transcript = _transcript_path(task["id"], "plan")
     # Stamped before the run so only a plan this run wrote can count. One second of
@@ -601,23 +633,38 @@ def run_plan_stage(worktree: str, task: Dict, context: str = "", provider: str =
     # `AskUserQuestion`, a tool this runtime does not have, which means the agent
     # answers it privately and plans without the decisions rather than stopping.
     brief = gsd_brief.write(worktree, task, questions)
+    cli_options = {"provider": provider, "effort": _planning_effort()}
+    if supercut_mcp:
+        cli_options["supercut_mcp"] = True
     run = _run_cli(worktree, build_prompt(task, context, provider, mode,
                                           str(brief) if brief else ""),
-                   transcript, timeout, model, provider=provider, effort=_planning_effort())
+                   transcript, timeout, model, **cli_options)
 
     if run["failed"]:
         verdict = {"outcome": "error", "plan_path": None, "questions": [],
                    "reason": run["failed"]}
     else:
+        try:
+            repairs = gsd_backend.normalize_plan_layout(worktree, since=since)
+            for repair in repairs:
+                logging.info(
+                    "  normalized legacy GSD phase directory: %s -> %s",
+                    repair["from"], repair["to"],
+                )
+        except RuntimeError as error:
+            verdict = {"outcome": "error", "plan_path": None, "questions": [],
+                       "reason": f"planning produced an ambiguous phase layout: {error}"}
+            repairs = None
         # Classify even after a timeout. A planner that emitted its question and then
         # hung has still asked it, and a plan already on disk is still a plan —
         # throwing either away because the process overran would repeat the failure
         # this whole stage replaces.
-        verdict = classify(worktree, run["output"],
-                           None if run["timed_out"] else run["returncode"],
-                           since=since)
-        if run["timed_out"] and verdict["outcome"] == "error":
-            verdict["reason"] = f"planning timed out after {timeout}s"
+        if repairs is not None:
+            verdict = classify(worktree, run["output"],
+                               None if run["timed_out"] else run["returncode"],
+                               since=since)
+            if run["timed_out"] and verdict["outcome"] == "error":
+                verdict["reason"] = f"planning timed out after {timeout}s"
 
     ran, _ = gsd_backend.workflow_ran(worktree)
     verdict.update({
@@ -692,7 +739,8 @@ def _model_for_provider(provider: str, model: str) -> str:
 
 def plan_in_worktree(worktree: str, task: Dict, context: str = "",
                      model: str = "", provider: str = "", mode: str = "",
-                     questions: Optional[List[Dict]] = None) -> Dict:
+                     questions: Optional[List[Dict]] = None,
+                     supercut_mcp: bool = False) -> Dict:
     """Get from a bare repo to a plan: initialise if needed, then plan.
 
     Two processes with two budgets rather than one. The init stage is skipped
@@ -710,12 +758,15 @@ def plan_in_worktree(worktree: str, task: Dict, context: str = "",
     # Resolve the model against the provider actually being driven, not the one the
     # config named — `_planning_provider()` may have fallen back.
     model = _model_for_provider(provider, model)
-    init = run_init_stage(worktree, task, context, provider=provider, model=model)
+    stage_options = {"provider": provider, "model": model}
+    if supercut_mcp:
+        stage_options["supercut_mcp"] = True
+    init = run_init_stage(worktree, task, context, **stage_options)
     stages.append(init)
     if init["outcome"] != "initialised":
         return {**init, "stages": stages}
 
-    plan = run_plan_stage(worktree, task, context, provider=provider, model=model, mode=mode,
-                          questions=questions)
+    plan = run_plan_stage(worktree, task, context, mode=mode, questions=questions,
+                          **stage_options)
     stages.append(plan)
     return {**plan, "stages": stages}

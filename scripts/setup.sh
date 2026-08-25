@@ -92,7 +92,7 @@ step "Installing swarm runtime scripts into MC_HOME/swarm"
 # The bridge and spawn-agent.sh resolve their launchers via \$MC_HOME/swarm.
 # Symlink the repo copies so they always track your checkout (no drift).
 linked=0
-for f in spawn-agent.sh run-claude.sh run-codex.sh run-pi.sh pre-review.sh swarm-state.py knowledge-distill.py; do
+for f in spawn-agent.sh run-claude.sh run-codex.sh run-pi.sh pre-review.sh mc-api.sh swarm-state.py knowledge-distill.py rate_limit_policy.py; do
   if [ -e "$REPO_DIR/swarm/$f" ]; then
     ln -sfn "$REPO_DIR/swarm/$f" "$MC_HOME/swarm/$f"
     linked=$((linked+1))
@@ -216,7 +216,18 @@ $(arg "/bin/bash")
 $(arg "$REPO_DIR/swarm/check-agents.sh")
 EOF
 
-  for s in server bridge linear-sync repo-watcher check-agents; do
+  # Releases the worktree and tmux session of any ticket whose MC task has reached
+  # `done` — including one closed because its Linear issue was completed, cancelled
+  # or deleted (linear-sync writes that status; this acts on it). Runs behind
+  # linear-sync's 300s so a ticket closed in Linear is released on the next pass.
+  # It only ever touches tasks already marked done, and refuses to remove a worktree
+  # with uncommitted changes, so a slow cadence costs nothing and a fast one is safe.
+  emit_plist ai.mission-control.cleanup-worktrees "$REPO_DIR/swarm" "$MC_HOME/logs/cleanup-worktrees.launchd.log" '  <key>StartInterval</key><integer>600</integer>' <<EOF
+$(arg "/bin/bash")
+$(arg "$REPO_DIR/swarm/cleanup-worktrees.sh")
+EOF
+
+  for s in server bridge linear-sync repo-watcher check-agents cleanup-worktrees; do
     load_service "ai.mission-control.$s"
     ok "ai.mission-control.$s installed & started"
   done

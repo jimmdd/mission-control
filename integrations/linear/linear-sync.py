@@ -18,6 +18,7 @@ import sys
 import subprocess
 import urllib.error
 import urllib.request
+import uuid
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, List, Optional
@@ -35,6 +36,7 @@ if str(SWARM_SCRIPTS_DIR) not in sys.path:
 
 from context_fabrica_config import context_fabrica_dsn, make_context_fabrica_adapter
 import embeddings  # pluggable embedder (FastEmbed default; no API key)
+from mc_api import headers_for
 
 DEFAULT_LINEAR_CONFIG = {
     "label": "your-label",
@@ -207,6 +209,12 @@ def linear_query(query: str, variables: Optional[dict] = None) -> dict:
         return data["data"]
 
 
+def _mutation_succeeded(result: dict, field: str) -> bool:
+    """Only persist dedupe state after Linear confirms the mutation."""
+    payload = result.get(field) if isinstance(result, dict) else None
+    return isinstance(payload, dict) and payload.get("success") is True
+
+
 def mc_request(method: str, path: str, body: Optional[dict] = None) -> dict:
     """Make a request to Mission Control API."""
     url = f"{MC_BASE_URL}{path}"
@@ -215,7 +223,7 @@ def mc_request(method: str, path: str, body: Optional[dict] = None) -> dict:
         url,
         data=payload,
         method=method,
-        headers={"Content-Type": "application/json"} if payload else {},
+        headers=headers_for(method, path, json_body=payload is not None),
     )
 
     try:
@@ -431,8 +439,64 @@ def create_mc_task(issue: dict) -> Optional[dict]:
         return None
 
 
-def sync_status_back(mc_task: dict, issue_id: str, state: dict):
-    """When an MC task is done, say so on the Linear issue — once.
+def _completed_state_id(team_key: str) -> Optional[str]:
+    """Resolve the team's completed workflow state, preferring one named Done."""
+    if team_key in _COMPLETED_STATE_CACHE:
+        return _COMPLETED_STATE_CACHE[team_key]
+    query = """
+    query($key: String!) {
+      workflowStates(filter: { team: { key: { eq: $key } }, type: { eq: "completed" } }) {
+        nodes { id name type }
+      }
+    }
+    """
+    state_id = None
+    try:
+        nodes = linear_query(query, {"key": team_key})["workflowStates"]["nodes"]
+        preferred = next((n for n in nodes if n.get("name", "").strip().lower() == "done"), None)
+        chosen = preferred or (nodes[0] if nodes else None)
+        state_id = chosen["id"] if chosen else None
+    except Exception as e:
+        logging.warning(f"  Failed to resolve completed state for team {team_key}: {e}")
+    _COMPLETED_STATE_CACHE[team_key] = state_id
+    return state_id
+
+
+def _complete_linear_issue(issue: dict, state: dict) -> bool:
+    """Move one non-terminal Linear issue to its team's completed state once."""
+    issue_id = issue["id"]
+    synced = state.setdefault("completion_state_synced", {})
+    if synced.get(issue_id) or is_terminal_state(issue):
+        synced[issue_id] = True
+        return True
+    team_key = (issue.get("team") or {}).get("key")
+    if not team_key:
+        logging.warning(f"  Cannot complete Linear {issue_id[:8]} — issue has no team key")
+        return False
+    state_id = _completed_state_id(team_key)
+    if not state_id:
+        return False
+    mutation = """
+    mutation CompleteIssue($id: String!, $stateId: String!) {
+      issueUpdate(id: $id, input: { stateId: $stateId }) { success }
+    }
+    """
+    try:
+        result = linear_query(mutation, {"id": issue_id, "stateId": state_id})
+        if not result:
+            logging.info(f"  Linear {issue.get('identifier', issue_id[:8])} would move to Done, "
+                         "but write-back is off (LINEAR_INTERACTION=intake)")
+            return False
+        synced[issue_id] = True
+        logging.info(f"  Moved Linear {issue.get('identifier', issue_id[:8])} to Done")
+        return True
+    except Exception as e:
+        logging.warning(f"  Failed to complete Linear {issue.get('identifier', issue_id[:8])}: {e}")
+        return False
+
+
+def sync_status_back(mc_task: dict, issue: dict, state: dict):
+    """When an MC task is done, complete the Linear issue and comment once.
 
     This posted on every cycle for as long as the task stayed done, with nothing
     recording that it had already spoken. At a five-minute cadence that is 288
@@ -447,6 +511,9 @@ def sync_status_back(mc_task: dict, issue_id: str, state: dict):
     """
     if mc_task.get("status") != "done":
         return
+
+    issue_id = issue["id"]
+    _complete_linear_issue(issue, state)
 
     posted = state.setdefault("completion_posted", {})
     if posted.get(issue_id):
@@ -495,6 +562,7 @@ REVIEW_MC_STATUSES = {"review"}
 
 # (team key, state name) -> Linear workflow-state id (resolved lazily, cached per run).
 _STARTED_STATE_CACHE: Dict[tuple, Optional[str]] = {}
+_COMPLETED_STATE_CACHE: Dict[str, Optional[str]] = {}
 
 
 def _get_started_state_id(team_key: str, prefer_name: str) -> Optional[str]:
@@ -620,6 +688,24 @@ GITPROJECTS_DIR = Path.home() / "GitProjects"
 
 def _is_bot_comment(body: str) -> bool:
     return any(marker in body for marker in BOT_COMMENT_MARKERS)
+
+
+TRIAGE_BOT_COMMENT_MARKERS = [
+    "needs clarification",
+    "i need a few answers before i can start",
+    "got it — answered",
+    "triage questions answered",
+    "triage complete",
+    "description updated — resetting triage",
+]
+
+
+def _is_triage_bot_comment(body: str) -> bool:
+    """Identify disposable triage chatter without deleting other MC bot replies."""
+    normalized = (body or "").lower()
+    return _is_bot_comment(body) and any(
+        marker in normalized for marker in TRIAGE_BOT_COMMENT_MARKERS
+    )
 
 
 # Boilerplate third-party integrations post into a Linear thread. It is written by
@@ -1303,7 +1389,13 @@ def _post_initial_triage_questions(issue_id: str, mc_task_id: str, triage_state:
         "{ commentCreate(input: { issueId: $issueId, body: $body }) { success } }"
     )
     try:
-        linear_query(mutation, {"issueId": issue_id, "body": body})
+        result = linear_query(mutation, {"issueId": issue_id, "body": body})
+        if not _mutation_succeeded(result, "commentCreate"):
+            logging.info(
+                f"  Initial triage questions for {mc_task_id[:8]} were not posted; "
+                "leaving the round pending for retry"
+            )
+            return
         posted_map[issue_id] = sig
         logging.info(
             f"  Posted initial triage questions to Linear for {mc_task_id[:8]} "
@@ -1352,8 +1444,11 @@ def _post_triage_feedback_to_linear(issue_id: str, triage_state: dict, answered_
     }
     """
     try:
-        linear_query(mutation, {"issueId": issue_id, "body": body})
-        logging.info(f"  Posted triage feedback to Linear ({done}/{total} answered)")
+        result = linear_query(mutation, {"issueId": issue_id, "body": body})
+        if _mutation_succeeded(result, "commentCreate"):
+            logging.info(f"  Posted triage feedback to Linear ({done}/{total} answered)")
+        else:
+            logging.info("  Triage feedback was not posted to Linear")
     except Exception as e:
         logging.warning(f"  Failed to post triage feedback to Linear: {e}")
 
@@ -1389,8 +1484,11 @@ def _notify_triage_complete(mc_task_id: str, triage_state: dict, linear_issue_id
 
 def _delete_comment(comment_id: str) -> bool:
     try:
-        linear_query("mutation($id: String!) { commentDelete(id: $id) { success } }", {"id": comment_id})
-        return True
+        result = linear_query(
+            "mutation($id: String!) { commentDelete(id: $id) { success } }",
+            {"id": comment_id},
+        )
+        return _mutation_succeeded(result, "commentDelete")
     except Exception as e:
         logging.warning(f"  Failed to delete Linear comment {comment_id}: {e}")
         return False
@@ -1421,7 +1519,9 @@ def _finalize_triage_comments(issue_id: str, mc_task: dict, triage_state: Option
         existing = fetch_issue_comments(issue_id)
     except Exception:
         existing = []
-    noise_ids = [c["id"] for c in existing if _is_bot_comment(c.get("body", ""))]
+    noise_ids = [
+        c["id"] for c in existing if _is_triage_bot_comment(c.get("body", ""))
+    ]
 
     lines = [f"{BOT_REPLY_PREFIX}: ✅ Triage complete — spawning an agent to work on this now.", "", "**Answers:**"]
     for i, q in enumerate(questions, 1):
@@ -1430,10 +1530,16 @@ def _finalize_triage_comments(issue_id: str, mc_task: dict, triage_state: Option
     lines.append("_I'll update this ticket when there's a PR._")
     body = "\n".join(lines)
     try:
-        linear_query(
+        result = linear_query(
             "mutation($id: String!, $body: String!) { commentCreate(input: { issueId: $id, body: $body }) { success } }",
             {"id": issue_id, "body": body},
         )
+        if not _mutation_succeeded(result, "commentCreate"):
+            logging.info(
+                f"  Triage summary for {mc_task['id'][:8]} was not posted; "
+                "leaving existing comments untouched for retry"
+            )
+            return
     except Exception as e:
         logging.warning(f"  Failed to post triage summary for {issue_id}: {e}")
         return  # don't delete the thread if we couldn't post the replacement
@@ -1563,6 +1669,11 @@ def sync_comments_to_mc(issue: dict, mc_task: dict, state: dict) -> int:
 
     live_comment_ids = {c["id"] for c in comments}
     _clean_stale_comment_ids(issue_id, live_comment_ids, state)
+    # `_clean_stale_comment_ids` updates persisted state, but these local snapshots
+    # were created before that cleanup. Keep them aligned or the stale IDs are written
+    # straight back at the end of this cycle and reported again forever.
+    synced_comment_ids.intersection_update(live_comment_ids)
+    answered_comment_ids.intersection_update(live_comment_ids)
 
     triage_state = _fetch_triage_state(mc_task_id)
 
@@ -1805,7 +1916,7 @@ def sync():
             if _check_description_changed(issue, mc_task, state):
                 skipped += 1
                 continue
-            sync_status_back(mc_task, issue_id, state)
+            sync_status_back(mc_task, issue, state)
             comments_synced += sync_comments_to_mc(issue, mc_task, state)
             skipped += 1
             continue
@@ -1830,21 +1941,57 @@ def sync():
         if ext_id in fetched_ids or mc_task.get("status") == "done":
             continue
         try:
-            data = linear_query("query($id:String!){ issue(id:$id){ state{ type name } } }", {"id": ext_id})
-            st = ((data or {}).get("issue") or {}).get("state") or {}
-        except Exception:
+            data = linear_query(
+                "query($id:String!){ issue(id:$id){ archivedAt state{ type name } } }",
+                {"id": ext_id},
+            )
+        except Exception as e:
+            # Transient: a timeout, a 5xx, or a rate limit says nothing about the
+            # issue. Leave the task alone and retry next sync rather than reading an
+            # outage as a deletion. Logged, because silence here is what let a
+            # permanently unresolvable ticket sit unnoticed.
+            logging.warning(f"  Could not resolve {mc_task['id'][:8]} in Linear: {e}")
             continue
-        if st.get("type") in ("canceled", "completed"):
-            try:
-                mc_request("PATCH", f"/api/tasks/{mc_task['id']}", {"status": "done"})
-                mc_request("POST", f"/api/tasks/{mc_task['id']}/activities", {
-                    "activity_type": "status_changed",
-                    "message": f"Linear issue is {st.get('name', 'terminal')} (no longer assigned to a watched user) — syncing to done.",
-                })
-                reconciled += 1
-                logging.info(f"  Reconciled out-of-filter {mc_task['id'][:8]} → done ({st.get('name')})")
-            except Exception as e:
-                logging.warning(f"  Failed to reconcile {mc_task['id'][:8]}: {e}")
+
+        issue_now = (data or {}).get("issue")
+        if issue_now is None:
+            # A successful response with no issue means Linear does not have it — but
+            # "not visible to this API key" looks identical from here, and ending live
+            # work on a permissions change would be worse than leaving one task stale.
+            # Report it and let a human decide.
+            logging.warning(
+                f"  Linear returned no issue for {mc_task['id'][:8]} ({ext_id}) — "
+                "leaving it alone; check the ticket by hand if this repeats"
+            )
+            continue
+
+        st = issue_now.get("state") or {}
+
+        # Deleting an issue in Linear *archives* it — it keeps whatever workflow state
+        # it had, so a ticket deleted out of Backlog stays `backlog` forever and no
+        # state-type check can ever see it. It also drops out of every list query, so
+        # the main loop never visits it either. `archivedAt` is the only signal that
+        # this happened, and without it a deleted ticket left its MC task — and any
+        # agent working it — running indefinitely.
+        reason = None
+        if issue_now.get("archivedAt"):
+            reason = "Linear issue was deleted (archived)"
+        elif st.get("type") in ("canceled", "completed"):
+            reason = f"Linear issue is {st.get('name', 'terminal')} (no longer assigned to a watched user)"
+
+        if not reason:
+            continue
+
+        try:
+            mc_request("PATCH", f"/api/tasks/{mc_task['id']}", {"status": "done"})
+            mc_request("POST", f"/api/tasks/{mc_task['id']}/activities", {
+                "activity_type": "status_changed",
+                "message": f"{reason} — syncing to done.",
+            })
+            reconciled += 1
+            logging.info(f"  Reconciled out-of-filter {mc_task['id'][:8]} → done ({reason})")
+        except Exception as e:
+            logging.warning(f"  Failed to reconcile {mc_task['id'][:8]}: {e}")
 
     state["last_sync"] = datetime.now(timezone.utc).isoformat()
     save_state(state)
@@ -1878,13 +2025,145 @@ def discover() -> dict:
     return out
 
 
+def _resolve_create_team(team_key: str) -> dict:
+    configured = (team_key or os.environ.get("LINEAR_CREATE_TEAM_KEY", "")).strip().upper()
+    if not configured:
+        watched = get_linear_team_keys()
+        if len(watched) == 1:
+            configured = watched[0]
+    if not configured:
+        raise RuntimeError(
+            "No default Linear team for ticket creation. Set LINEAR_CREATE_TEAM_KEY "
+            "or use /create [TEAM] <title>."
+        )
+
+    data = linear_query(
+        "query($key:String!){ teams(first:2, filter:{ key:{ eq:$key } }) { nodes { id key name } } }",
+        {"key": configured},
+    )
+    nodes = data.get("teams", {}).get("nodes", [])
+    if len(nodes) != 1:
+        raise RuntimeError(f"Linear team '{configured}' was not found or is ambiguous")
+    return nodes[0]
+
+
+def _resolve_create_assignee(email: str) -> Optional[dict]:
+    configured = (email or os.environ.get("LINEAR_CREATE_ASSIGNEE", "")).strip().lower()
+    if not configured:
+        watched = get_linear_assignees()
+        if len(watched) == 1:
+            configured = watched[0].lower()
+    if not configured:
+        return None
+
+    data = linear_query("{ users(first:250) { nodes { id name email active } } }")
+    matches = [
+        user for user in data.get("users", {}).get("nodes", [])
+        if (user.get("email") or "").strip().lower() == configured and user.get("active", True)
+    ]
+    if len(matches) != 1:
+        raise RuntimeError(f"Active Linear assignee '{configured}' was not found or is ambiguous")
+    return matches[0]
+
+
+def _fetch_created_issue(issue_id: str) -> Optional[dict]:
+    data = linear_query(
+        """
+        query($id:String!){
+          issue(id:$id) {
+            id identifier title description url priority
+            team { id key name }
+            assignee { id name email }
+          }
+        }
+        """,
+        {"id": issue_id},
+    )
+    issue = data.get("issue")
+    return issue if isinstance(issue, dict) else None
+
+
+def create_linear_issue(title: str, description: str, request_id: str,
+                        team_key: str = "", assignee_email: str = "") -> dict:
+    """Create one Linear issue with a deterministic id, safe to retry after crashes."""
+    clean_title = (title or "").strip()
+    if not clean_title:
+        raise RuntimeError("title is required")
+    if len(clean_title) > 255:
+        raise RuntimeError("title must be 255 characters or fewer")
+    if not request_id.strip():
+        raise RuntimeError("request_id is required for idempotent creation")
+    if _interaction_level() < INTERACTION_UPDATES:
+        raise RuntimeError("LINEAR_INTERACTION must be 'updates' or 'full' to create tickets")
+
+    issue_id = str(uuid.uuid5(uuid.NAMESPACE_URL, f"mission-control-linear:{request_id.strip()}"))
+    existing = _fetch_created_issue(issue_id)
+    if existing:
+        return {"created": False, "issue": existing}
+
+    team = _resolve_create_team(team_key)
+    assignee = _resolve_create_assignee(assignee_email)
+    issue_input = {
+        "id": issue_id,
+        "teamId": team["id"],
+        "title": clean_title,
+        "description": (description or "").strip(),
+    }
+    if assignee:
+        issue_input["assigneeId"] = assignee["id"]
+
+    mutation = """
+    mutation($input:IssueCreateInput!){
+      issueCreate(input:$input) {
+        success
+        issue {
+          id identifier title description url priority
+          team { id key name }
+          assignee { id name email }
+        }
+      }
+    }
+    """
+    try:
+        result = linear_query(mutation, {"input": issue_input})
+    except Exception:
+        # The request may have reached Linear even if the response was lost. Resolve the
+        # deterministic id before surfacing an error so a retry cannot duplicate it.
+        existing = _fetch_created_issue(issue_id)
+        if existing:
+            return {"created": False, "issue": existing}
+        raise
+
+    payload = result.get("issueCreate", {}) if isinstance(result, dict) else {}
+    issue = payload.get("issue") if isinstance(payload, dict) else None
+    if payload.get("success") is not True or not isinstance(issue, dict):
+        raise RuntimeError("Linear did not confirm issue creation")
+    return {"created": True, "issue": issue}
+
+
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Linear → Mission Control sync")
     parser.add_argument("--dry-run", action="store_true", help="Show what would sync without creating tasks")
     parser.add_argument("--discover", action="store_true", help="Print Linear teams/labels/members as JSON (for the UI)")
+    parser.add_argument("--create-issue", action="store_true", help="Create one idempotent Linear issue and print JSON")
+    parser.add_argument("--title", default="")
+    parser.add_argument("--description", default="")
+    parser.add_argument("--request-id", default="")
+    parser.add_argument("--team-key", default="")
+    parser.add_argument("--assignee", default="")
     args = parser.parse_args()
 
-    if args.discover:
+    if args.create_issue:
+        load_env()
+        _apply_linear_env_overrides()
+        try:
+            print(json.dumps(create_linear_issue(
+                args.title, args.description, args.request_id, args.team_key, args.assignee
+            )))
+        except Exception as exc:
+            print(json.dumps({"error": str(exc)}), file=sys.stderr)
+            sys.exit(1)
+    elif args.discover:
         # No setup_logging() here — keep stdout pure JSON for the API caller.
         load_env()
         print(json.dumps(discover()))

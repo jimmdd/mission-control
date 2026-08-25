@@ -84,6 +84,54 @@ test("new rows use ISO-8601 timestamps across all tables", async () => {
   });
 });
 
+test("recording the same pull request through multiple observers stays idempotent", async () => {
+  await withDb((db) => {
+    const task = db.createTask({ title: "one PR" });
+    const url = "https://github.com/acme/app/pull/687";
+    const bridge = db.createDeliverable({
+      task_id: task.id, deliverable_type: "pull_request", title: "Pull Request #687", path: url,
+    });
+    const monitor = db.createDeliverable({
+      task_id: task.id, deliverable_type: "pr", title: "Pull request", path: url,
+    });
+
+    assert.equal(monitor.id, bridge.id);
+    assert.equal(db.listDeliverables(task.id).length, 1);
+  });
+});
+
+test("ticket chat pending messages are bounded and settle through one linked reply", async () => {
+  await withDb((db) => {
+    const task = db.createTask({ title: "chat", status: "in_progress" });
+    const human = db.createActivity({
+      task_id: task.id,
+      activity_type: "updated",
+      message: "what is happening?",
+      metadata: JSON.stringify({ source: "human", via: "ticket-page" }),
+      expects_reply: true,
+    });
+
+    const pending = db.listPendingChatMessages(10);
+    assert.equal(pending.length, 1);
+    assert.equal(pending[0].id, human.id);
+    assert.equal(pending[0].task_status, "in_progress");
+
+    db.createActivity({
+      task_id: task.id,
+      activity_type: "agent_reply",
+      message: "The task is still running.",
+      reply_to_activity_id: human.id,
+    });
+    assert.deepEqual(db.listPendingChatMessages(10), []);
+    assert.throws(() => db.createActivity({
+      task_id: task.id,
+      activity_type: "agent_reply",
+      message: "duplicate",
+      reply_to_activity_id: human.id,
+    }), /UNIQUE constraint failed/);
+  });
+});
+
 // Regression guard for P2 migration: legacy "YYYY-MM-DD HH:MM:SS" rows must be
 // rewritten to ISO on startup.
 test("legacy space-separated timestamps are normalized on init", () => {

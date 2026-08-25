@@ -74,6 +74,55 @@ test("raising a checkpoint pauses the task and emits awaiting_approval", async (
   });
 });
 
+test("a needs_human activity always creates one actionable checkpoint", async () => {
+  await withHandler(async (handler, db, events) => {
+    const seen = [];
+    events.subscribe((e) => seen.push(e));
+    const task = db.createTask({ title: "draft decision", status: "review" });
+    const body = {
+      activity_type: "needs_human",
+      message: "Choose the focus-ring treatment",
+      options: ["inverse ring", "plain outline", "accept as-is"],
+    };
+
+    const first = mockRes();
+    await handler(mockReq({ url: `/api/tasks/${task.id}/activities`, method: "POST", body }), first);
+    assert.equal(first.statusCode, 201);
+
+    const checkpoints = db.listCheckpoints(task.id);
+    assert.equal(checkpoints.length, 1);
+    assert.equal(checkpoints[0].status, "pending");
+    assert.equal(checkpoints[0].kind, "choice");
+    assert.deepEqual(JSON.parse(checkpoints[0].options), body.options);
+    assert.equal(db.getTask(task.id).status, "review", "a draft-PR decision stays in review");
+
+    const activity = JSON.parse(first.body);
+    assert.equal(JSON.parse(activity.metadata).checkpoint_id, checkpoints[0].id);
+    assert.ok(seen.some((e) =>
+      e.type === "needs_human" && e.checkpointId === checkpoints[0].id));
+
+    // Retrying the same escalation can repeat the notification activity, but must
+    // never stack duplicate decisions in the ticket.
+    await handler(mockReq({ url: `/api/tasks/${task.id}/activities`, method: "POST", body }), mockRes());
+    assert.equal(db.listCheckpoints(task.id).length, 1);
+  });
+});
+
+test("a blocking needs_human activity pauses active work", async () => {
+  await withHandler(async (handler, db) => {
+    const task = db.createTask({ title: "blocked work", status: "in_progress" });
+    await handler(mockReq({
+      url: `/api/tasks/${task.id}/activities`,
+      method: "POST",
+      body: { activity_type: "needs_human", message: "Need an API key" },
+    }), mockRes());
+
+    assert.equal(db.getTask(task.id).status, "on_hold");
+    assert.equal(db.getProgress(task.id).state, "waiting");
+    assert.equal(db.countPendingCheckpoints(task.id), 1);
+  });
+});
+
 test("approving a checkpoint resumes the task and records the decision", async () => {
   await withHandler(async (handler, db, events) => {
     const seen = [];
@@ -99,6 +148,49 @@ test("approving a checkpoint resumes the task and records the decision", async (
     const acts = db.listActivities(task.id).map((a) => a.activity_type);
     assert.ok(acts.includes("checkpoint_raised"));
     assert.ok(acts.includes("checkpoint_resolved"));
+  });
+});
+
+test("draft PR checkpoint can move directly to human review", async () => {
+  await withHandler(async (handler, db) => {
+    const task = db.createTask({ title: "draft", status: "on_hold" });
+    const checkpoint = db.createCheckpoint({
+      task_id: task.id,
+      kind: "choice",
+      prompt: "A draft PR already exists for this task:\nhttps://github.com/acme/backend/pull/42",
+    });
+
+    const res = mockRes();
+    await handler(mockReq({
+      url: `/api/checkpoints/${checkpoint.id}/resolve`, method: "POST",
+      body: { decision: "answer", response: "Move to review (I'll finish the PR myself)" },
+    }), res);
+
+    assert.equal(res.statusCode, 200);
+    assert.equal(db.getTask(task.id).status, "review");
+    assert.equal(db.getProgress(task.id).state, "waiting");
+  });
+});
+
+test("draft PR checkpoint can authorize an agent to reuse the PR", async () => {
+  await withHandler(async (handler, db) => {
+    const task = db.createTask({ title: "draft", status: "on_hold" });
+    const checkpoint = db.createCheckpoint({
+      task_id: task.id,
+      kind: "choice",
+      prompt: "A draft PR already exists for this task:\nhttps://github.com/acme/backend/pull/43",
+    });
+
+    const res = mockRes();
+    await handler(mockReq({
+      url: `/api/checkpoints/${checkpoint.id}/resolve`, method: "POST",
+      body: { decision: "answer", response: "Let an agent continue on top of this PR" },
+    }), res);
+
+    assert.equal(res.statusCode, 200);
+    assert.equal(db.getTask(task.id).status, "inbox");
+    const reuse = db.listActivities(task.id).find((activity) => activity.activity_type === "pr_reuse_requested");
+    assert.equal(JSON.parse(reuse.metadata).pr_url, "https://github.com/acme/backend/pull/43");
   });
 });
 
@@ -134,6 +226,55 @@ test("task stays paused until ALL its checkpoints are resolved", async () => {
 
     await handler(mockReq({ url: `/api/checkpoints/${id2}/resolve`, method: "POST", body: { decision: "approve" } }), mockRes());
     assert.equal(db.getTask(task.id).status, "inbox"); // all resolved -> resume
+  });
+});
+
+test("completing a task cancels obsolete pending checkpoints", async () => {
+  await withHandler(async (handler, db) => {
+    const task = db.createTask({ title: "already shipped", status: "in_progress" });
+    const create = mockRes();
+    await handler(mockReq({
+      url: `/api/tasks/${task.id}/checkpoints`, method: "POST",
+      body: { kind: "question", prompt: "Which release sequence?" },
+    }), create);
+
+    const done = mockRes();
+    await handler(mockReq({
+      url: `/api/tasks/${task.id}`, method: "PATCH", body: { status: "done" },
+    }), done);
+
+    assert.equal(done.statusCode, 200);
+    assert.equal(db.getTask(task.id).status, "done");
+    assert.equal(db.countPendingCheckpoints(task.id), 0);
+    const [checkpoint] = db.listCheckpoints(task.id);
+    assert.equal(checkpoint.status, "cancelled");
+    assert.equal(checkpoint.response, "Cancelled because the task was completed.");
+    assert.ok(checkpoint.resolved_at);
+  });
+});
+
+test("idempotent completion repairs stale checkpoints and completed tasks reject new ones", async () => {
+  await withHandler(async (handler, db) => {
+    const task = db.createTask({ title: "closed elsewhere", status: "done" });
+    const stale = db.createCheckpoint({ task_id: task.id, prompt: "Old approval" });
+
+    const done = mockRes();
+    await handler(mockReq({
+      url: `/api/tasks/${task.id}/done`, method: "POST", body: { reason: "PR closed" },
+    }), done);
+
+    assert.equal(done.statusCode, 200);
+    assert.equal(JSON.parse(done.body).alreadyDone, true);
+    assert.equal(db.getCheckpoint(stale.id).status, "cancelled");
+    assert.equal(db.countPendingCheckpoints(task.id), 0);
+
+    const create = mockRes();
+    await handler(mockReq({
+      url: `/api/tasks/${task.id}/checkpoints`, method: "POST", body: { prompt: "Late approval" },
+    }), create);
+    assert.equal(create.statusCode, 409);
+    assert.match(JSON.parse(create.body).error, /completed tasks/i);
+    assert.equal(db.countPendingCheckpoints(task.id), 0);
   });
 });
 

@@ -5,8 +5,20 @@ set -euo pipefail
 TASK_NAME=$1
 MC_HOME="${MC_HOME:-$HOME/.mission-control}"
 SWARM_DIR="$MC_HOME/swarm"
+if [ -f "$MC_HOME/.env" ]; then set -a; source "$MC_HOME/.env"; set +a; fi
 CONFIG="$SWARM_DIR/swarm-config.json"
 STATE_TOOL="$SWARM_DIR/swarm-state.py"
+SCRIPT_SRC="${BASH_SOURCE[0]}"
+while [ -L "$SCRIPT_SRC" ]; do
+  LINK_TARGET="$(readlink "$SCRIPT_SRC")"
+  case "$LINK_TARGET" in
+    /*) SCRIPT_SRC="$LINK_TARGET" ;;
+    *) SCRIPT_SRC="$(dirname "$SCRIPT_SRC")/$LINK_TARGET" ;;
+  esac
+done
+SCRIPT_DIR="$(cd "$(dirname "$SCRIPT_SRC")" && pwd)"
+RATE_LIMIT_POLICY="$SCRIPT_DIR/rate_limit_policy.py"
+source "$SCRIPT_DIR/mc-api.sh"
 
 CFG_MODEL=${AGENT_MODEL:-$(jq -r '.claude.model // "claude-opus-4-6"' "$CONFIG" 2>/dev/null || echo "claude-opus-4-6")}
 CFG_FALLBACK=${AGENT_FALLBACK_MODEL:-$(jq -r '.claude.fallbackModel // ""' "$CONFIG" 2>/dev/null || echo "")}
@@ -17,6 +29,9 @@ PROMPT_FILE="${PROMPT_OVERRIDE:-$SWARM_DIR/prompts/${TASK_NAME}.md}"
 LOG="$SWARM_DIR/logs/agent-${TASK_NAME}.log"
 MC_URL="${MISSION_CONTROL_URL:-http://localhost:18900}"
 HEARTBEAT_INTERVAL_SECONDS="${HEARTBEAT_INTERVAL_SECONDS:-90}"
+AGENT_LIMIT_INITIAL_BACKOFF_SECONDS="${AGENT_LIMIT_INITIAL_BACKOFF_SECONDS:-300}"
+AGENT_LIMIT_MAX_BACKOFF_SECONDS="${AGENT_LIMIT_MAX_BACKOFF_SECONDS:-7200}"
+AGENT_LIMIT_RETRY_WINDOW_SECONDS="${AGENT_LIMIT_RETRY_WINDOW_SECONDS:-43200}"
 
 MC_TASK_ID="${MC_TASK_ID:-}"
 if [ -z "$MC_TASK_ID" ]; then
@@ -56,11 +71,25 @@ update_registry_json() {
     --reason "run-claude" >/dev/null 2>&1 || true
 }
 
+preserved_work_note() {
+  local ahead_count dirty_count
+  ahead_count=$(git rev-list --count "${BASE_BRANCH:-origin/main}..HEAD" 2>/dev/null || echo 0)
+  dirty_count=$(git status --porcelain 2>/dev/null | awk 'END {print NR+0}')
+  if [ "${ahead_count:-0}" -gt 0 ] || [ "${dirty_count:-0}" -gt 0 ]; then
+    printf 'Partial work is preserved (%s commit(s) ahead, %s dirty path(s)).' \
+      "${ahead_count:-0}" "${dirty_count:-0}"
+  else
+    printf 'No repository changes were detected.'
+  fi
+}
+
 AUTONOMY_SUFFIX='
 
 CRITICAL: You are running in FULLY AUTONOMOUS mode. There is NO human to respond.
 - Do NOT ask questions. Do NOT ask for confirmation. Do NOT say "shall I" or "would you like".
-- Execute the ENTIRE workflow: write code, run tests, commit, push, create PR, report to MC.
+- Execute the ENTIRE workflow: write code, run tests, commit, push, and report to MC.
+- Create the required PR unless the task prompt identifies an existing PR handoff; for a handoff,
+  update that same PR and NEVER create another one.
 - If unsure about a decision, make the best choice and proceed.
 - Your session ends when you stop outputting. Nothing happens after you ask a question.
 - COMPLETE ALL STEPS before stopping.'
@@ -91,7 +120,7 @@ start_heartbeat() {
       now_ms=$(($(date +%s) * 1000))
       update_registry_json "{\"lastHeartbeatAt\": $now_ms, \"heartbeatIntervalSec\": $HEARTBEAT_INTERVAL_SECONDS}"
       msg="Agent heartbeat: task $TASK_NAME running (attempt $attempt/$MAX_RETRIES)."
-      curl -s -X POST "$MC_URL/api/tasks/$MC_TASK_ID/activities" \
+      mc_curl POST "/api/tasks/$MC_TASK_ID/activities" -s \
         -H "Content-Type: application/json" \
         -d "{\"activity_type\":\"updated\",\"message\":$(printf '%s' "$msg" | jq -Rs .)}" \
         > /dev/null 2>&1 || true
@@ -149,25 +178,64 @@ while [ "$attempt" -lt "$MAX_RETRIES" ]; do
   # and was logged "completed successfully" with an empty worktree, no commits, no
   # PR — the ticket then moved to review as finished work.
   #
-  # Unlike the turn limit this is not worth retrying: it resets at a wall-clock time,
-  # so three attempts thirty seconds apart just spend the ladder and log the same
-  # sentence three times. Fail out immediately with a reason naming the reset.
-  if [ "$exit_code" -eq 0 ] && printf '%s' "$attempt_output" \
+  # Unlike a normal process failure, this must not spend three retries thirty seconds
+  # apart or become a permanent human question. Release the slot, retain the worktree,
+  # and let the monitor retry exponentially for up to twelve hours.
+  if printf '%s' "$attempt_output" \
        | grep -qiE "hit your (session|usage) limit|usage limit reached|rate limit reached"; then
     limit_line=$(printf '%s' "$attempt_output" | grep -iEm1 "hit your (session|usage) limit|usage limit reached|rate limit reached" | tr -d '\r')
     echo "  Stopped by the account limit, not by finishing: ${limit_line}" | tee -a "$LOG"
-    echo "  Not retrying — this resets on a clock, so a retry now would fail the same way." | tee -a "$LOG"
-    update_registry "lastError" '"session_limit_reached"'
-    update_registry "status" '"failed"'
-    update_registry "failedAt" "$(date +%s)000"
+    now_ms=$(($(date +%s) * 1000))
+    first_at=$(jq -r --arg id "$TASK_NAME" '.[] | select(.id == $id) | .rateLimitFirstAt // 0' "$SWARM_DIR/active-tasks.json" 2>/dev/null | head -1)
+    limit_retries=$(jq -r --arg id "$TASK_NAME" '.[] | select(.id == $id) | .rateLimitRetryCount // 0' "$SWARM_DIR/active-tasks.json" 2>/dev/null | head -1)
+    schedule=$(python3 "$RATE_LIMIT_POLICY" \
+      --now-ms "$now_ms" --first-at-ms "${first_at:-0}" --retry-count "${limit_retries:-0}" \
+      --initial-seconds "$AGENT_LIMIT_INITIAL_BACKOFF_SECONDS" \
+      --max-seconds "$AGENT_LIMIT_MAX_BACKOFF_SECONDS" \
+      --window-seconds "$AGENT_LIMIT_RETRY_WINDOW_SECONDS")
+    repo_note=$(preserved_work_note)
+
+    if [ "$(printf '%s' "$schedule" | jq -r '.exhausted')" = "true" ]; then
+      echo "  Account limit persisted for the full retry window; escalating." | tee -a "$LOG"
+      patch=$(jq -cn --arg message "$limit_line" --argjson failedAt "$now_ms" \
+        '{status:"failed",lastError:"session_limit_retry_window_exhausted",rateLimitMessage:$message,failedAt:$failedAt,nextRateLimitRetryAt:null}')
+      update_registry_json "$patch"
+      if [ -n "$MC_TASK_ID" ]; then
+        msg="Agent account limit did not clear within 12 hours. $repo_note Manual intervention is now required."
+        payload=$(jq -cn --arg message "$msg" '{activity_type:"needs_human",message:$message}')
+        mc_curl POST "/api/tasks/$MC_TASK_ID/activities" -s \
+          -H "Content-Type: application/json" -d "$payload" > /dev/null 2>&1 || true
+      fi
+      exit 75
+    fi
+
+    next_retry_at=$(printf '%s' "$schedule" | jq -r '.nextRetryAt')
+    retry_number=$(printf '%s' "$schedule" | jq -r '.retryCount')
+    delay_seconds=$(printf '%s' "$schedule" | jq -r '.delaySeconds')
+    first_at=$(printf '%s' "$schedule" | jq -r '.firstAt')
+    deadline_at=$(printf '%s' "$schedule" | jq -r '.deadlineAt')
+    patch=$(jq -cn --arg message "$limit_line" \
+      --argjson firstAt "$first_at" --argjson deadlineAt "$deadline_at" \
+      --argjson retryCount "$retry_number" --argjson nextRetryAt "$next_retry_at" \
+      '{status:"rate_limited",lastError:"session_limit_reached",rateLimitMessage:$message,
+        rateLimitFirstAt:$firstAt,rateLimitDeadlineAt:$deadlineAt,
+        rateLimitRetryCount:$retryCount,nextRateLimitRetryAt:$nextRetryAt,failedAt:null}')
+    update_registry_json "$patch"
+    echo "  Retry $retry_number scheduled in ${delay_seconds}s; worktree preserved and slot released." | tee -a "$LOG"
     if [ -n "$MC_TASK_ID" ]; then
-      msg="Agent stopped: ${limit_line:-account limit reached}. No code was written. Re-dispatch after it resets."
-      curl -s -X POST "$MC_URL/api/tasks/$MC_TASK_ID/activities" \
-        -H "Content-Type: application/json" \
-        -d "{\"activity_type\":\"needs_human\",\"message\":$(printf '%s' "$msg" | jq -Rs .)}" \
-        > /dev/null 2>&1 || true
+      msg="Agent account limit reached; retry $retry_number is scheduled with exponential backoff. $repo_note"
+      payload=$(jq -cn --arg message "$msg" '{activity_type:"updated",message:$message}')
+      mc_curl POST "/api/tasks/$MC_TASK_ID/activities" -s \
+        -H "Content-Type: application/json" -d "$payload" > /dev/null 2>&1 || true
     fi
     exit 75
+  fi
+
+  # Any non-limit response proves the account recovered. Do not let an old retry
+  # deadline survive and reclassify a later ordinary failure as quota exhaustion.
+  if jq -e --arg id "$TASK_NAME" '.[] | select(.id == $id and .rateLimitFirstAt != null)' \
+       "$SWARM_DIR/active-tasks.json" >/dev/null 2>&1; then
+    update_registry_json '{"rateLimitFirstAt":null,"rateLimitDeadlineAt":null,"rateLimitRetryCount":0,"nextRateLimitRetryAt":null,"rateLimitMessage":null}'
   fi
 
   if [ "$exit_code" -eq 0 ] && printf '%s' "$attempt_output" | grep -q "Reached max turns"; then
@@ -188,23 +256,23 @@ while [ "$attempt" -lt "$MAX_RETRIES" ]; do
 
   if [ "$exit_code" -eq 0 ]; then
     echo "=== Claude Agent completed successfully: $TASK_NAME | Attempt: $attempt | $(date) ===" | tee -a "$LOG"
-    update_registry "status" '"completed_by_agent"'
+    update_registry_json '{"status":"completed_by_agent","lastError":null,"rateLimitFirstAt":null,"rateLimitDeadlineAt":null,"rateLimitRetryCount":0,"nextRateLimitRetryAt":null,"rateLimitMessage":null}'
 
     if [ -n "$MC_TASK_ID" ]; then
-      TASK_TYPE=$(curl -s "$MC_URL/api/tasks/$MC_TASK_ID" 2>/dev/null | jq -r '.task_type // "implementation"' 2>/dev/null)
+      TASK_TYPE=$(mc_curl GET "/api/tasks/$MC_TASK_ID" -s 2>/dev/null | jq -r '.task_type // "implementation"' 2>/dev/null)
       if [ "$TASK_TYPE" = "investigation" ]; then
-        HAS_FINDINGS=$(curl -s "$MC_URL/api/tasks/$MC_TASK_ID/activities" 2>/dev/null | jq '[.[] | select(.activity_type == "investigation_findings")] | length' 2>/dev/null)
+        HAS_FINDINGS=$(mc_curl GET "/api/tasks/$MC_TASK_ID/activities" -s 2>/dev/null | jq '[.[] | select(.activity_type == "investigation_findings")] | length' 2>/dev/null)
         if [ "${HAS_FINDINGS:-0}" = "0" ]; then
           FINDINGS=$(sed -n '/^=== Claude Agent starting/,/^=== Claude Agent completed/{/^===/d;p}' "$LOG" | tail -200)
           if [ -n "$FINDINGS" ]; then
             ESCAPED=$(echo "$FINDINGS" | python3 -c 'import sys,json; print(json.dumps(sys.stdin.read()))')
-            curl -s -X POST "$MC_URL/api/tasks/$MC_TASK_ID/activities" \
+            mc_curl POST "/api/tasks/$MC_TASK_ID/activities" -s \
               -H "Content-Type: application/json" \
               -d "{\"activity_type\": \"investigation_findings\", \"message\": $ESCAPED}" > /dev/null 2>&1
             echo "  Posted investigation findings to MC" | tee -a "$LOG"
           fi
         fi
-        curl -s -X POST "$MC_URL/api/webhooks/agent-completion" \
+        mc_curl POST "/api/webhooks/agent-completion" -s \
           -H "Content-Type: application/json" \
           -d "{\"task_id\": \"$MC_TASK_ID\", \"status\": \"review\", \"summary\": \"Investigation complete\"}" > /dev/null 2>&1
       fi
