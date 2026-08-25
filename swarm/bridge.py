@@ -6957,8 +6957,6 @@ def _relaunch_for_change_request(task: dict, change_requests_text: str, source: 
                         "Change request received but agent worktree missing. Manual intervention needed.")
         return
 
-    mc_update_task(task_id, {"status": "in_progress"})
-
     prompt_title = "Change Request from Mission Control"
     prompt_file = SWARM_DIR / "prompts" / f"{reg_id}-change-request.md"
     prompt_file.parent.mkdir(parents=True, exist_ok=True)
@@ -6997,11 +6995,13 @@ Do NOT ask for confirmation. Complete all steps autonomously.
     env_exports += f"export MC_TASK_ID={shlex.quote(str(_relaunch_mc_id))}; "
 
     try:
-        subprocess.run(
+        launched = subprocess.run(
             ["tmux", "new-session", "-d", "-s", session, "-c", worktree,
              f"bash -lc '{env_exports}PROMPT_OVERRIDE={shlex.quote(str(prompt_file))} exec {shlex.quote(launcher)} {shlex.quote(reg_id)}'"],
             capture_output=True, text=True, timeout=30,
         )
+        if launched.returncode != 0:
+            raise RuntimeError((launched.stderr or launched.stdout or "tmux new-session failed").strip())
         logging.info(f"  Re-launched agent {reg_id} for change request ({agent_profile})")
     except Exception as e:
         logging.error(f"  Failed to re-launch agent: {e}")
@@ -7029,6 +7029,14 @@ Do NOT ask for confirmation. Complete all steps autonomously.
     except Exception:
         pass
 
+    mc_update_task(task_id, {"status": "in_progress"})
+    mc_set_progress(
+        task_id,
+        state="running",
+        phase="execute",
+        step_label="Addressing review feedback",
+        blocked_reason="",
+    )
     mc_log_activity(task_id, "updated", "Change request received from Mission Control — re-launching agent")
     if source == "dashboard":
         try:
@@ -7133,8 +7141,6 @@ def _relaunch_for_investigation_followup(task: dict, followup_text: str, source:
                         "Investigation follow-up received but agent worktree missing. Manual intervention needed.")
         return
 
-    mc_update_task(task_id, {"status": "in_progress"})
-
     prompt_file = SWARM_DIR / "prompts" / f"{reg_id}-investigation-followup.md"
     prompt_file.parent.mkdir(parents=True, exist_ok=True)
     prompt_file.write_text(f"""# Investigation Follow-up
@@ -7172,11 +7178,13 @@ This task is investigation-only. You received new follow-up context/questions.
     env_exports += f"export MC_TASK_ID={shlex.quote(str(_relaunch_mc_id))}; "
 
     try:
-        subprocess.run(
+        launched = subprocess.run(
             ["tmux", "new-session", "-d", "-s", session, "-c", worktree,
              f"bash -lc '{env_exports}PROMPT_OVERRIDE={shlex.quote(str(prompt_file))} exec {shlex.quote(launcher)} {shlex.quote(reg_id)}'"],
             capture_output=True, text=True, timeout=30,
         )
+        if launched.returncode != 0:
+            raise RuntimeError((launched.stderr or launched.stdout or "tmux new-session failed").strip())
         logging.info(f"  Re-launched investigation agent {reg_id} for follow-up ({agent_profile})")
     except Exception as e:
         logging.error(f"  Failed to re-launch investigation follow-up agent: {e}")
@@ -7200,6 +7208,14 @@ This task is investigation-only. You received new follow-up context/questions.
     except Exception:
         pass
 
+    mc_update_task(task_id, {"status": "in_progress"})
+    mc_set_progress(
+        task_id,
+        state="running",
+        phase="investigation",
+        step_label="Revisiting investigation feedback",
+        blocked_reason="",
+    )
     mc_log_activity(task_id, "updated", "Investigation follow-up received from Mission Control — re-launching investigation agent")
     if source == "dashboard":
         try:

@@ -1060,6 +1060,53 @@ with tempfile.TemporaryDirectory() as root:
     "the acknowledgement lands before the started update");
 });
 
+test("a successful review relaunch resets progress, while a failed tmux launch does not", () => {
+  const result = python(`
+import bridge, subprocess, tempfile
+from pathlib import Path
+
+with tempfile.TemporaryDirectory() as root:
+    bridge.SWARM_DIR = Path(root)
+    worktree = Path(root) / "worktree"
+    worktree.mkdir()
+    registry = [{
+        "id": "MET-646-backend", "mcTaskId": "task-646", "status": "ready",
+        "worktree": str(worktree), "tmuxSession": "claude-MET-646-backend",
+        "launcher": "claude", "agentProfile": "claude",
+    }]
+    (bridge.SWARM_DIR / "active-tasks.json").write_text(json.dumps(registry))
+    bridge._design_prompt_section = lambda _: ""
+    bridge._video_prompt_section = lambda _: ""
+    bridge._supercut_prompt_section = lambda _: ""
+    bridge._attachment_prompt_section = lambda _: ""
+    calls = []
+    bridge.mc_update_task = lambda task_id, body: calls.append(["status", task_id, body])
+    bridge.mc_set_progress = lambda task_id, **body: calls.append(["progress", task_id, body])
+    bridge.mc_log_activity = lambda *_args, **_kwargs: None
+
+    bridge.subprocess.run = lambda args, **kwargs: subprocess.CompletedProcess(args, 0, "", "")
+    bridge._relaunch_for_change_request({"id": "task-646"}, "fix conflict", source="auto-monitor")
+    success_calls = list(calls)
+
+    calls.clear()
+    def fail_new_session(args, **kwargs):
+        code = 1 if args[:2] == ["tmux", "new-session"] else 0
+        return subprocess.CompletedProcess(args, code, "", "cannot create session" if code else "")
+    bridge.subprocess.run = fail_new_session
+    bridge._relaunch_for_change_request({"id": "task-646"}, "fix conflict", source="auto-monitor")
+    print(json.dumps({"success": success_calls, "failure": calls}))
+`, null);
+
+  assert.deepEqual(result.success[0], ["status", "task-646", { status: "in_progress" }]);
+  assert.deepEqual(result.success[1], ["progress", "task-646", {
+    state: "running",
+    phase: "execute",
+    step_label: "Addressing review feedback",
+    blocked_reason: "",
+  }]);
+  assert.deepEqual(result.failure, [], "a failed tmux launch must not claim the task is running");
+});
+
 test("a fourth automated review-comment fix round holds the ticket and alerts a human", () => {
   const result = python(`
 import bridge, tempfile
