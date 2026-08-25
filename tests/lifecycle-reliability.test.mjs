@@ -1106,6 +1106,60 @@ with tempfile.TemporaryDirectory() as root:
   assert.equal(result.state.lastCommentId, 101, "the triggering comment is consumed so it cannot alert twice");
 });
 
+test("a pre-existing PR conflict is repaired on first observation and from legacy baseline state", () => {
+  const result = python(`
+import bridge, tempfile
+from pathlib import Path
+
+with tempfile.TemporaryDirectory() as root:
+    bridge.SWARM_DIR = Path(root)
+    bridge._REVIEW_MONITOR_FILE = bridge.SWARM_DIR / "review-monitor.json"
+    calls = []
+    bridge.mc_request = lambda method, path, body=None: (
+        [{"deliverable_type": "pr", "path": "https://github.com/acme/backend/pull/694"}]
+        if method == "GET" and path.endswith("/deliverables") else None
+    )
+    bridge._gh_pr_meta = lambda _: {
+        "state": "OPEN", "headRefOid": "conflicted-head", "mergeable": "CONFLICTING",
+        "statusCheckRollup": [], "_repo": "acme/backend", "_num": "694",
+    }
+    bridge._pr_comment_signals = lambda _: {"ext": 55, "mention": 0}
+    bridge.mc_log_activity = lambda task_id, kind, message: calls.append(["activity", task_id, kind])
+    bridge._relaunch_for_change_request = lambda task, prompt, source: calls.append(
+        ["relaunch", task["id"], source]
+    )
+
+    first = bridge._auto_review_monitor({"id": "task-646", "task_type": "implementation"})
+    first_state = json.loads(bridge._REVIEW_MONITOR_FILE.read_text())["task-646"]
+
+    bridge._REVIEW_MONITOR_FILE.write_text(json.dumps({
+        "task-legacy": {
+            "autoCount": 0,
+            "reviewCommentRounds": 0,
+            "lastCommentId": 55,
+            "lastMentionId": 0,
+            "conflictHead": "conflicted-head",
+        }
+    }))
+    legacy = bridge._auto_review_monitor({"id": "task-legacy", "task_type": "implementation"})
+    legacy_state = json.loads(bridge._REVIEW_MONITOR_FILE.read_text())["task-legacy"]
+    print(json.dumps({
+        "first": first, "legacy": legacy, "calls": calls,
+        "firstState": first_state, "legacyState": legacy_state,
+    }))
+`, null);
+
+  assert.equal(result.first, true);
+  assert.equal(result.legacy, true);
+  assert.deepEqual(result.calls.filter(call => call[0] === "relaunch"), [
+    ["relaunch", "task-646", "auto-monitor"],
+    ["relaunch", "task-legacy", "auto-monitor"],
+  ]);
+  assert.equal(result.firstState.autoCount, 1);
+  assert.equal(result.legacyState.autoCount, 1);
+  assert.equal(result.firstState.lastCommentId, 55, "existing comments remain baselined");
+});
+
 test("merged and externally closed PRs complete tickets through the canonical endpoint", () => {
   const result = python(`
 import bridge

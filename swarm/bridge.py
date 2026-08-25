@@ -7553,31 +7553,29 @@ def _auto_review_monitor(task: dict) -> bool:
     state = _load_review_monitor()
     head = meta.get("headRefOid") or ""
 
-    # First time we see this PR: record a baseline (existing bot comments, any
-    # pre-existing conflict/CI state) and fire NOTHING — so enabling the monitor doesn't
-    # relaunch every open PR at once. Only conditions that appear AFTER this trigger.
+    # First time we see this PR, baseline only existing comments. Conflicts and failed
+    # checks are objective blockers, so evaluate them immediately instead of hiding a
+    # ticket forever behind monitor initialization.
     if task_id not in state:
         sig = _pr_comment_signals(meta)
-        base = {
+        state[task_id] = {
             "autoCount": 0,
             "reviewCommentRounds": 0,
             "lastCommentId": sig["ext"],
             "lastMentionId": sig["mention"],
         }
-        if str(meta.get("mergeable", "")).upper() == "CONFLICTING":
-            base["conflictHead"] = head
-        if _pr_ci_failing(meta):
-            base["ciHead"] = head
-        state[task_id] = base
         _save_review_monitor(state)
-        logging.info(f"  Auto-review-monitor: baselined {task_id[:8]} (no action on pre-existing state)")
-        return False
+        logging.info(f"  Auto-review-monitor: baselined comments for {task_id[:8]}; evaluating blockers")
 
     mk = state[task_id]
     kind = None
-    if str(meta.get("mergeable", "")).upper() == "CONFLICTING" and mk.get("conflictHead") != head:
+    # autoCount == 0 migrates state written by older monitor versions, which recorded
+    # the current conflict/CI head during baseline without ever launching a repair.
+    never_launched = int(mk.get("autoCount", 0) or 0) == 0
+    if (str(meta.get("mergeable", "")).upper() == "CONFLICTING"
+            and (mk.get("conflictHead") != head or never_launched)):
         kind, mk["conflictHead"] = "merge_conflicts", head
-    elif _pr_ci_failing(meta) and mk.get("ciHead") != head:
+    elif _pr_ci_failing(meta) and (mk.get("ciHead") != head or never_launched):
         kind, mk["ciHead"] = "ci_lint", head
     else:
         sig = _pr_comment_signals(meta)
