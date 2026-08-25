@@ -1124,6 +1124,7 @@ with tempfile.TemporaryDirectory() as root:
         "statusCheckRollup": [], "_repo": "acme/backend", "_num": "694",
     }
     bridge._pr_comment_signals = lambda _: {"ext": 55, "mention": 0}
+    bridge._auto_fix_run_finished = lambda _: False
     bridge.mc_log_activity = lambda task_id, kind, message: calls.append(["activity", task_id, kind])
     bridge._relaunch_for_change_request = lambda task, prompt, source: calls.append(
         ["relaunch", task["id"], source]
@@ -1158,6 +1159,56 @@ with tempfile.TemporaryDirectory() as root:
   assert.equal(result.firstState.autoCount, 1);
   assert.equal(result.legacyState.autoCount, 1);
   assert.equal(result.firstState.lastCommentId, 55, "existing comments remain baselined");
+});
+
+test("a completed conflict repair retries the same head, then holds and alerts at the cap", () => {
+  const result = python(`
+import bridge, tempfile
+from pathlib import Path
+
+with tempfile.TemporaryDirectory() as root:
+    bridge.SWARM_DIR = Path(root)
+    bridge._REVIEW_MONITOR_FILE = bridge.SWARM_DIR / "review-monitor.json"
+    bridge._REVIEW_MONITOR_FILE.write_text(json.dumps({
+        "task-646": {
+            "autoCount": 4, "reviewCommentRounds": 0,
+            "lastCommentId": 0, "lastMentionId": 0,
+            "conflictHead": "same-head",
+        }
+    }))
+    calls = []
+    bridge.mc_request = lambda method, path, body=None: (
+        [{"deliverable_type": "pr", "path": "https://github.com/acme/backend/pull/694"}]
+        if method == "GET" and path.endswith("/deliverables") else None
+    )
+    bridge._gh_pr_meta = lambda _: {
+        "state": "OPEN", "headRefOid": "same-head", "mergeable": "CONFLICTING",
+        "statusCheckRollup": [], "_repo": "acme/backend", "_num": "694",
+    }
+    bridge._auto_fix_run_finished = lambda _: True
+    bridge.mc_update_task = lambda task_id, body: calls.append(["patch", task_id, body])
+    bridge.mc_log_activity = lambda task_id, kind, message: calls.append(
+        ["activity", task_id, kind, message]
+    )
+    bridge._relaunch_for_change_request = lambda task, prompt, source: calls.append(
+        ["relaunch", task["id"], source]
+    )
+
+    fifth = bridge._auto_review_monitor({"id": "task-646", "task_type": "implementation"})
+    fifth_state = json.loads(bridge._REVIEW_MONITOR_FILE.read_text())["task-646"]
+    capped = bridge._auto_review_monitor({"id": "task-646", "task_type": "implementation"})
+    print(json.dumps({"fifth": fifth, "capped": capped, "calls": calls, "state": fifth_state}))
+`, null);
+
+  assert.equal(result.fifth, true);
+  assert.equal(result.capped, true);
+  assert.equal(result.state.autoCount, 5);
+  assert.deepEqual(result.calls[1], ["relaunch", "task-646", "auto-monitor"]);
+  assert.deepEqual(result.calls[2], ["patch", "task-646", { status: "on_hold" }]);
+  assert.equal(result.calls[3][0], "activity");
+  assert.equal(result.calls[3][2], "needs_human");
+  assert.match(result.calls[3][3], /after 5 automated repair attempts/);
+  assert.match(result.calls[3][3], /\/unhold/);
 });
 
 test("merged and externally closed PRs complete tickets through the canonical endpoint", () => {

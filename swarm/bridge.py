@@ -7409,6 +7409,17 @@ def _load_review_monitor() -> dict:
         return {}
 
 
+def _auto_fix_run_finished(task_id: str) -> bool:
+    """Whether the last automatic follow-up finished and yielded control back to Review."""
+    entry = _find_agent_registry_entry(task_id) or {}
+    if entry.get("changeRequestSource") != "auto-monitor":
+        return False
+    status = entry.get("status")
+    return status == "completed_by_agent" or (
+        status == "ready" and bool(entry.get("completionSyncedAt"))
+    )
+
+
 def _save_review_monitor(d: dict) -> None:
     try:
         _REVIEW_MONITOR_FILE.write_text(json.dumps(d, indent=2))
@@ -7572,10 +7583,12 @@ def _auto_review_monitor(task: dict) -> bool:
     # autoCount == 0 migrates state written by older monitor versions, which recorded
     # the current conflict/CI head during baseline without ever launching a repair.
     never_launched = int(mk.get("autoCount", 0) or 0) == 0
+    prior_run_finished = _auto_fix_run_finished(task_id)
     if (str(meta.get("mergeable", "")).upper() == "CONFLICTING"
-            and (mk.get("conflictHead") != head or never_launched)):
+            and (mk.get("conflictHead") != head or never_launched or prior_run_finished)):
         kind, mk["conflictHead"] = "merge_conflicts", head
-    elif _pr_ci_failing(meta) and (mk.get("ciHead") != head or never_launched):
+    elif (_pr_ci_failing(meta)
+            and (mk.get("ciHead") != head or never_launched or prior_run_finished)):
         kind, mk["ciHead"] = "ci_lint", head
     else:
         sig = _pr_comment_signals(meta)
@@ -7611,7 +7624,16 @@ def _auto_review_monitor(task: dict) -> bool:
     if mk.get("autoCount", 0) >= _MAX_AUTO_FIX_PER_TASK:
         state[task_id] = mk
         _save_review_monitor(state)
-        return False
+        reason = (
+            f"The PR still has {kind.replace('_', ' ')} after "
+            f"{_MAX_AUTO_FIX_PER_TASK} automated repair attempts. Mission Control put the ticket "
+            "on hold to stop a stalled repair loop. Inspect the PR and agent history, then use "
+            "/unhold when it is ready to continue."
+        )
+        logging.warning(f"  Auto-review-monitor: {task_id[:8]} exhausted repair limit — holding")
+        mc_update_task(task_id, {"status": "on_hold"})
+        mc_log_activity(task_id, "needs_human", reason)
+        return True
 
     mk["autoCount"] = mk.get("autoCount", 0) + 1
     state[task_id] = mk
