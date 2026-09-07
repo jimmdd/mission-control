@@ -112,7 +112,7 @@ test('real launcher acknowledges before returning and adopts retries despite lar
   const home=mkdtempSync(join(tmpdir(),'mc-launch-'));
   const socket=`mc-audit-${process.pid}`;
   const repo=join(home,'repo'); const remote=join(home,'origin.git');
-  const state=join(home,'swarm'); const bin=join(home,'bin');
+  const state=join(home,'swarm'); const bin=join(home,'.local','bin');
   for(const p of [repo,state,bin,join(state,'prompts'),join(state,'logs')]) mkdirSync(p,{recursive:true});
   const env={...process.env,HOME:home,MC_HOME:home,PATH:`${bin}:${process.env.PATH}`,MC_MEMORY_CEILING:'0.999',MISSION_CONTROL_URL:'http://127.0.0.1:1',MC_TASK_ID:'test-mc-id'};
   delete env.MC_LAUNCH_LOCK; delete env.MC_LAUNCH_LOCK_FD;
@@ -135,5 +135,15 @@ test('real launcher acknowledges before returning and adopts retries despite lar
     const second=run(); assert.equal(second.status,0,second.stderr+'\n'+second.stdout);
     assert.match(second.stdout,/Adopted existing agent/);
     assert.equal(JSON.parse(readFileSync(join(state,'active-tasks.json')))[0].launchAttemptId,entry.launchAttemptId);
+    execFileSync(tmux,['-L',socket,'set-option','-t',`=${entry.tmuxSession}:`,'remain-on-exit','on']);
+    execFileSync(tmux,['-L',socket,'respawn-pane','-k','-t',`=${entry.tmuxSession}:`,'exit 0']);
+    execFileSync(tmux,['-L',socket,'run-shell','sleep 0.1']);
+    assert.equal(execFileSync(tmux,['-L',socket,'list-panes','-t',`=${entry.tmuxSession}:`,'-F','#{pane_dead}'],{encoding:'utf8'}).trim(),'1');
+    writeFileSync(join(state,'active-tasks.json'),JSON.stringify([{...entry,status:'failed',lastError:'agent_session_lost'}]));
+    const recovered=run();assert.equal(recovered.status,0,recovered.stderr+'\n'+recovered.stdout);
+    const newEntry=JSON.parse(readFileSync(join(state,'active-tasks.json')))[0];
+    assert.notEqual(newEntry.launchAttemptId,entry.launchAttemptId);
+    assert.ok(newEntry.launchAcknowledgedAt);
+
   } finally { spawnSync(tmux,['-L',socket,'kill-server']); rmSync(home,{recursive:true,force:true}); }
 });

@@ -28,6 +28,7 @@ import urllib.error
 import urllib.request
 from datetime import datetime, timezone
 from pathlib import Path
+from contextlib import contextmanager
 from typing import Dict, List, Optional, Tuple
 
 import process_level
@@ -3354,7 +3355,7 @@ def _handle_spawn_failure(task_id: str, what: str, max_attempts: int = 3):
     for a human so a permanent failure doesn't tight-loop."""
     acts = fetch_task_activities(task_id) or []
     round_start = max((a.get("created_at", "") for a in acts
-                       if a.get("activity_type") == "planning_questions"), default="")
+                       if a.get("activity_type") in ("planning_questions", "checkpoint_resolved")), default="")
     prior_fails = sum(1 for a in acts
                       if "Agent spawn failed" in a.get("message", "")
                       and a.get("created_at", "") >= round_start)
@@ -3367,23 +3368,18 @@ def _handle_spawn_failure(task_id: str, what: str, max_attempts: int = 3):
     except Exception:
         pass
 
-    # Surface it as needing attention (deduped so retries don't spam checkpoints).
-    try:
+    # Transient failures retry without asking a human to inspect the runtime.
+    # Escalate only when this round has exhausted its automatic retry budget.
+    if give_up:
         existing = mc_request("GET", f"/api/tasks/{task_id}/checkpoints") or []
-        has_pending = any(c.get("status") == "pending" for c in existing)
-    except Exception:
-        has_pending = False
-    if not has_pending:
-        try:
+        if not any(c.get("status") == "pending" for c in existing):
             mc_request("POST", f"/api/tasks/{task_id}/checkpoints", {
                 "kind": "approval",
-                "prompt": (f"Couldn't spawn an agent for {what}. Task returned to planning. "
-                           "Check the swarm runtime (spawn-agent.sh in ~/.mission-control/swarm, "
-                           "agent CLI logged in), then re-trigger."),
+                "prompt": (f"Couldn't spawn an agent for {what} after {max_attempts} attempts. "
+                           "Task returned to planning. Check the swarm runtime and agent login, "
+                           "then resolve this checkpoint to retry."),
                 "pause": False,
             })
-        except Exception:
-            pass
 
     # After max_attempts, include the guard phrase so process_planning_tasks stops
     # auto-re-dispatching this round and waits for a human.
@@ -3395,12 +3391,16 @@ def _handle_spawn_failure(task_id: str, what: str, max_attempts: int = 3):
 # === Main Processing ===
 
 def fetch_tasks_by_status(status: str) -> List[dict]:
-    try:
-        tasks: List[dict] = mc_request("GET", f"/api/tasks?status={status}")
-        return tasks if tasks else []
-    except Exception as e:
-        logging.error(f"Failed to fetch {status} tasks: {e}")
-        return []
+    tasks = []
+    offset = 0
+    while True:
+        page = mc_request("GET", f"/api/tasks?status={status}&limit=100&offset={offset}")
+        if not isinstance(page, list):
+            raise RuntimeError(f"Invalid {status} task page")
+        tasks.extend(page)
+        if len(page) < 100:
+            return tasks
+        offset += len(page)
 
 
 def fetch_next_task() -> Optional[dict]:
@@ -3413,7 +3413,7 @@ def fetch_next_task() -> Optional[dict]:
         return task if task else None
     except Exception as e:
         logging.error(f"Failed to claim next inbox task: {e}")
-        return None
+        raise
 
 
 def release_task_lease(task_id: str):
@@ -5724,8 +5724,9 @@ def _tmux_session_alive(session: str) -> bool:
     if not session:
         return False
     try:
-        return subprocess.run(["tmux", "has-session", "-t", session],
-                              capture_output=True, timeout=30).returncode == 0
+        result = subprocess.run(["tmux", "list-panes", "-s", "-t", f"={session}:", "-F", "#{pane_dead}"],
+                                capture_output=True, text=True, timeout=5)
+        return result.returncode == 0 and "0" in result.stdout.splitlines()
     except (OSError, subprocess.TimeoutExpired):
         # tmux missing or wedged is not evidence the agent is dead.
         return True
@@ -5753,17 +5754,26 @@ def reap_dead_agents() -> int:
 
         stamp = entry.get("lastHeartbeatAt") or entry.get("startedAt") or ""
         try:
-            age = (now - datetime.fromisoformat(str(stamp).replace("Z", "+00:00"))).total_seconds()
-        except ValueError:
+            epoch = (float(stamp) / 1000 if isinstance(stamp, (int, float))
+                     else datetime.fromisoformat(str(stamp).replace("Z", "+00:00")).timestamp())
+            age = now.timestamp() - epoch
+        except (ValueError, TypeError):
             age = REAP_AFTER_SECONDS + 1
         if age < REAP_AFTER_SECONDS:
             continue
 
         agent_id = entry.get("id", "")
         try:
-            subprocess.run([sys.executable, str(SWARM_DIR / "swarm-state.py"), "remove",
-                            "--task-id", agent_id, "--reason", "reaped-no-session"],
+            attempt_args = (["--attempt-id", entry["launchAttemptId"]]
+                            if entry.get("launchAttemptId") else [])
+            result = subprocess.run([sys.executable, str(SWARM_DIR / "swarm-state.py"), "update",
+                            *attempt_args, "--task-id", agent_id, "--patch-json", json.dumps({
+                                "status": "failed", "lastError": "agent_session_lost",
+                                "failedAt": int(now.timestamp() * 1000),
+                            }), "--reason", "reaped-no-session"],
                            capture_output=True, text=True, timeout=60)
+            if result.returncode != 0:
+                raise OSError("Registry could not record the interrupted attempt")
         except (OSError, subprocess.TimeoutExpired) as e:
             logging.warning(f"  Could not reap {agent_id}: {e}")
             continue
@@ -6791,171 +6801,172 @@ def process_planning_tasks():
     logging.info(f"Checking {len(planning_tasks)} planning tasks for answers")
 
     for task in planning_tasks:
-        task_id = task["id"]
-        title = task["title"]
+        with cycle_boundary(f"process_planning_tasks/{task['id']}"):
+            task_id = task["id"]
+            title = task["title"]
 
-        answers = check_for_answers(task_id)
-        # A ticket with no questions has no answers, and used to be skipped here
-        # forever. That is not a rare shape: triage passing a ticket as ready posts
-        # none, and a spawn failure returns such a ticket to `planning` — where it
-        # then sat, polled every 60 seconds and skipped every time, while its own
-        # activity log said "will retry on the next cycle". MET-635's demo ticket
-        # wedged exactly that way.
-        #
-        # The gate belongs on "is anything still open", not on "did anyone answer".
-        try:
-            state_probe = mc_request("GET", f"/api/tasks/{task_id}/triage-state")
-        except Exception:
-            state_probe = None
-        has_questions = bool((state_probe or {}).get("questions"))
-        if has_questions and not answers:
-            continue
-
-        # Skip if we already acted on the CURRENT triage round (avoid re-logging every
-        # cycle). Scope this to activities since the latest planning_questions marker —
-        # a re-triage or "Reset triage" starts a fresh round, and a terminal marker from
-        # a previous round must not permanently wedge the task.
-        try:
-            existing_acts = mc_request("GET", f"/api/tasks/{task_id}/activities")
-            # A new round starts at the latest planning_questions OR the latest human
-            # action (resolving a checkpoint) — so a "Manual intervention needed" marker
-            # from a prior attempt stops blocking once the human has acted on it.
-            round_start = ""
-            for a in existing_acts:
-                if a.get("activity_type") in ("planning_questions", "checkpoint_resolved"):
-                    ts = a.get("created_at", "")
-                    if ts > round_start:
-                        round_start = ts
-            already_handled = any(
-                ("spawning agents" in a.get("message", "") or "Manual intervention needed" in a.get("message", ""))
-                and a.get("created_at", "") >= round_start
-                for a in existing_acts
-            )
-            if already_handled:
-                continue
-        except Exception:
-            pass
-
-        # Load structured triage state once; reused for the all-answered gate and repo routing.
-        try:
-            state = mc_request("GET", f"/api/tasks/{task_id}/triage-state")
-        except Exception:
-            state = None
-
-        # Repo/location answers are human routing instructions, not merely prose for
-        # the planner. Resolve them before the confirmation gate so the person sees
-        # the exact repo, base, work branch and app they are about to authorize.
-        state, repos = _reconcile_planning_target(task, state)
-        task = {**task, "triage_state": state or {}}
-
-        # Only proceed once EVERY structured question is answered AND the human has
-        # confirmed. Confirmation lets the user review/edit answers (including the
-        # agent's auto-suggestions) before anything dispatches. The all-answered check
-        # is also what makes a follow-up question park the task here until answered.
-        if state and state.get("questions"):
-            # blocking(), not "unanswered": a deferred question is set aside on
-            # purpose. Counting it here removed it from the page while parking the
-            # task in planning forever, which makes "Decide later" a trap.
-            unanswered = blocking_questions(state["questions"])
-            if unanswered:
-                logging.info(f"  {task_id[:8]} has {len(unanswered)} unanswered question(s) — waiting")
+            answers = check_for_answers(task_id)
+            # A ticket with no questions has no answers, and used to be skipped here
+            # forever. That is not a rare shape: triage passing a ticket as ready posts
+            # none, and a spawn failure returns such a ticket to `planning` — where it
+            # then sat, polled every 60 seconds and skipped every time, while its own
+            # activity log said "will retry on the next cycle". MET-635's demo ticket
+            # wedged exactly that way.
+            #
+            # The gate belongs on "is anything still open", not on "did anyone answer".
+            try:
+                state_probe = mc_request("GET", f"/api/tasks/{task_id}/triage-state")
+            except Exception:
+                state_probe = None
+            has_questions = bool((state_probe or {}).get("questions"))
+            if has_questions and not answers:
                 continue
 
-        # Resolve and persist the repo before asking for final confirmation. The
-        # confirmation is only meaningful when it names the repository, base,
-        # work branch and app that dispatch will actually use.
-        if not repos:
-            manifest = read_manifest()
-            description = task.get("description", "")
-            if answers:
-                description = description + "\n\n" + answers
-            repos = identify_repos(title, description, manifest)
-            logging.info(f"  No repos in triage state — identified {len(repos)} from manifest + answers")
-            if repos:
-                try:
-                    target = _execution_target(task, repos, (state or {}).get("questions") or [])
-                    next_state = {**(state or {}), "triage_repos": repos,
-                                  "execution_target": target}
-                    mc_request("PUT", f"/api/tasks/{task_id}/triage-state", next_state)
-                    state = next_state
-                except Exception as e:
-                    logging.warning(f"  Could not persist identified repos for {task_id[:8]}: {e}")
+            # Skip if we already acted on the CURRENT triage round (avoid re-logging every
+            # cycle). Scope this to activities since the latest planning_questions marker —
+            # a re-triage or "Reset triage" starts a fresh round, and a terminal marker from
+            # a previous round must not permanently wedge the task.
+            try:
+                existing_acts = mc_request("GET", f"/api/tasks/{task_id}/activities")
+                # A new round starts at the latest planning_questions OR the latest human
+                # action (resolving a checkpoint) — so a "Manual intervention needed" marker
+                # from a prior attempt stops blocking once the human has acted on it.
+                round_start = ""
+                for a in existing_acts:
+                    if a.get("activity_type") in ("planning_questions", "checkpoint_resolved"):
+                        ts = a.get("created_at", "")
+                        if ts > round_start:
+                            round_start = ts
+                already_handled = any(
+                    ("spawning agents" in a.get("message", "") or "Manual intervention needed" in a.get("message", ""))
+                    and a.get("created_at", "") >= round_start
+                    for a in existing_acts
+                )
+                if already_handled:
+                    continue
+            except Exception:
+                pass
 
-        if not repos:
-            existing_qs = state.get("questions", []) if state else []
-            already_asked_repo = any(q.get("id") == "repo_selection" for q in existing_qs)
-            if already_asked_repo:
-                logging.warning(f"  Cannot identify target repos for {task_id[:8]} even after repo follow-up")
+            # Load structured triage state once; reused for the all-answered gate and repo routing.
+            try:
+                state = mc_request("GET", f"/api/tasks/{task_id}/triage-state")
+            except Exception:
+                state = None
+
+            # Repo/location answers are human routing instructions, not merely prose for
+            # the planner. Resolve them before the confirmation gate so the person sees
+            # the exact repo, base, work branch and app they are about to authorize.
+            state, repos = _reconcile_planning_target(task, state)
+            task = {**task, "triage_state": state or {}}
+
+            # Only proceed once EVERY structured question is answered AND the human has
+            # confirmed. Confirmation lets the user review/edit answers (including the
+            # agent's auto-suggestions) before anything dispatches. The all-answered check
+            # is also what makes a follow-up question park the task here until answered.
+            if state and state.get("questions"):
+                # blocking(), not "unanswered": a deferred question is set aside on
+                # purpose. Counting it here removed it from the page while parking the
+                # task in planning forever, which makes "Decide later" a trap.
+                unanswered = blocking_questions(state["questions"])
+                if unanswered:
+                    logging.info(f"  {task_id[:8]} has {len(unanswered)} unanswered question(s) — waiting")
+                    continue
+
+            # Resolve and persist the repo before asking for final confirmation. The
+            # confirmation is only meaningful when it names the repository, base,
+            # work branch and app that dispatch will actually use.
+            if not repos:
+                manifest = read_manifest()
+                description = task.get("description", "")
+                if answers:
+                    description = description + "\n\n" + answers
+                repos = identify_repos(title, description, manifest)
+                logging.info(f"  No repos in triage state — identified {len(repos)} from manifest + answers")
+                if repos:
+                    try:
+                        target = _execution_target(task, repos, (state or {}).get("questions") or [])
+                        next_state = {**(state or {}), "triage_repos": repos,
+                                      "execution_target": target}
+                        mc_request("PUT", f"/api/tasks/{task_id}/triage-state", next_state)
+                        state = next_state
+                    except Exception as e:
+                        logging.warning(f"  Could not persist identified repos for {task_id[:8]}: {e}")
+
+            if not repos:
+                existing_qs = state.get("questions", []) if state else []
+                already_asked_repo = any(q.get("id") == "repo_selection" for q in existing_qs)
+                if already_asked_repo:
+                    logging.warning(f"  Cannot identify target repos for {task_id[:8]} even after repo follow-up")
+                    mc_log_activity(task_id, "updated",
+                        "Could not identify target repos even after a repo-selection follow-up. Manual intervention needed.")
+                    continue
+
+                options = _available_repo_options()
+                repo_question = {
+                    "id": "repo_selection",
+                    "category": "repo",
+                    "question": "Which repo(s) should this task target? I couldn't determine this from the task and the answers so far.",
+                    "question_type": "multiple_choice" if options else "text",
+                    "options": (options + ["Other (please specify)"]) if options else None,
+                    "source": "planner",
+                    "why": ("Triage read the ticket and the answers so far and still could not tell "
+                            "which repo this lands in. Planning cannot start without it."),
+                }
+                post_planning_questions(task_id, existing_qs + [repo_question],
+                                        triage_result={"repos": [], "reasoning": "repo-selection follow-up"})
+                mc_log_activity(task_id, "new_triage_question",
+                    "Target repo unresolved — posted a repo-selection follow-up before confirmation.")
+                logging.info(f"  Posted repo-selection follow-up for {task_id[:8]}")
+                continue
+
+            # Confirmation is required whether or not triage had questions. It used to
+            # live inside the branch above, so the one path with no human gate was the
+            # one where triage was most confident — a ticket it waved through went
+            # straight to a branch, a worktree and a tmux session with nobody asked.
+            # That is also the path that records nothing: `post_planning_questions`
+            # only runs on the not-ready branch, so there is no triage_state, no
+            # reasoning, and no trace of the judgement that skipped the review.
+            #
+            # A ticket with no questions therefore needs its state created here, or
+            # there is nowhere for `confirmed` to be written and the gate can never be
+            # satisfied.
+            if not (state or {}).get("confirmed"):
+                # How much process this ticket needs, from what is already known — no
+                # extra model call, and the reasons travel with the verdict so the
+                # call is reviewable rather than another silent judgement.
+                level = _assess_process_level(task, state)
+                if not process_level.requires_confirmation(level["level"], (state or {}).get("process_level", "")):
+                    logging.info(f"  {task_id[:8]} assessed {level['level']} — proceeding without confirmation "
+                                 f"({'; '.join(level['why'])})")
+                    mc_log_activity(task_id, "updated",
+                                    f"Proceeding without confirmation — assessed **{level['level']}**: "
+                                    + "; ".join(level["why"]))
+                else:
+                    if not state or not state.get("questions"):
+                        _ensure_confirmable(task_id, state)
+                    _record_process_level(task_id, state, level)
+                    logging.info(f"  {task_id[:8]} not confirmed ({level['level']}) — waiting for human confirmation")
+                    continue
+
+            logging.info(f"Answers confirmed for: {title} ({task_id[:8]}) — proceeding to spawn agents")
+
+            repos = repos or (state.get("triage_repos", []) if state else [])
+
+            # Once, not once a minute. Planning runs for many minutes and the poll loop
+            # keeps arriving back here, so this re-announced "dispatching" every tick:
+            # all ten of the newest ten activities on MET-640 were this one sentence,
+            # which pushed the ticket's real history out of view and left a failure from
+            # half an hour earlier as the last thing anybody could see. A planning job
+            # already in flight means nothing new is happening on this tick.
+            if _read_planning_job(_planning_job_path(task_id)) is None:
                 mc_log_activity(task_id, "updated",
-                    "Could not identify target repos even after a repo-selection follow-up. Manual intervention needed.")
-                continue
-
-            options = _available_repo_options()
-            repo_question = {
-                "id": "repo_selection",
-                "category": "repo",
-                "question": "Which repo(s) should this task target? I couldn't determine this from the task and the answers so far.",
-                "question_type": "multiple_choice" if options else "text",
-                "options": (options + ["Other (please specify)"]) if options else None,
-                "source": "planner",
-                "why": ("Triage read the ticket and the answers so far and still could not tell "
-                        "which repo this lands in. Planning cannot start without it."),
-            }
-            post_planning_questions(task_id, existing_qs + [repo_question],
-                                    triage_result={"repos": [], "reasoning": "repo-selection follow-up"})
-            mc_log_activity(task_id, "new_triage_question",
-                "Target repo unresolved — posted a repo-selection follow-up before confirmation.")
-            logging.info(f"  Posted repo-selection follow-up for {task_id[:8]}")
-            continue
-
-        # Confirmation is required whether or not triage had questions. It used to
-        # live inside the branch above, so the one path with no human gate was the
-        # one where triage was most confident — a ticket it waved through went
-        # straight to a branch, a worktree and a tmux session with nobody asked.
-        # That is also the path that records nothing: `post_planning_questions`
-        # only runs on the not-ready branch, so there is no triage_state, no
-        # reasoning, and no trace of the judgement that skipped the review.
-        #
-        # A ticket with no questions therefore needs its state created here, or
-        # there is nowhere for `confirmed` to be written and the gate can never be
-        # satisfied.
-        if not (state or {}).get("confirmed"):
-            # How much process this ticket needs, from what is already known — no
-            # extra model call, and the reasons travel with the verdict so the
-            # call is reviewable rather than another silent judgement.
-            level = _assess_process_level(task, state)
-            if not process_level.requires_confirmation(level["level"], (state or {}).get("process_level", "")):
-                logging.info(f"  {task_id[:8]} assessed {level['level']} — proceeding without confirmation "
-                             f"({'; '.join(level['why'])})")
-                mc_log_activity(task_id, "updated",
-                                f"Proceeding without confirmation — assessed **{level['level']}**: "
-                                + "; ".join(level["why"]))
+                                f"All questions answered — dispatching for {len(repos)} repo(s)")
+            task_type = task.get("task_type", "implementation")
+            use_planner = os.environ.get("ENABLE_PLANNER", "1") == "1"
+            if use_planner and task_type == "implementation":
+                _plan_and_dispatch(task, repos)
             else:
-                if not state or not state.get("questions"):
-                    _ensure_confirmable(task_id, state)
-                _record_process_level(task_id, state, level)
-                logging.info(f"  {task_id[:8]} not confirmed ({level['level']}) — waiting for human confirmation")
-                continue
-
-        logging.info(f"Answers confirmed for: {title} ({task_id[:8]}) — proceeding to spawn agents")
-
-        repos = repos or (state.get("triage_repos", []) if state else [])
-
-        # Once, not once a minute. Planning runs for many minutes and the poll loop
-        # keeps arriving back here, so this re-announced "dispatching" every tick:
-        # all ten of the newest ten activities on MET-640 were this one sentence,
-        # which pushed the ticket's real history out of view and left a failure from
-        # half an hour earlier as the last thing anybody could see. A planning job
-        # already in flight means nothing new is happening on this tick.
-        if _read_planning_job(_planning_job_path(task_id)) is None:
-            mc_log_activity(task_id, "updated",
-                            f"All questions answered — dispatching for {len(repos)} repo(s)")
-        task_type = task.get("task_type", "implementation")
-        use_planner = os.environ.get("ENABLE_PLANNER", "1") == "1"
-        if use_planner and task_type == "implementation":
-            _plan_and_dispatch(task, repos)
-        else:
-            _spawn_for_repos(task, repos)
+                _spawn_for_repos(task, repos)
 
 
 def _find_agent_registry_entry(mc_task_id: str) -> Optional[dict]:
@@ -7747,37 +7758,38 @@ def process_review_tasks():
     logging.info(f"Checking {len(review_tasks)} review/testing/held tasks for PR state and feedback")
 
     for task in review_tasks:
-        task_id = task["id"]
-        title = task["title"]
-        task_type = task.get("task_type", "implementation")
+        with cycle_boundary(f"process_review_tasks/{task['id']}"):
+            task_id = task["id"]
+            title = task["title"]
+            task_type = task.get("task_type", "implementation")
 
-        _capture_pr_for_task(task)
-        if _check_pr_status_for_task(task):
-            continue  # PR is terminal -> task done; nothing more to do
+            _capture_pr_for_task(task)
+            if _check_pr_status_for_task(task):
+                continue  # PR is terminal -> task done; nothing more to do
 
-        # Held tickets are scanned only so an externally closed/merged PR can close
-        # them. They must never be relaunched until a human explicitly unholds them.
-        if task.get("status") == "on_hold":
-            continue
+            # Held tickets are scanned only so an externally closed/merged PR can close
+            # them. They must never be relaunched until a human explicitly unholds them.
+            if task.get("status") == "on_hold":
+                continue
 
-        # A checkpoint can be binding even when its creator deliberately left the
-        # ticket in Review (for example, a visual sign-off). Do not let dashboard or
-        # automatic review feedback run through that human boundary.
-        if _has_pending_checkpoint(task_id):
-            logging.info(f"  {task_id[:8]} has a pending human checkpoint — review automation paused")
-            continue
+            # A checkpoint can be binding even when its creator deliberately left the
+            # ticket in Review (for example, a visual sign-off). Do not let dashboard or
+            # automatic review feedback run through that human boundary.
+            if _has_pending_checkpoint(task_id):
+                logging.info(f"  {task_id[:8]} has a pending human checkpoint — review automation paused")
+                continue
 
-        dashboard_feedback = _collect_dashboard_feedback(task_id)
-        if dashboard_feedback:
-            logging.info(f"Dashboard feedback found for: {title} ({task_id[:8]}) — re-launching")
-            if task_type == "investigation":
-                _relaunch_for_investigation_followup(task, dashboard_feedback, source="dashboard")
-            else:
-                _relaunch_for_change_request(task, dashboard_feedback, source="dashboard")
-            continue
+            dashboard_feedback = _collect_dashboard_feedback(task_id)
+            if dashboard_feedback:
+                logging.info(f"Dashboard feedback found for: {title} ({task_id[:8]}) — re-launching")
+                if task_type == "investigation":
+                    _relaunch_for_investigation_followup(task, dashboard_feedback, source="dashboard")
+                else:
+                    _relaunch_for_change_request(task, dashboard_feedback, source="dashboard")
+                continue
 
-        # No manual feedback — run the auto-monitors (merge conflicts / CI / review comments).
-        _auto_review_monitor(task)
+            # No manual feedback — run the auto-monitors (merge conflicts / CI / review comments).
+            _auto_review_monitor(task)
 
 
 def _activity_epoch(act: dict) -> Optional[float]:
@@ -7891,12 +7903,68 @@ def process_human_escalations():
         logging.info(f"  Recorded escalation in Mission Control for {task_id[:8]}")
 
 
+CYCLE_ERRORS: List[str] = []
+
+
+@contextmanager
+def cycle_boundary(name: str):
+    """A bad ticket/stage must not suppress unrelated replies or completions."""
+    try:
+        yield
+    except Exception as e:
+        CYCLE_ERRORS.append(f"{name}: {str(e)[:300]}")
+        logging.error(f"Bridge {name} failed; continuing other work: {e}")
+
+
+def recover_interrupted_dispatches():
+    now = datetime.now(timezone.utc).timestamp()
+    for candidate in fetch_tasks_by_status("assigned") + fetch_tasks_by_status("in_progress"):
+        with cycle_boundary(f"recover/{candidate['id']}"):
+            task = mc_request("GET", f"/api/tasks/{candidate['id']}")
+            if not task or task.get("status") not in ("assigned", "in_progress"):
+                continue
+            entry = _find_agent_registry_entry(task["id"])
+            if task["status"] == "in_progress":
+                if not entry or entry.get("lastError") != "agent_session_lost":
+                    continue
+                if entry.get("status") != "failed" or load_progress(task["id"]):
+                    continue
+            updated = _activity_epoch({"created_at": task.get("updated_at")})
+            if updated is None or now - updated < REAP_AFTER_SECONDS:
+                continue
+            lease = _activity_epoch({"created_at": task.get("processing_expires_at")})
+            if lease is not None and lease > now:
+                continue
+            checkpoints = mc_request("GET", f"/api/tasks/{task['id']}/checkpoints") or []
+            if any(c.get("status") == "pending" for c in checkpoints):
+                continue
+            if task["status"] == "in_progress":
+                if not _tmux_session_alive(entry.get("tmuxSession", "")):
+                    _handle_spawn_failure(task["id"], "resuming interrupted agent")
+                continue
+            if entry and _tmux_session_alive(entry.get("tmuxSession", "")):
+                # Only an acknowledged attempt may advance the board. Legacy
+                # entries have no launch ID but still prove a live managed pane.
+                if entry.get("launchAttemptId") and not entry.get("launchAcknowledgedAt"):
+                    continue
+                status = "in_progress"
+            else:
+                status = "planning"
+            mc_update_task(task["id"], {"status": status})
+            mc_log_activity(task["id"], "dispatch_recovered",
+                            f"Recovered interrupted dispatch to {status}; existing decisions and worktree preserved.")
+
+
 def run_once():
-    task = fetch_next_task()
+    CYCLE_ERRORS.clear()
+    task = None
+    with cycle_boundary("claim"):
+        task = fetch_next_task()
     if task:
         try:
             process_task(task)
         except Exception as e:
+            CYCLE_ERRORS.append(f"task/{task['id']}: {str(e)[:300]}")
             logging.error(f"Bridge failed processing {task['id'][:8]}: {e}", exc_info=True)
             try:
                 mc_update_task(task["id"], {"status": "planning"})
@@ -7910,18 +7978,30 @@ def run_once():
 
     # Before anything else: a dead agent holding a slot makes everything below it
     # look like a capacity problem.
-    reap_dead_agents()
-    process_open_questions()
-    process_answered_followups()
-    process_blocked_gates()
-    process_planning_tasks()
-    process_in_progress_plans()
+    with cycle_boundary("reap_dead_agents"):
+        reap_dead_agents()
+    with cycle_boundary("recover_dispatches"):
+        recover_interrupted_dispatches()
+    with cycle_boundary("process_open_questions"):
+        process_open_questions()
+    with cycle_boundary("process_answered_followups"):
+        process_answered_followups()
+    with cycle_boundary("process_blocked_gates"):
+        process_blocked_gates()
+    with cycle_boundary("process_planning_tasks"):
+        process_planning_tasks()
+    with cycle_boundary("process_in_progress_plans"):
+        process_in_progress_plans()
     # Conversation order matters: acknowledge the human message first, then post
     # the concrete lifecycle update when the review loop starts its agent.
-    process_ticket_chat()
-    process_followup_lifecycle()
-    process_review_tasks()
-    process_human_escalations()
+    with cycle_boundary("process_ticket_chat"):
+        process_ticket_chat()
+    with cycle_boundary("process_followup_lifecycle"):
+        process_followup_lifecycle()
+    with cycle_boundary("process_review_tasks"):
+        process_review_tasks()
+    with cycle_boundary("process_human_escalations"):
+        process_human_escalations()
 
     # Autopilot / Objective mode (fuzzy-goal autonomous runs). Best-effort —
     # never let it break the core bridge loop.
@@ -7929,6 +8009,7 @@ def run_once():
         import autopilot
         autopilot.process_objectives()
     except Exception as e:
+        CYCLE_ERRORS.append(f"objectives: {str(e)[:300]}")
         logging.error(f"autopilot loop error: {e}")
     # External review/ticket integrations should react to Mission Control state externally.
 
@@ -7949,6 +8030,9 @@ def run_daemon(interval: int = 60):
         atomic_write_json(MC_HOME / "bridge" / "health.json", receipt)
         try:
             did_work = run_once()
+            receipt["stage_errors"] = list(CYCLE_ERRORS)
+            if CYCLE_ERRORS:
+                receipt["last_error"] = "; ".join(CYCLE_ERRORS)[:500]
             consecutive_failures = 0
         except Exception as e:
             consecutive_failures += 1

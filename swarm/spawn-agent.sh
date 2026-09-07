@@ -61,7 +61,7 @@ source "$SCRIPT_DIR/mc-api.sh"
 if [ "${MC_LAUNCH_LOCK:-}" != "$TASK_ID" ]; then
   exec python3 "$SCRIPT_DIR/launch_state.py" lock "${BASH_SOURCE[0]}" "$@"
 fi
-if python3 "$SCRIPT_DIR/launch_state.py" find "$TASK_ID" "${MC_TASK_ID:-}" "$REPO_PATH" "$BRANCH_NAME"; then
+if python3 "$SCRIPT_DIR/launch_state.py" prepare "$TASK_ID" "${MC_TASK_ID:-}" "$REPO_PATH" "$BRANCH_NAME"; then
   echo "Adopted existing agent for $TASK_ID"
   exit 0
 else

@@ -13,11 +13,11 @@ class LaunchPending(RuntimeError):
     """A matching pane exists but has not acknowledged this attempt yet."""
 
 
-def find_launch(swarm: Path, task_id: str, mc_task_id: str, repo: str, branch: str):
+def find_launch(swarm: Path, task_id: str, mc_task_id: str, repo: str, branch: str, *, retire_dead=False):
     registry = swarm / "active-tasks.json"
     entries = json.loads(registry.read_text()) if registry.exists() else []
     entry = next((e for e in entries if e.get("id") == task_id), None)
-    if not entry or entry.get("status") not in ("running", "completed_by_agent"):
+    if not entry:
         return None
     matches = (entry.get("mcTaskId", "") == mc_task_id
                and Path(entry.get("repo", "")).resolve() == Path(repo).resolve()
@@ -26,18 +26,26 @@ def find_launch(swarm: Path, task_id: str, mc_task_id: str, repo: str, branch: s
     if not session:
         return None
     result = subprocess.run(
-        ["tmux", "list-panes", "-t", f"={session}", "-F", "#{pane_dead}"],
+        ["tmux", "list-panes", "-s", "-t", f"={session}:", "-F", "#{pane_dead}"],
         capture_output=True, text=True, timeout=5,
     )
     alive = result.returncode == 0 and "0" in result.stdout.splitlines()
     if alive and not matches:
         raise RuntimeError(f"Live session {session} belongs to a different execution target")
+    if alive and entry.get("status") not in ("running", "completed_by_agent"):
+        raise RuntimeError(f"Live session {session} has conflicting registry status")
     if alive and entry.get("launchAttemptId") and not entry.get("launchAcknowledgedAt"):
         raise LaunchPending(f"Waiting for {session} to acknowledge startup")
     if matches and (alive or (entry.get("launchAcknowledgedAt")
                              and entry.get("status") == "completed_by_agent"
                              and not entry.get("completionSyncedAt"))):
         return entry
+    if retire_dead and matches and result.returncode == 0 and result.stdout.splitlines():
+        if all(value == "1" for value in result.stdout.splitlines()):
+            # Called only by the locked spawn path; never discard an unknown or
+            # living session. Retained dead panes otherwise block the next attempt.
+            subprocess.run(["tmux", "kill-session", "-t", f"={session}"],
+                           check=True, capture_output=True, text=True, timeout=5)
     return None
 
 
@@ -75,8 +83,8 @@ def main():
         os.set_inheritable(lock.fileno(), True)
         env = {**os.environ, "MC_LAUNCH_LOCK": task_id, "MC_LAUNCH_LOCK_FD": str(lock.fileno())}
         os.execve("/bin/bash", ["bash", script, task_id, *rest], env)
-    elif command == "find":
-        entry = find_launch(swarm, *args)
+    elif command in ("find", "prepare"):
+        entry = find_launch(swarm, *args, retire_dead=command == "prepare")
         if entry:
             print(json.dumps(entry))
             return 0
