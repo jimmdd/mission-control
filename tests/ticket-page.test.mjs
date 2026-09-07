@@ -154,6 +154,7 @@ test("child processes never become standalone task cards when their parent is hi
     {
       filter: "all",
       showDoneCards: false,
+      showClosedCards: false,
       sort: "newest",
       tasks: [
         { id: "parent", title: "MET-645", status: "done", created_at: "2026-08-20T17:00:00Z" },
@@ -180,6 +181,7 @@ test("visible parent cards retain their child process context regardless of chil
   const state = {
     filter: "review",
     showDoneCards: false,
+    showClosedCards: false,
     sort: "newest",
     tasks: [
       { id: "parent", title: "MET-645", status: "review", created_at: "2026-08-20T17:00:00Z" },
@@ -205,6 +207,36 @@ test("visible parent cards retain their child process context regardless of chil
   assert.equal(cards.length, 1);
   assert.equal(cards[0].id, "parent");
   assert.deepEqual(cards[0].children.map(child => child.id), ["child"]);
+});
+
+test("dashboard treats closed as a separate hidden archive from done", () => {
+  const appJs = readFileSync(new URL("../public/app.js", import.meta.url), "utf8");
+  const start = appJs.indexOf("const getProcessedTasks = () => {");
+  const end = appJs.indexOf("\n        const renderTasks = () => {", start);
+  const state = {
+    filter: "all",
+    showDoneCards: true,
+    showClosedCards: false,
+    sort: "newest",
+    tasks: [
+      { id: "done", title: "Completed", status: "done", created_at: "2026-08-20T17:00:00Z" },
+      { id: "closed", title: "Archived", status: "closed", created_at: "2026-08-20T18:00:00Z" },
+    ],
+  };
+  const getProcessedTasks = new Function(
+    "state",
+    "STATUSES",
+    "PRIORITIES",
+    `${appJs.slice(start, end)}\nreturn getProcessedTasks;`,
+  )(state, ["inbox", "planning", "in_progress", "assigned", "review", "on_hold", "done", "closed", "failed"], {
+    low: 1, normal: 2, high: 3, urgent: 4,
+  });
+
+  assert.deepEqual(getProcessedTasks().map(task => task.id), ["done"]);
+  state.showDoneCards = false;
+  state.showClosedCards = true;
+  assert.deepEqual(getProcessedTasks().map(task => task.id), ["closed"]);
+  assert.match(appJs, /\{ id: 'closed', label: 'CLOSED' \}/);
 });
 
 // The plan graph is built client-side, so serving the page proves nothing about it.
@@ -1140,6 +1172,89 @@ test("the pause switch parks active work without offering to pause an already he
   assert.doesNotMatch(fn, /method:\s*"DELETE"/);
 });
 
+test("an open ticket can be closed from its detail page without deleting it", () => {
+  const { renderTicket } = threadHelpers();
+  const task = { id: "t1", title: "T", status: "review", updated_at: "2026-08-20T20:00:00Z" };
+  assert.match(renderTicket(task, { questions: SETTLED }, [], { plan: PLAN }),
+    /data-close-task>Close ticket<\/button>/);
+  assert.match(renderTicket({ ...task, status: "on_hold" }, { questions: SETTLED }, [], { plan: PLAN }),
+    /data-close-task>Close ticket<\/button>/,
+    "a held ticket can still be deliberately closed");
+  assert.match(renderTicket({ ...task, status: "done" }, { questions: SETTLED }, [], { plan: PLAN }),
+    /data-close-task>Close ticket<\/button>/,
+    "completed work can still be archived as closed");
+  assert.doesNotMatch(renderTicket({ ...task, status: "closed" }, { questions: SETTLED }, [], { plan: PLAN }),
+    /data-close-task/,
+    "a closed ticket does not offer the action again");
+
+  const html = readFileSync(new URL("../public/ticket.html", import.meta.url), "utf8");
+  assert.match(html, /\[data-close-task\][\s\S]*closeTask\(ev\.currentTarget\)/,
+    "the rendered button is wired to its action");
+  const start = html.indexOf("async function closeTask(");
+  const fn = html.slice(start, html.indexOf("async function resetTaskTriage(", start));
+  assert.match(fn, /await confirmSafety\(/);
+  assert.match(fn, /\/close`,\s*\{/);
+  assert.match(fn, /method:\s*"POST"/);
+  assert.doesNotMatch(fn, /method:\s*"DELETE"/,
+    "closing uses its own terminal transition rather than deleting the record");
+});
+
+test("closing a Linear-linked ticket confirms Linear before recording closed in MC", async () => {
+  const linearCalls = [];
+  const runtimeCalls = [];
+  await withHandler(async (handler, db) => {
+    const task = db.createTask({
+      title: "Close linked ticket",
+      status: "review",
+      source: "linear",
+      external_id: "linear-uuid",
+      external_url: "https://linear.app/acme/issue/MET-700/close-linked-ticket",
+    });
+    const res = mockRes();
+    await handler(mockReq({
+      url: `/api/tasks/${task.id}/close`,
+      method: "POST",
+      body: { reason: "No longer needed" },
+    }), res);
+
+    assert.equal(res.statusCode, 200);
+    assert.equal(db.getTask(task.id).status, "closed");
+    assert.deepEqual(linearCalls, ["linear-uuid"]);
+    assert.deepEqual(runtimeCalls, [{ taskId: task.id, transition: "close" }]);
+    const body = JSON.parse(res.body);
+    assert.equal(body.linear.identifier, "MET-700");
+    assert.match(db.listActivities(task.id)[0].message, /Linear MET-700 is Closed/);
+  }, {
+    closeLinearIssue: async issueId => {
+      linearCalls.push(issueId);
+      return { issueId, identifier: "MET-700", stateName: "Closed", alreadyClosed: false };
+    },
+    transitionTaskRuntime: async (taskId, transition) => {
+      runtimeCalls.push({ taskId, transition });
+      return { matched: 1, stopped: 1 };
+    },
+  });
+});
+
+test("a failed Linear close leaves the Mission Control ticket unchanged", async () => {
+  await withHandler(async (handler, db) => {
+    const task = db.createTask({
+      title: "Linear must confirm",
+      status: "review",
+      source: "linear",
+      external_id: "linear-uuid",
+    });
+    const res = mockRes();
+    await handler(mockReq({ url: `/api/tasks/${task.id}/close`, method: "POST", body: {} }), res);
+
+    assert.equal(res.statusCode, 502);
+    assert.equal(db.getTask(task.id).status, "review");
+    assert.match(JSON.parse(res.body).error, /Could not close linked Linear issue/);
+  }, {
+    closeLinearIssue: async () => { throw new Error("Linear unavailable"); },
+  });
+});
+
 test("pause and triage reset share an explicit in-page safety panel", () => {
   const { renderTicket } = threadHelpers();
   const task = { id: "t1", title: "T", status: "in_progress", updated_at: "2026-08-20T20:00:00Z" };
@@ -1218,9 +1333,10 @@ test("ticket rail keeps the operational group order", () => {
     { id: "holding", status: "on_hold", title: "Holding", external_id: "MET-3" },
     { id: "review", status: "review", title: "Review", external_id: "MET-2" },
     { id: "done", status: "done", title: "Done", external_id: "MET-4" },
+    { id: "closed", status: "closed", title: "Closed", external_id: "MET-5" },
   ];
   const out = renderRail(tasks, tasks[0], null, {});
-  const headings = [">TRIAGE<", ">BUILDING<", ">REVIEW<", ">HOLDING<", ">DONE<"];
+  const headings = [">TRIAGE<", ">BUILDING<", ">REVIEW<", ">HOLDING<", ">DONE<", ">CLOSED<"];
   for (let i = 1; i < headings.length; i += 1) {
     assert.ok(out.indexOf(headings[i - 1]) < out.indexOf(headings[i]),
       `${headings[i - 1]} must stay before ${headings[i]}`);
@@ -1391,7 +1507,7 @@ test("the dashboard honours the filter the nav links to", () => {
   // to be taken on trust.
   const appJs = readFileSync(new URL("../public/app.js", import.meta.url), "utf8");
   assert.match(appJs, /location\.hash\.slice\(1\)/);
-  assert.match(appJs, /\['planning', 'in_progress', 'review', 'on_hold', 'done'\]/);
+  assert.match(appJs, /\['planning', 'in_progress', 'review', 'on_hold', 'done', 'closed'\]/);
 });
 
 // ─────────── the confirm gate (design 3d, on the thread) ───────────
@@ -1583,6 +1699,7 @@ test("every ticket appears in the rail, whatever its status", () => {
     { id: "b", status: "on_hold", title: "Parked one", external_id: "T-2" },
     { id: "c", status: "testing", title: "Being tested", external_id: "T-3" },
     { id: "d", status: "in_progress", title: "Building", external_id: "T-4" },
+    { id: "e", status: "closed", title: "Closed", external_id: "T-5" },
   ];
   const out = renderRail(tasks, tasks[0], null, {});
   for (const t of tasks) {
@@ -1602,11 +1719,12 @@ test("a parked ticket does not borrow the colour that means an agent has it", ()
   assert.doesNotMatch(out, /class="rt on build"/, "on_hold is not building");
 });
 
-test("done tickets are collapsed by default and reveal through their group header", () => {
+test("done and closed tickets are separate collapsed categories", () => {
   const { renderRail } = threadHelpers();
   const tasks = [
     { id: "active", status: "in_progress", title: "Building", external_id: "T-1" },
     { id: "done", status: "done", title: "Finished", external_id: "T-2" },
+    { id: "closed", status: "closed", title: "Archived", external_id: "T-3" },
   ];
   const out = renderRail(tasks, tasks[0], null, {});
 
@@ -1616,6 +1734,9 @@ test("done tickets are collapsed by default and reveal through their group heade
     "Done uses a closed native disclosure, so clicking its summary reveals the cards");
   assert.match(out, /<summary class="rgroup tone-done"[^>]*><span>DONE<\/span><b>1<\/b><\/summary>/);
   assert.match(out, /Finished/, "collapsed tickets remain available inside the disclosure");
+  assert.match(out, /<details class="rsection tone-closed" >/);
+  assert.match(out, /<summary class="rgroup tone-closed"[^>]*><span>CLOSED<\/span><b>1<\/b><\/summary>/);
+  assert.match(out, /Archived/);
 });
 
 test("every ticket is a thread, including one triage had no questions about", () => {

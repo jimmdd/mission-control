@@ -503,8 +503,19 @@ log_health_check() {
   local last_lines=""
   local pane_activity="unknown"
   if tmux has-session -t "$session" 2>/dev/null; then
-    last_lines=$(tmux capture-pane -t "$session" -p -l 5 2>/dev/null | tr '\n' '|' | tail -c 300)
-    if [ -n "$last_lines" ] && [ "$last_lines" != "|||||" ]; then
+    # `-S -5`, the idiom src/cli.ts:181 already uses — NOT `-l 5`. capture-pane has
+    # no -l flag ("unknown flag -l", rc 1), so this probe failed on every call since
+    # it was written; its stderr went to /dev/null and last_lines was always empty.
+    # Every agent therefore read `pane=idle` forever and `lastOutput` was always "",
+    # including agents writing hundreds of KB a minute. Those are the two signals the
+    # stall warning below is built on, so it could not tell a busy agent from a hung
+    # one — it reported MET-680 as idle while codex was genuinely wedged, and again
+    # while a healthy agent was mid-diff. Blank lines are dropped so a pane holding
+    # only trailing whitespace still reads idle, and grep finding nothing is not a
+    # failure here.
+    last_lines=$( (tmux capture-pane -t "$session" -p -S -5 2>/dev/null || true) \
+      | grep -v '^[[:space:]]*$' | tr '\n' '|' | tail -c 300 || true)
+    if [ -n "$last_lines" ]; then
       pane_activity="active"
     else
       pane_activity="idle"

@@ -70,6 +70,7 @@ const ALL_STATUSES = new Set([
   "review",
   "on_hold",
   "done",
+  "closed",
 ]);
 
 function asArray(value: unknown): Record<string, unknown>[] {
@@ -272,14 +273,14 @@ async function cmdSearch(ctx: CommandContext, rest: string): Promise<string> {
     const haystack = `${title} ${str(task.description)}`.toLowerCase();
     if (!words.every((w) => haystack.includes(w))) continue;
     let score = words.every((w) => title.includes(w)) ? 2 : 0;
-    if (str(task.status) !== "done") score += 1;
+    if (!["done", "closed"].includes(str(task.status))) score += 1;
     scored.push({ task, score });
   }
   if (scored.length === 0) return `Nothing matches "${query}".`;
 
   scored.sort((a, b) => b.score - a.score);
   const hits = scored.map((s) => s.task);
-  const open = hits.filter((t) => str(t.status) !== "done").length;
+  const open = hits.filter((t) => !["done", "closed"].includes(str(t.status))).length;
   return [
     `${hits.length} match "${query}" (${open} open):`,
     listLines(hits, 15),
@@ -515,6 +516,7 @@ async function cmdHold(ctx: CommandContext, rest: string): Promise<string> {
   const label = taskLabel(task);
   if (task.status === "on_hold") return `${label} is already on hold.`;
   if (task.status === "done") return `${label} is done; completed tickets cannot be put on hold.`;
+  if (task.status === "closed") return `${label} is closed; closed tickets cannot be put on hold.`;
   await ctx.api.patch(`/tasks/${str(task.id)}`, { status: "on_hold" });
   return `Put ${label} on hold. Its plan, history, branch, and worktree are preserved.`;
 }
@@ -524,6 +526,7 @@ async function cmdUnhold(ctx: CommandContext, rest: string): Promise<string> {
   if (!task) return error ?? "Not found.";
   const label = taskLabel(task);
   if (task.status === "done") return `${label} is done; completed tickets cannot be resumed.`;
+  if (task.status === "closed") return `${label} is closed; closed tickets cannot be resumed.`;
   if (task.status !== "on_hold") return `${label} is ${str(task.status) || "not on hold"}; only held tickets can be resumed.`;
   await ctx.api.patch(`/tasks/${str(task.id)}`, { status: "inbox" });
   return `Resumed ${label} — moved it back to the inbox for dispatch.`;

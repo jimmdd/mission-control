@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Safely release MC-managed worktrees whose linked ticket is done.
+"""Safely release MC-managed worktrees whose linked ticket is done or closed.
 
 The ticket status is authoritative. A completed ticket first transitions its
 registry entry to a terminal state so the monitor cannot respawn it. The local
@@ -224,9 +224,9 @@ def cleanup_completed_worktrees(
         if not task_id or not mc_task_id:
             continue
         ticket_status = status_lookup(mc_url, mc_task_id)
-        if ticket_status not in {"done", "deleted"}:
+        if ticket_status not in {"done", "closed", "deleted"}:
             continue
-        cleanup_activity_poster = activity_poster if ticket_status == "done" else (lambda *_: None)
+        cleanup_activity_poster = activity_poster if ticket_status in {"done", "closed"} else (lambda *_: None)
 
         repo_raw = str(entry.get("repo") or "")
         worktree_raw = str(entry.get("worktree") or "")
@@ -255,7 +255,7 @@ def cleanup_completed_worktrees(
 
         # Mark terminal before touching tmux/filesystem. If this write fails, fail
         # closed: a still-running registry entry could otherwise be respawned.
-        terminal_status = "deleted" if ticket_status == "deleted" else "done"
+        terminal_status = ticket_status
         if entry.get("status") != terminal_status:
             if not update_state(
                 state_tool,
@@ -318,17 +318,17 @@ def cleanup_completed_worktrees(
         if not remove_state(state_tool, registry, task_id):
             results.append({"task": task_id, "result": "blocked", "reason": "state_remove_failed"})
             continue
-        if ticket_status == "done":
+        if ticket_status in {"done", "closed"}:
             activity_poster(
                 mc_url,
                 mc_task_id,
                 "updated",
-                f"Released completed task worktree for {task_id}; local branch {entry.get('branch') or '(unknown)'} was retained.",
+                f"Released {ticket_status} task worktree for {task_id}; local branch {entry.get('branch') or '(unknown)'} was retained.",
             )
         results.append({
             "task": task_id,
             "result": "removed",
-            "reason": "ticket_deleted" if ticket_status == "deleted" else "ticket_done",
+            "reason": f"ticket_{ticket_status}",
         })
     return results
 

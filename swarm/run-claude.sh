@@ -19,6 +19,7 @@ done
 SCRIPT_DIR="$(cd "$(dirname "$SCRIPT_SRC")" && pwd)"
 RATE_LIMIT_POLICY="$SCRIPT_DIR/rate_limit_policy.py"
 source "$SCRIPT_DIR/mc-api.sh"
+source "$SCRIPT_DIR/agent-watchdog.sh"
 
 CFG_MODEL=${AGENT_MODEL:-$(jq -r '.claude.model // "claude-opus-4-6"' "$CONFIG" 2>/dev/null || echo "claude-opus-4-6")}
 CFG_FALLBACK=${AGENT_FALLBACK_MODEL:-$(jq -r '.claude.fallbackModel // ""' "$CONFIG" 2>/dev/null || echo "")}
@@ -27,6 +28,7 @@ MODEL=${2:-$CFG_MODEL}
 MAX_RETRIES=${MAX_AGENT_RETRIES:-3}
 PROMPT_FILE="${PROMPT_OVERRIDE:-$SWARM_DIR/prompts/${TASK_NAME}.md}"
 LOG="$SWARM_DIR/logs/agent-${TASK_NAME}.log"
+AGENT_PID_FILE="$SWARM_DIR/logs/.agent-${TASK_NAME}.pid"
 MC_URL="${MISSION_CONTROL_URL:-http://localhost:18900}"
 HEARTBEAT_INTERVAL_SECONDS="${HEARTBEAT_INTERVAL_SECONDS:-90}"
 AGENT_LIMIT_INITIAL_BACKOFF_SECONDS="${AGENT_LIMIT_INITIAL_BACKOFF_SECONDS:-300}"
@@ -105,8 +107,14 @@ run_claude() {
     cmd+=(--agents "$AGENTS_DEF")
   fi
 
-  { cat "$PROMPT_FILE"; echo "$AUTONOMY_SUFFIX"; } | "${cmd[@]}" 2>&1 | tee -a "$LOG"
-  return ${PIPESTATUS[0]}
+  # Index 1, not 0: this is a three-stage pipeline and stage 0 is the prompt feeder,
+  # which succeeds whatever claude does. Reading [0] reported every crashed, killed
+  # or non-zero claude run as exit 0, so the attempt was marked
+  # `completed_by_agent` and the ticket moved to review on an empty worktree.
+  { cat "$PROMPT_FILE"; echo "$AUTONOMY_SUFFIX"; } \
+    | run_with_pidfile "$AGENT_PID_FILE" "${cmd[@]}" 2>&1 \
+    | tee -a "$LOG"
+  return ${PIPESTATUS[1]}
 }
 
 start_heartbeat() {
@@ -116,6 +124,11 @@ start_heartbeat() {
   fi
 
   (
+    # A heartbeat that dies looks exactly like a healthy agent to check-agents.sh,
+    # which reads heartbeat freshness to decide whether a task is stuck. MET-680's
+    # heartbeat never advanced past the spawn timestamp, so the staleness check that
+    # should have flagged it was fed a value that never moved.
+    set +e
     while true; do
       now_ms=$(($(date +%s) * 1000))
       update_registry_json "{\"lastHeartbeatAt\": $now_ms, \"heartbeatIntervalSec\": $HEARTBEAT_INTERVAL_SECONDS}"
@@ -138,10 +151,11 @@ stop_heartbeat() {
   fi
 }
 
-trap 'stop_heartbeat' EXIT INT TERM
+trap 'stop_heartbeat; stop_stall_watchdog; rm -f "$AGENT_PID_FILE" "${AGENT_PID_FILE}.stalled"' EXIT INT TERM
 
 attempt=0
 exit_code=1
+hung_attempts=0
 
 while [ "$attempt" -lt "$MAX_RETRIES" ]; do
   attempt=$((attempt + 1))
@@ -156,10 +170,19 @@ while [ "$attempt" -lt "$MAX_RETRIES" ]; do
 
   set +e
   start_heartbeat
+  start_stall_watchdog "$LOG" "$AGENT_PID_FILE" "claude -p"
   run_claude
   exit_code=$?
+  stop_stall_watchdog
   stop_heartbeat
   set -e
+
+  if watchdog_killed_attempt; then
+    echo "  Killed by the watchdog — the agent never made progress in its log." | tee -a "$LOG"
+    update_registry "lastError" '"agent_hang"'
+    hung_attempts=$((hung_attempts + 1))
+    if [ "$exit_code" -eq 0 ]; then exit_code=75; fi
+  fi
 
   # `claude -p` exits 0 when it stops because it ran out of turns, printing
   # "Error: Reached max turns (200)" and nothing else. Reading that as success is how
@@ -292,6 +315,15 @@ while [ "$attempt" -lt "$MAX_RETRIES" ]; do
 done
 
 echo "=== Claude Agent exhausted retries: $TASK_NAME | $(date) ===" | tee -a "$LOG"
+
+# Every attempt hung is not a flaky run: it is a CLI that cannot start on this
+# machine, and a fourth attempt on the same binary cannot help. The sibling profile
+# runs a different CLI entirely, so hand the task over rather than parking it for a
+# human. agent_failover exec's on success; reaching the next line means it declined.
+if [ "$hung_attempts" -gt 0 ] && [ "$hung_attempts" -eq "$attempt" ]; then
+  agent_failover "${AGENT_PROFILE:-claude}" "$TASK_NAME" "$CONFIG" "$SWARM_DIR" "$LOG" || true
+fi
+
 update_registry "status" '"failed"'
 update_registry "failedAt" "$(date +%s)000"
 exit "$exit_code"

@@ -6,10 +6,11 @@ Polls Linear for issues with the configured label and creates
 corresponding tasks in Mission Control. Runs on cron (every 5 min).
 
 Deduplication: Uses external_id on MC tasks to avoid duplicates.
-Sync-back: Updates Linear issue status when MC task reaches 'done'.
+Sync-back: Updates Linear issue status when MC task reaches 'done' or 'closed'.
 """
 
 import argparse
+import fcntl
 import json
 import logging
 import os
@@ -37,6 +38,7 @@ if str(SWARM_SCRIPTS_DIR) not in sys.path:
 from context_fabrica_config import context_fabrica_dsn, make_context_fabrica_adapter
 import embeddings  # pluggable embedder (FastEmbed default; no API key)
 from mc_api import headers_for
+from runtime_health import atomic_write_json
 
 DEFAULT_LINEAR_CONFIG = {
     "label": "your-label",
@@ -174,8 +176,7 @@ def load_state() -> dict:
 
 
 def save_state(state: dict):
-    STATE_FILE.parent.mkdir(parents=True, exist_ok=True)
-    STATE_FILE.write_text(json.dumps(state, indent=2))
+    atomic_write_json(STATE_FILE, state)
 
 
 def linear_query(query: str, variables: Optional[dict] = None) -> dict:
@@ -352,18 +353,20 @@ def fetch_labeled_issues() -> List[dict]:
 
 def get_existing_mc_tasks() -> Dict[str, dict]:
     """Get all MC tasks that have a Linear external_id."""
-    try:
-        tasks = mc_request("GET", "/api/tasks")
-        result = {}
+    result = {}
+    offset = 0
+    while True:
+        tasks = mc_request("GET", f"/api/tasks?limit=100&offset={offset}")
+        if not isinstance(tasks, list):
+            raise RuntimeError("MC task listing did not return a page of tasks")
         for t in tasks:
             ext_id = t.get("external_id") or t.get("linear_issue_id")
             if ext_id:
                 t["external_id"] = ext_id
                 result[ext_id] = t
-        return result
-    except Exception as e:
-        logging.warning(f"Failed to fetch MC tasks: {e}")
-        return {}
+        if len(tasks) < 100:
+            return result
+        offset += len(tasks)
 
 
 _workspace_id_cache: Optional[str] = None
@@ -495,8 +498,70 @@ def _complete_linear_issue(issue: dict, state: dict) -> bool:
         return False
 
 
+def _canceled_state_id(team_key: str) -> Optional[str]:
+    """Resolve the team's canceled workflow state, preferring Closed/Canceled."""
+    if team_key in _CANCELED_STATE_CACHE:
+        return _CANCELED_STATE_CACHE[team_key]
+    query = """
+    query($key: String!) {
+      workflowStates(filter: { team: { key: { eq: $key } }, type: { eq: "canceled" } }) {
+        nodes { id name type }
+      }
+    }
+    """
+    state_id = None
+    try:
+        nodes = linear_query(query, {"key": team_key})["workflowStates"]["nodes"]
+        preferred_names = ("closed", "canceled", "cancelled")
+        preferred = next(
+            (n for name in preferred_names for n in nodes
+             if n.get("name", "").strip().lower() == name),
+            None,
+        )
+        chosen = preferred or (nodes[0] if nodes else None)
+        state_id = chosen["id"] if chosen else None
+    except Exception as e:
+        logging.warning(f"  Failed to resolve canceled state for team {team_key}: {e}")
+    _CANCELED_STATE_CACHE[team_key] = state_id
+    return state_id
+
+
+def _close_linear_issue(issue: dict, state: dict) -> bool:
+    """Fallback reconciliation: move an MC-closed issue to Linear Canceled once."""
+    issue_id = issue["id"]
+    synced = state.setdefault("closure_state_synced", {})
+    state_type = (issue.get("state") or {}).get("type", "").lower()
+    if synced.get(issue_id) or state_type in ("canceled", "cancelled"):
+        synced[issue_id] = True
+        return True
+    team_key = (issue.get("team") or {}).get("key")
+    if not team_key:
+        logging.warning(f"  Cannot close Linear {issue_id[:8]} — issue has no team key")
+        return False
+    state_id = _canceled_state_id(team_key)
+    if not state_id:
+        return False
+    mutation = """
+    mutation CloseIssue($id: String!, $stateId: String!) {
+      issueUpdate(id: $id, input: { stateId: $stateId }) { success }
+    }
+    """
+    try:
+        result = linear_query(mutation, {"id": issue_id, "stateId": state_id})
+        if not result:
+            logging.info(f"  Linear {issue.get('identifier', issue_id[:8])} would close, "
+                         "but write-back is off (LINEAR_INTERACTION=intake)")
+            return False
+        synced[issue_id] = True
+        logging.info(f"  Moved Linear {issue.get('identifier', issue_id[:8])} to Canceled")
+        return True
+    except Exception as e:
+        logging.warning(f"  Failed to close Linear {issue.get('identifier', issue_id[:8])}: {e}")
+        return False
+
+
 def sync_status_back(mc_task: dict, issue: dict, state: dict):
-    """When an MC task is done, complete the Linear issue and comment once.
+    """Reflect MC's distinct done/closed terminal states back to Linear.
 
     This posted on every cycle for as long as the task stayed done, with nothing
     recording that it had already spoken. At a five-minute cadence that is 288
@@ -509,7 +574,11 @@ def sync_status_back(mc_task: dict, issue: dict, state: dict):
     the issue's existing comments are read once and an existing completion note counts
     as already posted, so cleaning up the backlog cannot start it over.
     """
-    if mc_task.get("status") != "done":
+    mc_status = mc_task.get("status")
+    if mc_status == "closed":
+        _close_linear_issue(issue, state)
+        return
+    if mc_status != "done":
         return
 
     issue_id = issue["id"]
@@ -563,6 +632,7 @@ REVIEW_MC_STATUSES = {"review"}
 # (team key, state name) -> Linear workflow-state id (resolved lazily, cached per run).
 _STARTED_STATE_CACHE: Dict[tuple, Optional[str]] = {}
 _COMPLETED_STATE_CACHE: Dict[str, Optional[str]] = {}
+_CANCELED_STATE_CACHE: Dict[str, Optional[str]] = {}
 
 
 def _get_started_state_id(team_key: str, prefer_name: str) -> Optional[str]:
@@ -623,7 +693,7 @@ def move_issue_to_state(issue: dict, prefer_name: str):
 
 def is_terminal_state(issue: dict) -> bool:
     state_type = issue.get("state", {}).get("type", "")
-    return state_type in ("completed", "cancelled")
+    return state_type in ("completed", "canceled", "cancelled")
 
 
 def _mc_initiated_hold(mc_task_id: str) -> bool:
@@ -1203,9 +1273,10 @@ Keep the answer under 500 words. Use markdown formatting."""
 
 def fetch_issue_comments(issue_id: str) -> List[dict]:
     query = """
-    query IssueComments($id: String!) {
+    query IssueComments($id: String!, $after: String) {
       issue(id: $id) {
-        comments(first: 50) {
+        comments(first: 50, after: $after) {
+          pageInfo { hasNextPage endCursor }
           nodes {
             id
             body
@@ -1218,12 +1289,23 @@ def fetch_issue_comments(issue_id: str) -> List[dict]:
       }
     }
     """
-    try:
-        data = linear_query(query, {"id": issue_id})
-        return data.get("issue", {}).get("comments", {}).get("nodes", [])
-    except Exception as e:
-        logging.warning(f"  Failed to fetch comments for {issue_id[:8]}: {e}")
-        return []
+    comments = {}
+    cursor = None
+    seen_cursors = set()
+    while True:
+        data = linear_query(query, {"id": issue_id, "after": cursor})
+        connection = (data.get("issue") or {}).get("comments")
+        if not isinstance(connection, dict):
+            raise RuntimeError(f"No comment connection for {issue_id}")
+        for comment in connection.get("nodes", []):
+            comments[comment["id"]] = comment
+        page = connection.get("pageInfo") or {}
+        if not page.get("hasNextPage"):
+            return list(comments.values())
+        cursor = page.get("endCursor")
+        if not cursor or cursor in seen_cursors:
+            raise RuntimeError("Linear comments returned a repeated or missing cursor")
+        seen_cursors.add(cursor)
 
 
 def _fetch_triage_state(mc_task_id: str) -> Optional[dict]:
@@ -1802,12 +1884,36 @@ def sync():
     setup_logging()
     load_env()
     _apply_linear_env_overrides()
-    logging.info("=== Linear sync started ===")
-
-    if not verify_workspace():
-        sys.exit(1)
-
     state = load_state()
+    state["last_attempt"] = datetime.now(timezone.utc).isoformat()
+    save_state(state)
+    try:
+        if not verify_workspace():
+            raise RuntimeError("Linear workspace verification failed")
+        return _sync(state)
+    except Exception as e:
+        state["last_error"] = str(e)[:500]
+        raise
+    finally:
+        state["last_finished"] = datetime.now(timezone.utc).isoformat()
+        save_state(state)
+
+
+def run_sync():
+    # Both launchd and the optional internal scheduler can invoke this script.
+    # The lock covers reads, writes, and checkpoints across the whole run.
+    STATE_FILE.parent.mkdir(parents=True, exist_ok=True)
+    with STATE_FILE.with_suffix(".lock").open("a+") as lock:
+        try:
+            fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError:
+            return True
+        return sync()
+
+
+def _sync(state):
+    logging.info("=== Linear sync started ===")
+    failures = state.setdefault("failed_issues", {})
     _check_research_results(state)
 
     issues = fetch_labeled_issues()
@@ -1823,122 +1929,142 @@ def sync():
     for issue in issues:
         issue_id = issue["id"]
 
-        dup_of = duplicate_of(issue)
-        if dup_of:
-            if issue_id in existing_tasks:
-                mc_task = existing_tasks[issue_id]
-                if mc_task.get("status") != "done":
-                    mc_task_id = mc_task["id"]
-                    logging.info(f"  Linear {issue['identifier']} is a duplicate of {dup_of} — marking MC task {mc_task_id[:8]} done")
-                    mc_request("PATCH", f"/api/tasks/{mc_task_id}", {"status": "done"})
-                    mc_request("POST", f"/api/tasks/{mc_task_id}/activities", {
-                        "activity_type": "status_changed",
-                        "message": f"Linear ticket marked duplicate of {dup_of} — syncing to done",
-                    })
-                    for child in [t for t in existing_tasks.values() if t.get("parent_task_id") == mc_task_id and t.get("status") != "done"]:
-                        mc_request("PATCH", f"/api/tasks/{child['id']}", {"status": "done"})
-                        logging.info(f"    Child {child['id'][:8]} also marked done")
-            skipped += 1
-            continue
-
-        if is_terminal_state(issue):
-            if issue_id in existing_tasks:
-                mc_task = existing_tasks[issue_id]
-                if mc_task.get("status") != "done":
-                    mc_task_id = mc_task["id"]
-                    state_name = issue.get("state", {}).get("name", "Done")
-                    logging.info(f"  Linear {issue['identifier']} is {state_name} — marking MC task {mc_task_id[:8]} done")
-                    mc_request("PATCH", f"/api/tasks/{mc_task_id}", {"status": "done"})
-                    mc_request("POST", f"/api/tasks/{mc_task_id}/activities", {
-                        "activity_type": "status_changed",
-                        "message": f"Linear ticket marked {state_name} — syncing to done",
-                    })
-                    for child in [t for t in existing_tasks.values() if t.get("parent_task_id") == mc_task_id and t.get("status") != "done"]:
-                        mc_request("PATCH", f"/api/tasks/{child['id']}", {"status": "done"})
-                        logging.info(f"    Child {child['id'][:8]} also marked done")
-            skipped += 1
-            continue
-
-        if issue_id in existing_tasks:
-            mc_task = existing_tasks[issue_id]
-
-            # Backlog handling. By default MC does NOT treat Backlog as a hold — a new
-            # ticket (which Linear creates in Backlog) should still triage and, once done,
-            # auto-dispatch to in_progress (MC then writes "In Progress" back to Linear).
-            # Set LINEAR_HOLD_ON_BACKLOG=1 to make Backlog park tasks instead.
-            hold_on_backlog = os.environ.get("LINEAR_HOLD_ON_BACKLOG", "0") == "1"
-
-            if hold_on_backlog and is_on_hold_state(issue) and mc_task.get("status") != "on_hold":
-                mc_priority = mc_task.get("priority", "normal")
-                if mc_priority in ("urgent", "high"):
-                    logging.info(f"  Linear {issue['identifier']} is Backlog but MC priority is {mc_priority} — skipping on_hold")
-                else:
-                    mc_task_id = mc_task["id"]
-                    state_name = issue.get("state", {}).get("name", "On Hold")
-                    logging.info(f"  Linear {issue['identifier']} is {state_name} — setting MC task {mc_task_id[:8]} on_hold")
-                    try:
-                        mc_request("PATCH", f"/api/tasks/{mc_task_id}", {"status": "on_hold"})
+        previous_failure = failures.pop(issue_id, {})
+        try:
+            dup_of = duplicate_of(issue)
+            if dup_of:
+                if issue_id in existing_tasks:
+                    mc_task = existing_tasks[issue_id]
+                    if mc_task.get("status") != "closed":
+                        mc_task_id = mc_task["id"]
+                        logging.info(f"  Linear {issue['identifier']} is a duplicate of {dup_of} — closing MC task {mc_task_id[:8]}")
+                        mc_request("PATCH", f"/api/tasks/{mc_task_id}", {"status": "closed"})
                         mc_request("POST", f"/api/tasks/{mc_task_id}/activities", {
                             "activity_type": "status_changed",
-                            "message": f"Linear ticket moved to {state_name} — setting on hold",
+                            "message": f"Linear ticket marked duplicate of {dup_of} — syncing to closed",
                         })
-                        for child in [t for t in existing_tasks.values() if t.get("parent_task_id") == mc_task_id and t.get("status") not in ("done", "on_hold")]:
-                            mc_request("PATCH", f"/api/tasks/{child['id']}", {"status": "on_hold"})
-                            logging.info(f"    Child {child['id'][:8]} also set on_hold")
-                    except Exception as e:
-                        logging.warning(f"  Failed to set on_hold for {mc_task_id[:8]}: {e}")
-
-            elif mc_task.get("status") == "on_hold" and not _mc_initiated_hold(mc_task["id"]) and (
-                not is_on_hold_state(issue) or not hold_on_backlog
-            ):
-                # Restore a Linear-mirrored hold: the ticket left Backlog, OR (default) we
-                # no longer treat Backlog as a hold — so a Backlog task flows through triage
-                # and dispatch like any other. MC-initiated stuck-plan holds are left alone.
-                mc_task_id = mc_task["id"]
-                state_name = issue.get("state", {}).get("name", "?")
-                logging.info(f"  Restoring {issue['identifier']} ({mc_task_id[:8]}) from on_hold — will triage/dispatch")
-                try:
-                    mc_request("PATCH", f"/api/tasks/{mc_task_id}", {"status": "inbox"})
-                    mc_request("POST", f"/api/tasks/{mc_task_id}/activities", {
-                        "activity_type": "status_changed",
-                        "message": f"Restored from on hold ({state_name}) — Backlog no longer parks tasks; triaging.",
-                    })
-                except Exception as e:
-                    logging.warning(f"  Failed to restore {mc_task_id[:8]} from on_hold: {e}")
-
-            # Reflect the MC task's working state back to Linear (idempotent).
-            mc_status = mc_task.get("status")
-            if mc_status in REVIEW_MC_STATUSES:
-                move_issue_to_state(issue, "In Review")
-            elif mc_status in IN_PROGRESS_MC_STATUSES:
-                move_issue_to_state(issue, "In Progress")
-
-            if _check_description_changed(issue, mc_task, state):
+                        for child in [t for t in existing_tasks.values() if t.get("parent_task_id") == mc_task_id and t.get("status") not in ("done", "closed")]:
+                            mc_request("PATCH", f"/api/tasks/{child['id']}", {"status": "closed"})
+                            logging.info(f"    Child {child['id'][:8]} also closed")
                 skipped += 1
                 continue
-            sync_status_back(mc_task, issue, state)
-            comments_synced += sync_comments_to_mc(issue, mc_task, state)
-            skipped += 1
-            continue
 
-        task = create_mc_task(issue)
-        if task:
-            created += 1
-            state["synced_issues"][issue_id] = {
-                "mc_task_id": task.get("id"),
-                "identifier": issue["identifier"],
-                "synced_at": datetime.now(timezone.utc).isoformat(),
-                "description_hash": _hash_description(issue.get("description", "")),
+            if is_terminal_state(issue):
+                if issue_id in existing_tasks:
+                    mc_task = existing_tasks[issue_id]
+                    linear_state_type = (issue.get("state") or {}).get("type", "").lower()
+                    target_status = "done" if linear_state_type == "completed" else "closed"
+                    if mc_task.get("status") != target_status:
+                        mc_task_id = mc_task["id"]
+                        state_name = issue.get("state", {}).get("name", "Done")
+                        logging.info(f"  Linear {issue['identifier']} is {state_name} — marking MC task {mc_task_id[:8]} {target_status}")
+                        mc_request("PATCH", f"/api/tasks/{mc_task_id}", {"status": target_status})
+                        mc_request("POST", f"/api/tasks/{mc_task_id}/activities", {
+                            "activity_type": "status_changed",
+                            "message": f"Linear ticket marked {state_name} — syncing to {target_status}",
+                        })
+                        for child in [t for t in existing_tasks.values() if t.get("parent_task_id") == mc_task_id and t.get("status") not in ("done", "closed")]:
+                            mc_request("PATCH", f"/api/tasks/{child['id']}", {"status": target_status})
+                            logging.info(f"    Child {child['id'][:8]} also marked {target_status}")
+                skipped += 1
+                continue
+
+            if issue_id in existing_tasks:
+                mc_task = existing_tasks[issue_id]
+
+                # Backlog handling. By default MC does NOT treat Backlog as a hold — a new
+                # ticket (which Linear creates in Backlog) should still triage and, once done,
+                # auto-dispatch to in_progress (MC then writes "In Progress" back to Linear).
+                # Set LINEAR_HOLD_ON_BACKLOG=1 to make Backlog park tasks instead.
+                hold_on_backlog = os.environ.get("LINEAR_HOLD_ON_BACKLOG", "0") == "1"
+
+                if hold_on_backlog and is_on_hold_state(issue) and mc_task.get("status") != "on_hold":
+                    mc_priority = mc_task.get("priority", "normal")
+                    if mc_priority in ("urgent", "high"):
+                        logging.info(f"  Linear {issue['identifier']} is Backlog but MC priority is {mc_priority} — skipping on_hold")
+                    else:
+                        mc_task_id = mc_task["id"]
+                        state_name = issue.get("state", {}).get("name", "On Hold")
+                        logging.info(f"  Linear {issue['identifier']} is {state_name} — setting MC task {mc_task_id[:8]} on_hold")
+                        try:
+                            mc_request("PATCH", f"/api/tasks/{mc_task_id}", {"status": "on_hold"})
+                            mc_request("POST", f"/api/tasks/{mc_task_id}/activities", {
+                                "activity_type": "status_changed",
+                                "message": f"Linear ticket moved to {state_name} — setting on hold",
+                            })
+                            for child in [t for t in existing_tasks.values() if t.get("parent_task_id") == mc_task_id and t.get("status") not in ("done", "on_hold")]:
+                                mc_request("PATCH", f"/api/tasks/{child['id']}", {"status": "on_hold"})
+                                logging.info(f"    Child {child['id'][:8]} also set on_hold")
+                        except Exception as e:
+                            logging.warning(f"  Failed to set on_hold for {mc_task_id[:8]}: {e}")
+
+                elif mc_task.get("status") == "on_hold" and not _mc_initiated_hold(mc_task["id"]) and (
+                    not is_on_hold_state(issue) or not hold_on_backlog
+                ):
+                    # Restore a Linear-mirrored hold: the ticket left Backlog, OR (default) we
+                    # no longer treat Backlog as a hold — so a Backlog task flows through triage
+                    # and dispatch like any other. MC-initiated stuck-plan holds are left alone.
+                    mc_task_id = mc_task["id"]
+                    state_name = issue.get("state", {}).get("name", "?")
+                    logging.info(f"  Restoring {issue['identifier']} ({mc_task_id[:8]}) from on_hold — will triage/dispatch")
+                    try:
+                        mc_request("PATCH", f"/api/tasks/{mc_task_id}", {"status": "inbox"})
+                        mc_request("POST", f"/api/tasks/{mc_task_id}/activities", {
+                            "activity_type": "status_changed",
+                            "message": f"Restored from on hold ({state_name}) — Backlog no longer parks tasks; triaging.",
+                        })
+                    except Exception as e:
+                        logging.warning(f"  Failed to restore {mc_task_id[:8]} from on_hold: {e}")
+
+                # Reflect the MC task's working state back to Linear (idempotent).
+                mc_status = mc_task.get("status")
+                if mc_status in REVIEW_MC_STATUSES:
+                    move_issue_to_state(issue, "In Review")
+                elif mc_status in IN_PROGRESS_MC_STATUSES:
+                    move_issue_to_state(issue, "In Progress")
+
+                if _check_description_changed(issue, mc_task, state):
+                    skipped += 1
+                    continue
+                sync_status_back(mc_task, issue, state)
+                comments_synced += sync_comments_to_mc(issue, mc_task, state)
+                skipped += 1
+                continue
+
+            task = create_mc_task(issue)
+            if not task:
+                raise RuntimeError(f"Could not import {issue['identifier']}")
+            if task:
+                created += 1
+                state["synced_issues"][issue_id] = {
+                    "mc_task_id": task.get("id"),
+                    "identifier": issue["identifier"],
+                    "synced_at": datetime.now(timezone.utc).isoformat(),
+                    "description_hash": _hash_description(issue.get("description", "")),
+                }
+        except Exception as e:
+            failures[issue_id] = {
+                "identifier": issue.get("identifier", issue_id),
+                "error": str(e)[:500],
+                "attempts": previous_failure.get("attempts", 0) + 1,
+                "at": datetime.now(timezone.utc).isoformat(),
             }
+            logging.warning(f"  Failed {issue.get('identifier', issue_id)}; continuing sync: {e}")
+        else:
+            failures.pop(issue_id, None)
+        finally:
+            # continue statements also checkpoint, so a later failed issue or
+            # scheduler timeout cannot erase successful imports/comment receipts.
+            save_state(state)
 
     # Reconcile tasks that fell out of the fetch (e.g. the Linear issue was reassigned
     # away from a watched assignee): the main loop never sees them, so a Cancel/Done in
-    # Linear would otherwise leave them orphaned in MC. Check each non-done one's current
-    # Linear state and sync terminal states to done.
+    # Linear would otherwise leave them orphaned in MC. Preserve the distinction:
+    # completed → done, canceled/archived → closed.
     fetched_ids = {i["id"] for i in issues}
     reconciled = 0
     for ext_id, mc_task in existing_tasks.items():
-        if ext_id in fetched_ids or mc_task.get("status") == "done":
+        if ext_id in fetched_ids or mc_task.get("status") in ("done", "closed"):
             continue
         try:
             data = linear_query(
@@ -1950,6 +2076,7 @@ def sync():
             # issue. Leave the task alone and retry next sync rather than reading an
             # outage as a deletion. Logged, because silence here is what let a
             # permanently unresolvable ticket sit unnoticed.
+            failures[ext_id] = {"error": str(e)[:500]}
             logging.warning(f"  Could not resolve {mc_task['id'][:8]} in Linear: {e}")
             continue
 
@@ -1965,6 +2092,7 @@ def sync():
             )
             continue
 
+        failures.pop(ext_id, None)
         st = issue_now.get("state") or {}
 
         # Deleting an issue in Linear *archives* it — it keeps whatever workflow state
@@ -1974,29 +2102,38 @@ def sync():
         # this happened, and without it a deleted ticket left its MC task — and any
         # agent working it — running indefinitely.
         reason = None
+        target_status = None
         if issue_now.get("archivedAt"):
             reason = "Linear issue was deleted (archived)"
+            target_status = "closed"
         elif st.get("type") in ("canceled", "completed"):
             reason = f"Linear issue is {st.get('name', 'terminal')} (no longer assigned to a watched user)"
+            target_status = "done" if st.get("type") == "completed" else "closed"
 
         if not reason:
             continue
 
         try:
-            mc_request("PATCH", f"/api/tasks/{mc_task['id']}", {"status": "done"})
+            mc_request("PATCH", f"/api/tasks/{mc_task['id']}", {"status": target_status})
             mc_request("POST", f"/api/tasks/{mc_task['id']}/activities", {
                 "activity_type": "status_changed",
-                "message": f"{reason} — syncing to done.",
+                "message": f"{reason} — syncing to {target_status}.",
             })
             reconciled += 1
-            logging.info(f"  Reconciled out-of-filter {mc_task['id'][:8]} → done ({reason})")
+            logging.info(f"  Reconciled out-of-filter {mc_task['id'][:8]} → {target_status} ({reason})")
         except Exception as e:
+            failures[ext_id] = {"error": str(e)[:500]}
             logging.warning(f"  Failed to reconcile {mc_task['id'][:8]}: {e}")
+        finally:
+            save_state(state)
 
-    state["last_sync"] = datetime.now(timezone.utc).isoformat()
+    state["last_error"] = f"{len(failures)} issue(s) failed" if failures else None
+    if not failures:
+        state["last_sync"] = datetime.now(timezone.utc).isoformat()
     save_state(state)
 
-    logging.info(f"=== Sync complete: {created} created, {skipped} skipped, {comments_synced} comments synced, {reconciled} reconciled ===")
+    logging.info(f"=== Sync complete: {created} created, {skipped} skipped, {comments_synced} comments synced, {reconciled} reconciled, {len(failures)} failed ===")
+    return not failures
 
 
 def discover() -> dict:
@@ -2181,4 +2318,4 @@ if __name__ == "__main__":
             print(f"  [{status}] {issue['identifier']}: {issue['title']}{terminal}")
         print(f"\nTotal: {len(issues)} issues, {len(existing)} already synced")
     else:
-        sync()
+        sys.exit(0 if run_sync() else 1)

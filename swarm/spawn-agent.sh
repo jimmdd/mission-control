@@ -13,7 +13,30 @@
 #   MC_TASK_ID        — Mission Control task ID (for monitor → webhook callback)
 #   BASE_BRANCH       — PR/review base branch (default: origin/main)
 #   WORKTREE_BASE_REF — ref used to create a new worktree (existing-PR handoffs use origin/<head>)
-set -euo pipefail
+# -E so the ERR trap below is inherited by functions, subshells and command
+# substitutions. Without it the trap covers only top-level commands, and the first
+# attempt at this diagnostic stayed silent through a failure that was inside one of
+# them — the silence being the only clue that it was.
+set -euEo pipefail
+
+# bridge.py logs only this script's stderr when it exits non-zero. MET-680 produced
+# "spawn-agent.sh failed:" followed by nothing but git-fetch and bun noise — four
+# times — while the tmux session, the registry entry and the spawn history had all
+# been written successfully, and the agent went on to do the work. Name the line
+# that actually failed, so the next such spawn is one log line to diagnose.
+trap 'rc=$?; echo "spawn-agent.sh: FAILED at line $LINENO (exit $rc): $BASH_COMMAND" >&2' ERR
+
+# ERR cannot see a death by signal, nor an exit status the script never chose. This
+# reports the real code on every non-zero exit, so "no ERR line but still non-zero"
+# is distinguishable from "exited cleanly and bridge misread it".
+trap 'rc=$?; [ "$rc" -eq 0 ] || echo "spawn-agent.sh: EXIT rc=$rc" >&2' EXIT
+
+# A death by signal trips neither ERR nor EXIT, which is the remaining blind spot:
+# the spawn that actually created the session still returned non-zero while staying
+# silent through both. Name the signal so that case is not another guess.
+for _sig in HUP INT TERM PIPE QUIT; do
+  trap "echo \"spawn-agent.sh: died on SIG${_sig} at line \$LINENO: \$BASH_COMMAND\" >&2; exit 1" "$_sig"
+done
 
 # launchd/cron hand us a minimal PATH; make common per-user tool dirs (bun, etc.)
 # discoverable both here and — via the -e PATH passed to the agent session below.
@@ -31,8 +54,20 @@ WORKTREE_BASE="$(dirname "$REPO_PATH")/worktrees"
 WORKTREE_PATH="$WORKTREE_BASE/$TASK_ID"
 REGISTRY="$SWARM_DIR/active-tasks.json"
 STATE_TOOL="$SWARM_DIR/swarm-state.py"
-SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+SCRIPT_DIR="$(python3 -c 'from pathlib import Path; import sys; print(Path(sys.argv[1]).resolve().parent)' "${BASH_SOURCE[0]}")"
 source "$SCRIPT_DIR/mc-api.sh"
+
+# Serialize this logical task before checking capacity or touching a worktree.
+if [ "${MC_LAUNCH_LOCK:-}" != "$TASK_ID" ]; then
+  exec python3 "$SCRIPT_DIR/launch_state.py" lock "${BASH_SOURCE[0]}" "$@"
+fi
+if python3 "$SCRIPT_DIR/launch_state.py" find "$TASK_ID" "${MC_TASK_ID:-}" "$REPO_PATH" "$BRANCH_NAME"; then
+  echo "Adopted existing agent for $TASK_ID"
+  exit 0
+else
+  probe_rc=$?
+  [ "$probe_rc" -eq 1 ] || exit "$probe_rc"
+fi
 
 CONFIG="$SWARM_DIR/swarm-config.json"
 DEFAULT_PROFILE=$(jq -r '.agents.defaultProfile // "codex"' "$CONFIG" 2>/dev/null || echo codex)
@@ -360,15 +395,16 @@ TMUX_ENV_ARGS+=( -e "MC_LAUNCHER=$LAUNCHER" -e "MC_TASK_ARG=$TASK_ID" -e "PATH=$
 
 # Spawn tmux session. The command is a fixed literal; MC_LAUNCHER and
 # MC_TASK_ARG are resolved from the session env (set via -e above).
-tmux new-session -d -s "$TMUX_SESSION" -c "$WORKTREE_PATH" "${TMUX_ENV_ARGS[@]}" \
-  'exec "$MC_LAUNCHER" "$MC_TASK_ARG"'
+
 
 # Register task
 BUDGET_DISPLAY="${MAX_BUDGET_USD:-unlimited}"
 TURNS_DISPLAY="${MAX_TURNS:-unlimited}"
 AGENTS_DISPLAY="${AGENTS_JSON:-none}"
 
+LAUNCH_ATTEMPT=$(python3 -c 'import uuid; print(uuid.uuid4())')
 TASK_JSON=$(jq -n \
+  --arg attempt "$LAUNCH_ATTEMPT" \
   --arg id "$TASK_ID" \
   --arg session "$TMUX_SESSION" \
   --arg agent "$AGENT_PROFILE" \
@@ -392,6 +428,9 @@ TASK_JSON=$(jq -n \
   --argjson agentEnv "$AGENT_ENV_JSON" \
   '{
     id: $id,
+    launchAttemptId: $attempt,
+    launchState: "starting",
+    launchAcknowledgedAt: null,
     tmuxSession: $session,
     agent: $agent,
     agentProfile: $agent,
@@ -423,14 +462,36 @@ TASK_JSON=$(jq -n \
 
 python3 "$STATE_TOOL" upsert --task-json "$TASK_JSON"
 
+# Register before the child can update its heartbeat or completion. A launcher
+# acknowledgement is durable even if this parent dies before returning to bridge.
+TMUX_ENV_ARGS+=( -e "MC_LAUNCH_ATTEMPT=$LAUNCH_ATTEMPT" -e "MC_LAUNCH_HELPER=$SCRIPT_DIR/launch_state.py" -e "MC_HOME=$MC_HOME" )
+# Close the inherited flock descriptor in tmux; its daemon must not own our lock.
+# The descriptor is allocated by launch_state.py and restricted to digits.
+case "${MC_LAUNCH_LOCK_FD:-}" in
+  ''|*[!0-9]*) echo "Invalid launch lock descriptor" >&2; exit 2 ;;
+esac
+if ! python3 - "$MC_LAUNCH_LOCK_FD" "$TMUX_SESSION" "$WORKTREE_PATH" "${TMUX_ENV_ARGS[@]}" <<'PYLAUNCH'
+import os, sys
+os.close(int(sys.argv[1]))
+os.execvp("tmux", ["tmux", "new-session", "-d", "-s", sys.argv[2], "-c", sys.argv[3],
+                  *sys.argv[4:], 'exec python3 "$MC_LAUNCH_HELPER" exec "$MC_LAUNCHER" "$MC_TASK_ARG"'])
+PYLAUNCH
+then
+  python3 "$STATE_TOOL" update --task-id "$TASK_ID" --attempt-id "$LAUNCH_ATTEMPT" \
+    --patch-json '{"status":"failed","launchState":"failed"}' --reason launch-failed || true
+  exit 1
+fi
+python3 "$SCRIPT_DIR/launch_state.py" wait "$TASK_ID" "$LAUNCH_ATTEMPT" "${MC_LAUNCH_ACK_TIMEOUT_SECONDS:-20}"
+
+
 # Append to spawn history log (append-only JSONL backup)
 HISTORY_FILE="$SWARM_DIR/spawn-history.jsonl"
-echo "$TASK_JSON" | jq -c '. + {"spawnedAt": "'"$(date -u +%Y-%m-%dT%H:%M:%SZ)"'"}' >> "$HISTORY_FILE"
+echo "$TASK_JSON" | jq -c '. + {"spawnedAt": "'"$(date -u +%Y-%m-%dT%H:%M:%SZ)"'"}' >> "$HISTORY_FILE" || echo "warning: could not append spawn history" >&2
 
 if [ -n "${MC_TASK_ID:-}" ]; then
-  PROMPT_CONTENT=$(cat "$SWARM_DIR/prompts/${TASK_ID}.md" 2>/dev/null | head -c 4000)
+  PROMPT_CONTENT=$(head -c 4000 "$SWARM_DIR/prompts/${TASK_ID}.md" 2>/dev/null || true)
   if [ -n "$PROMPT_CONTENT" ]; then
-    mc_curl POST "/api/tasks/$MC_TASK_ID/activities" -s \
+    mc_curl POST "/api/tasks/$MC_TASK_ID/activities" -s --max-time 5 \
       -H "Content-Type: application/json" \
       -d "{\"activity_type\":\"prompt_sent\",\"message\":$(echo "$PROMPT_CONTENT" | jq -Rs .)}" \
       > /dev/null 2>&1 || true

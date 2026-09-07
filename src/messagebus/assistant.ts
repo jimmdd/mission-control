@@ -139,7 +139,7 @@ export async function boardSnapshot(api: ApiClient): Promise<string> {
   const tasks = Array.isArray(tasksRaw) ? (tasksRaw as Record<string, unknown>[]) : [];
   const checkpoints = Array.isArray(checkpointsRaw) ? (checkpointsRaw as Record<string, unknown>[]) : [];
 
-  const open = tasks.filter((t) => t.status !== "done");
+  const open = tasks.filter((t) => !["done", "closed"].includes(String(t.status)));
   const lines: string[] = [`Open tickets (${open.length} of ${tasks.length} total):`];
   for (const task of open.slice(0, 40)) {
     let triage = "";

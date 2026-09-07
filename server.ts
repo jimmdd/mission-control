@@ -1,3 +1,4 @@
+import { operationalHealth } from "./src/health.js";
 import { createServer } from "node:http";
 import { MissionControlDB } from "./src/db.js";
 import { createHandler, getSwarmAgentStatusMap, getConnectionsReport } from "./src/routes.js";
@@ -119,10 +120,11 @@ const stopMessageBus = startMessageBus(events, {
 
 const server = createServer(async (req, res) => {
   // Health endpoint
-  if (req.url === "/health") {
-    res.writeHead(200, { "Content-Type": "application/json" });
+  if (req.url === "/health" || req.url === "/health/live") {
+    const health = req.url === "/health/live" ? { status: "ok" } : operationalHealth(db, MC_HOME);
+    res.writeHead(health.status === "ok" ? 200 : 503, { "Content-Type": "application/json" });
     res.end(JSON.stringify({
-      status: "ok",
+      ...health,
       uptime: process.uptime(),
       dbPath: DB_PATH,
       pid: process.pid,

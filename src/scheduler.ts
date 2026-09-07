@@ -45,8 +45,8 @@ export interface SchedulerOptions {
 // cleanup-worktrees 600s.
 //
 // cleanup-worktrees runs behind linear-sync deliberately. linear-sync is what
-// writes `done` when a Linear issue is completed, cancelled, or deleted; this is
-// what acts on that status, releasing the ticket's tmux session and worktree. Two
+// writes `done` for completed issues and `closed` for canceled/deleted issues; this
+// acts on either status, releasing the ticket's tmux session and worktree. Two
 // halves of one loop — without the second, a ticket closed in Linear left its
 // agent running and its checkout on disk indefinitely.
 export const DEFAULT_JOBS: SchedulerJob[] = [

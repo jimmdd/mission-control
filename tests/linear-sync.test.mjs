@@ -89,6 +89,43 @@ print(json.dumps(calls))
   assert.deepEqual(result, []);
 });
 
+test("an MC-closed task moves its linked Linear issue to Canceled without a completion comment", () => {
+  const result = runPython(`
+calls = []
+
+def fake_linear_query(query, variables=None):
+    if "workflowStates" in query:
+        return {"workflowStates": {"nodes": [
+            {"id": "wont-do", "name": "Won't Do", "type": "canceled"},
+            {"id": "closed-state", "name": "Closed", "type": "canceled"},
+        ]}}
+    calls.append({"query": query, "variables": variables})
+    return {"issueUpdate": {"success": True}}
+
+linear_sync.linear_query = fake_linear_query
+linear_sync._CANCELED_STATE_CACHE.clear()
+issue = {
+    "id": "linear-issue-id",
+    "identifier": "MET-998",
+    "state": {"name": "In Review", "type": "started"},
+    "team": {"key": "MET"},
+}
+state = {}
+linear_sync.sync_status_back({"id": "mc-task-id", "status": "closed"}, issue, state)
+linear_sync.sync_status_back({"id": "mc-task-id", "status": "closed"}, issue, state)
+print(json.dumps({"calls": calls, "state": state}))
+`);
+
+  assert.equal(result.calls.length, 1);
+  assert.match(result.calls[0].query, /issueUpdate/);
+  assert.deepEqual(result.calls[0].variables, {
+    id: "linear-issue-id",
+    stateId: "closed-state",
+  });
+  assert.equal(result.state.closure_state_synced["linear-issue-id"], true);
+  assert.equal(result.state.completion_posted, undefined);
+});
+
 /**
  * Drive sync()'s reconcile pass in isolation: the main loop is fed no issues, so
  * every existing MC task falls through to the reconciliation that decides what to
@@ -137,11 +174,24 @@ test("a ticket deleted in Linear closes its MC task", () => {
   const patch = mc_calls.find(c => c.method === "PATCH");
   assert.ok(patch, "the MC task must be closed, not left running against a deleted ticket");
   assert.equal(patch.path, "/api/tasks/mc-task-id");
-  assert.deepEqual(patch.body, { status: "done" });
+  assert.deepEqual(patch.body, { status: "closed" });
 
   const activity = mc_calls.find(c => c.method === "POST" && c.path.endsWith("/activities"));
   assert.ok(activity, "closing a task silently gives no way to find out why later");
   assert.match(activity.body.message, /deleted \(archived\)/);
+  assert.match(activity.body.message, /syncing to closed/);
+});
+
+test("a canceled Linear issue closes its MC task while a completed issue marks it done", () => {
+  const canceled = runReconcile({
+    issue: { archivedAt: null, state: { type: "canceled", name: "Canceled" } },
+  });
+  assert.deepEqual(canceled.mc_calls.find(c => c.method === "PATCH").body, { status: "closed" });
+
+  const completed = runReconcile({
+    issue: { archivedAt: null, state: { type: "completed", name: "Done" } },
+  });
+  assert.deepEqual(completed.mc_calls.find(c => c.method === "PATCH").body, { status: "done" });
 });
 
 test("an issue that merely fell out of the fetch filter is left running", () => {

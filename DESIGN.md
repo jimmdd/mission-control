@@ -2,7 +2,7 @@
 
 ## Source of truth
 - Status: Active
-- Last refreshed: 2026-08-21
+- Last refreshed: 2026-09-05
 - Primary product surfaces: Ticket board, ticket detail, Settings, agent activity and review.
 - Evidence reviewed: `public/ticket.html`, `public/app.js`, `public/settings.js`, existing route and render tests.
 
@@ -24,7 +24,7 @@
 ## Information architecture
 - Primary navigation: Inbox, Tickets, Swarm, Review.
 - Core routes/screens: Board, `/ticket`, Settings.
-- Content hierarchy: Ticket identity/brief and true workflow actions on the main card; execution target, status, autonomy, source-ticket link, and review action on the full-height right card; conversation plus a compact decisions/timeline rail below; plan details on demand. The ticket rail is always ordered Triage, Building, Holding, Review, Done.
+- Content hierarchy: Ticket identity/brief and true workflow actions on the main card; execution target, status, autonomy, source-ticket link, and review action on the full-height right card; conversation plus a compact decisions/timeline rail below; plan details on demand. The ticket rail is always ordered Triage, Building, Review, Holding, Done, Closed.
 
 ## Design principles
 - Principle 1: Use one primary representation of current state.
@@ -32,7 +32,7 @@
 - Tradeoffs: Prefer a short truthful summary and explicit disabled state over a detailed but stale process visualization.
 
 ## Visual language
-- Color: Existing status tones—cyan planning, green building, indigo review, amber human attention/hold, neutral complete. On ticket cards, amber is reserved for a concrete unresolved operator action rather than general technical failure.
+- Color: Existing status tones—cyan planning, green building, indigo review, amber human attention/hold, neutral complete, restrained red closed. On ticket cards, amber is reserved for a concrete unresolved operator action rather than general technical failure.
 - Typography: Compact utilitarian type with monospace operational labels.
 - Spacing/layout rhythm: Dense but scannable cards and consistent action rows.
 - Shape/radius/elevation: Flat restrained cards, borders and spacing over decoration.
@@ -41,7 +41,7 @@
 
 ## Components
 - Existing components to reuse: `summary-action`, colored status card, safety dialog, plan drawer, dashboard preview service.
-- New/changed components: Ticket-detail preview action; single-line right-card execution target block with Repo/Base/App and an inline repository selector; autonomy as an unlabeled header badge; source-ticket navigation only through the ticket number on the right status card; a scrollable newest-first activity timeline with five visible rows; settled decisions collapsed by default; status card preserving its original height and visual rhythm; no inert conversation shortcut; ticket-rail “needs you” card state with an amber outline/wash and bell.
+- New/changed components: Ticket-detail preview action; ticket-detail Close ticket safety action; single-line right-card execution target block with Repo/Base/App and an inline repository selector; autonomy as an unlabeled header badge; source-ticket navigation only through the ticket number on the right status card; a scrollable newest-first activity timeline with five visible rows; settled decisions collapsed by default; status card preserving its original height and visual rhythm; no inert conversation shortcut; ticket-rail “needs you” card state with an amber outline/wash and bell.
 - Variants and states: Repository selection is editable in the right status card only before dispatch. Once work has started, Repo/Base/App are read-only facts and stale legacy triage receipts must not recreate a confirmation prompt.
 - Variants and states: Preview is omitted while work is planning/building; review, testing, and done states show either Start preview or the active preview link, with in-page startup errors. Holding pauses execution without revoking preview when a preview, PR, completed plan, or review-phase receipt proves the build had already reached review.
 - Variants and states: Open decisions stay expanded; once every decision is settled, the section collapses to its settled count. Activity excludes heartbeat/lease transport noise but does not merge or collapse real events.
@@ -67,13 +67,14 @@
 - Error: Put preview startup errors in the ticket summary/status copy.
 - Success: Open the ready local preview and refresh ticket state.
 - Disabled: Omit preview actions until the build is ready for review.
+- Completion: Open, held, and done tickets offer Close ticket behind the shared safety dialog. Close moves the record to the distinct Closed archive and synchronously cancels a linked Linear issue; a failed Linear write leaves Mission Control unchanged. The record is never deleted.
 - Timeline: Keep the newest five events visible, allow keyboard and pointer scrolling for older history, and preserve individual timestamps/messages.
 - Needs attention: Keep the ticket in its normal operational group, add the bell and amber card treatment, and clear both as soon as the human action resolves.
 - Offline/slow network, if applicable: Keep the starting state until the request resolves; restore the action after failure.
 
 ## Content voice
 - Tone: Short, factual, operational.
-- Terminology: Repository, plan, build, review, preview, pull request.
+- Terminology: Repository, plan, build, review, preview, pull request. Done means the requested work completed; Closed means an operator ended or archived the ticket.
 - Microcopy rules: Name navigation as “Go to…” and operations by their result; do not blame the user or describe unavailable data as an alert.
 - Repository confirmation copy points directly to the right-side Repo dropdown; it never refers to the main ticket card.
 

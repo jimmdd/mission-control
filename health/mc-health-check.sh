@@ -19,7 +19,9 @@ if [ -f "$STATE_FILE" ]; then
 fi
 
 # Health check
-if curl -sf --max-time 5 "${MC_URL}/health" > /dev/null 2>&1; then
+live=0
+curl -sf --max-time 5 "${MC_URL}/health/live" > /dev/null 2>&1 && live=1
+if [ "$live" -eq 1 ] && curl -sf --max-time 5 "${MC_URL}/health" > /dev/null 2>&1; then
     if [ "$failures" -gt 0 ]; then
         echo "$(ts) RECOVERED after ${failures} failures"
         echo '{"failures": 0}' > "$STATE_FILE"
@@ -33,12 +35,15 @@ echo "$(ts) FAIL #${failures}"
 echo "{\"failures\": ${failures}, \"last_fail\": \"$(date -u '+%Y-%m-%dT%H:%M:%SZ')\"}" > "$STATE_FILE"
 
 # Attempt restart
-launchctl kickstart gui/$(id -u)/ai.mission-control 2>/dev/null || true
+# An unhealthy integration is not repaired by restarting a healthy HTTP server.
+if [ "$live" -eq 0 ]; then
+    launchctl kickstart -k "gui/$(id -u)/ai.mission-control.server" 2>/dev/null || true
+fi
 
 # Alert after consecutive failures
 if [ "$failures" -ge "$MAX_FAILURES" ]; then
-    echo "$(ts) ALERT Mission Control down for ${failures} consecutive checks"
+    echo "$(ts) ALERT Mission Control unhealthy for ${failures} consecutive checks"
     if [ -x "$ALERT_SCRIPT" ]; then
-        "$ALERT_SCRIPT" "🚨 Mission Control is DOWN (${failures} consecutive failures). Attempted auto-restart." 2>/dev/null || true
+        "$ALERT_SCRIPT" "🚨 Mission Control is unhealthy (${failures} consecutive checks). Inspect /health for affected jobs." 2>/dev/null || true
     fi
 fi

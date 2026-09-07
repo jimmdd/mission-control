@@ -372,6 +372,7 @@
           <option value="review">review</option>
           <option value="testing">testing</option>
           <option value="done">done</option>
+          <option value="closed">closed</option>
           <option value="failed">failed</option>
         </select>
       </div>
@@ -504,6 +505,7 @@
     function statusTag(status) {
       const s = String(status || '').toLowerCase();
       if (s === 'done') return `<span class="tag ok">done</span>`;
+      if (s === 'closed') return `<span class="tag bad">closed</span>`;
       if (s === 'failed') return `<span class="tag bad">failed</span>`;
       if (s === 'review' || s === 'testing') return `<span class="tag warn">${s}</span>`;
       return `<span class="tag">${s || 'unknown'}</span>`;
@@ -606,7 +608,7 @@
       const out = [];
       const external = t.external_url ? `<a href="${text(t.external_url)}" target="_blank" rel="noopener noreferrer">Open Link</a>` : '';
       if (external) out.push(external);
-      if (!state.readOnly && String(t.status || '').toLowerCase() !== 'done') {
+      if (!state.readOnly && !['done', 'closed'].includes(String(t.status || '').toLowerCase())) {
         out.push(`<button data-action="done" data-id="${text(t.id)}">Mark Done</button>`);
       }
       if (!state.readOnly && String(t.task_type || '').toLowerCase() === 'investigation') {
@@ -628,7 +630,7 @@
       E.rows.innerHTML = tasks.map((t) => {
         const hb = hbMeta(t);
         const swarm = t.swarm || {};
-        const isDone = ['done', 'review'].includes(String(t.status || '').toLowerCase());
+        const isDone = ['done', 'closed', 'review'].includes(String(t.status || '').toLowerCase());
         const agentLabel = swarm.agent ? swarm.agent.toUpperCase() : '--';
         const agentStatus = swarm.liveStatus || swarm.status || '';
 

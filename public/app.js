@@ -21,7 +21,7 @@
             // tab that says "Review 2" lands on those two rather than on the whole
             // board with the count left to be taken on trust. An unknown hash is
             // ignored rather than filtering everything away.
-            filter: ['planning', 'in_progress', 'review', 'on_hold', 'done']
+            filter: ['planning', 'in_progress', 'review', 'on_hold', 'done', 'closed']
                 .includes(location.hash.slice(1)) ? location.hash.slice(1) : 'all',
             sort: 'newest',
             lastUpdated: null,
@@ -31,6 +31,7 @@
             activityExpandedToggled: false,
             showDoneInGraph: false,
             showDoneCards: false,
+            showClosedCards: false,
             lastRenderedTasksHtml: '',
             lastRenderedTelemetryHtml: '',
             deliverables: [],
@@ -48,7 +49,7 @@
         };
 
         // Constants
-        const STATUSES = ['inbox', 'planning', 'in_progress', 'assigned', 'review', 'on_hold', 'done', 'failed'];
+        const STATUSES = ['inbox', 'planning', 'in_progress', 'assigned', 'review', 'on_hold', 'done', 'closed', 'failed'];
         const PRIORITIES = { urgent: 4, high: 3, normal: 2, low: 1 };
 
         // DOM Elements
@@ -687,12 +688,13 @@
                 return (now - new Date(t.created_at)) <= 24 * 60 * 60 * 1000;
             });
             
-            let inCount = 0, triagedCount = 0, dispatchedCount = 0, doneCount = 0;
+            let inCount = 0, triagedCount = 0, dispatchedCount = 0, doneCount = 0, closedCount = 0;
             last24hTasks.forEach(t => {
                 if (t.status === 'inbox') inCount++;
                 else if (t.status === 'planning') triagedCount++;
                 else if (t.status === 'assigned' || t.status === 'in_progress' || t.status === 'testing' || t.status === 'review') dispatchedCount++;
                 else if (t.status === 'done') doneCount++;
+                else if (t.status === 'closed') closedCount++;
             });
 
             const mod3 = `
@@ -702,7 +704,8 @@
                         IN <span style="color: var(--text-primary); margin: 0 6px 0 4px;">${inCount}</span> &middot; 
                         TRIAGED <span style="color: var(--text-primary); margin: 0 6px 0 4px;">${triagedCount}</span> &middot; 
                         DISPATCHED <span style="color: var(--text-primary); margin: 0 6px 0 4px;">${dispatchedCount}</span> &middot; 
-                        DONE <span style="color: var(--text-primary); margin: 0 0 0 4px;">${doneCount}</span>
+                        DONE <span style="color: var(--text-primary); margin: 0 6px 0 4px;">${doneCount}</span> &middot;
+                        CLOSED <span style="color: var(--text-primary); margin: 0 0 0 4px;">${closedCount}</span>
                     </div>
                 </div>
             `;
@@ -810,7 +813,8 @@
                 { id: 'in_progress', label: 'IN PROGRESS' },
                 { id: 'review', label: 'REVIEW' },
                 { id: 'on_hold', label: 'ON HOLD' },
-                { id: 'done', label: 'DONE' }
+                { id: 'done', label: 'DONE' },
+                { id: 'closed', label: 'CLOSED' }
             ];
 
             const doneCount = counts['done'] || 0;
@@ -819,12 +823,18 @@
                     ${state.showDoneCards ? 'Hide' : 'Show'} Done <span class="filter-count">${doneCount}</span>
                   </button>`
                 : '';
+            const closedCount = counts['closed'] || 0;
+            const showClosedBtn = state.filter === 'all' && closedCount > 0
+                ? `<button class="filter-pill pg-done-pill" id="cards-closed-toggle" style="opacity: ${state.showClosedCards ? 1 : 0.5}">
+                    ${state.showClosedCards ? 'Hide' : 'Show'} Closed <span class="filter-count">${closedCount}</span>
+                  </button>`
+                : '';
 
             els.filters.innerHTML = filters.map(f => `
                 <button class="filter-pill ${state.filter === f.id ? 'active' : ''}" data-filter="${f.id}">
                     ${f.label} <span class="filter-count">${counts[f.id] || 0}</span>
                 </button>
-            `).join('') + showDoneBtn;
+            `).join('') + showDoneBtn + showClosedBtn;
 
             // Add event listeners — scope to pills with data-filter only
             els.filters.querySelectorAll('.filter-pill[data-filter]').forEach(btn => {
@@ -844,6 +854,14 @@
                     renderTasks();
                 });
             }
+            const closedToggle = document.getElementById('cards-closed-toggle');
+            if (closedToggle) {
+                closedToggle.addEventListener('click', () => {
+                    state.showClosedCards = !state.showClosedCards;
+                    renderFilters();
+                    renderTasks();
+                });
+            }
         };
 
         const getProcessedTasks = () => {
@@ -853,8 +871,9 @@
             let filtered = state.tasks.filter(task => !task.parent_task_id);
             if (state.filter !== 'all') {
                 filtered = filtered.filter(t => t.status === state.filter);
-            } else if (!state.showDoneCards) {
-                filtered = filtered.filter(t => t.status !== 'done');
+            } else {
+                if (!state.showDoneCards) filtered = filtered.filter(t => t.status !== 'done');
+                if (!state.showClosedCards) filtered = filtered.filter(t => t.status !== 'closed');
             }
 
             // Sort
@@ -918,8 +937,8 @@
                     if (effectiveStatus === 'running') dotClass = 'running';
                     if (effectiveStatus === 'failed') dotClass = 'failed';
                     const heartbeat = getHeartbeatMeta(agent);
-                    const isDone = ['done', 'review'].includes(task.status);
-                    const heartbeatBadge = heartbeat.hasHeartbeat && !isDone
+                    const isTerminal = ['done', 'closed', 'review'].includes(task.status);
+                    const heartbeatBadge = heartbeat.hasHeartbeat && !isTerminal
                         ? `<span class="heartbeat-pill ${heartbeat.stale ? 'stale' : ''}">HB ${formatHeartbeatAge(heartbeat.ageMs)}</span>`
                         : '';
                     
@@ -1036,11 +1055,13 @@
                 else if (task.status === 'assigned') activeIdx = 2;
                 else if (task.status === 'in_progress') activeIdx = 3;
                 else if (task.status === 'testing' || task.status === 'review') activeIdx = 4;
-                else if (task.status === 'done') activeIdx = 5;
+                else if (task.status === 'done' || task.status === 'closed') activeIdx = 5;
                 else if (task.status === 'failed') activeIdx = 3;
 
                 const pct = ((activeIdx + 1) / stageMap.length) * 100;
-                const cur = stageMap[activeIdx];
+                const cur = task.status === 'closed'
+                    ? { status: 'closed', label: 'CLOSED', desc: 'Ticket archived' }
+                    : stageMap[activeIdx];
                 const isActive = ['in_progress', 'assigned', 'testing'].includes(task.status);
 
                 const milestoneHtml = `
@@ -1057,8 +1078,8 @@
                 const isExpanded = existingCard && existingCard.classList.contains('expanded') ? 'expanded' : '';
 
                 const normalizedStatus = String(task.status || '').trim().toLowerCase();
-                const isDone = normalizedStatus === 'done';
-                const priorityClass = !isDone
+                const isTerminal = ['done', 'closed'].includes(normalizedStatus);
+                const priorityClass = !isTerminal
                     ? (task.priority === 'urgent' ? 'priority-urgent' : task.priority === 'high' ? 'priority-high' : '')
                     : '';
 
@@ -1088,7 +1109,7 @@
                 // above only renders while the task is still in planning, which is exactly
                 // when follow-ups have not been raised yet.
                 let followUpBadge = '';
-                if (!isDone && task.triage_state) {
+                if (!isTerminal && task.triage_state) {
                     try {
                         const ts = typeof task.triage_state === 'string' ? JSON.parse(task.triage_state) : task.triage_state;
                         // Deferred means consciously set aside and explicitly not
@@ -1105,7 +1126,7 @@
                 }
 
                 let needsHumanBadge = '';
-                if (!isDone && (task.pending_checkpoints || 0) > 0) {
+                if (!isTerminal && (task.pending_checkpoints || 0) > 0) {
                     needsHumanBadge = `<div class="badge" title="Awaiting your decision — open the task to respond" style="background: rgba(255,176,32,0.18); color:#ffb020; font-size:9px; padding:1px 6px; font-weight:600;">⚠ NEEDS YOU</div>`;
                 }
 
@@ -1146,7 +1167,7 @@
                 }
 
                 return `
-                    <div class="task-card ${isExpanded} ${isDone ? 'task-done' : ''} ${priorityClass}" id="card-${task.id}" style="--card-status-color: ${statusColor}">
+                    <div class="task-card ${isExpanded} ${normalizedStatus === 'done' ? 'task-done' : normalizedStatus === 'closed' ? 'task-closed' : ''} ${priorityClass}" id="card-${task.id}" style="--card-status-color: ${statusColor}">
                         <div class="card-header" onclick="${isExpandable ? `toggleChildren(event, '${task.id}')` : `handleTaskClick(event, '${task.id}')`}">
                             <div class="card-top">
                                 ${isExpandable ? `<div class="card-expand-icon">▼</div>` : `<div class="card-expand-icon" style="opacity: 0"></div>`}
@@ -1552,7 +1573,7 @@
             }
 
             let doneBtnHtml = '';
-            if (!state.readOnly && task.status !== 'done') {
+            if (!state.readOnly && !['done', 'closed'].includes(task.status)) {
                 doneBtnHtml = `<button class="btn-done" onclick="handleMarkDone('${task.id}')">Mark Done</button>`;
             }
 
@@ -2166,10 +2187,10 @@
             let hiddenDoneCount = 0;
             
             const filteredRootTasks = rootTasks.map(root => {
-                const isRootDone = root.status === 'done';
+                const isRootDone = ['done', 'closed'].includes(root.status);
                 const children = root.children || [];
-                const doneChildren = children.filter(c => c.status === 'done');
-                const activeChildren = children.filter(c => c.status !== 'done');
+                const doneChildren = children.filter(c => ['done', 'closed'].includes(c.status));
+                const activeChildren = children.filter(c => !['done', 'closed'].includes(c.status));
                 
                 let shouldHideRoot = isRootDone && activeChildren.length === 0;
                 
@@ -2242,8 +2263,8 @@
                             }
                         } else if (root.status === 'review') {
                             pendingStep = { type: 'pending-review', label: 'REVIEW', agent: '', css: 'feedback' };
-                        } else if (root.status === 'done') {
-                            pendingStep = { type: 'done', label: 'DONE', agent: 'system', css: 'complete', isMilestone: true };
+                        } else if (['done', 'closed'].includes(root.status)) {
+                            pendingStep = { type: 'done', label: root.status.toUpperCase(), agent: 'system', css: 'complete', isMilestone: true };
                         }
 
                         rootLifecycleHtml = `
@@ -2297,7 +2318,7 @@
                 if (hasChildren) {
                     const childrenNodes = root.displayChildren.map(child => {
                         const childStatusColor = `var(--status-${child.status})`;
-                        const childDoneStyle = child.status === 'done' ? 'opacity: 0.7; filter: grayscale(60%);' : '';
+                        const childDoneStyle = ['done', 'closed'].includes(child.status) ? 'opacity: 0.7; filter: grayscale(60%);' : '';
                         const repo = extractTargetRepo(child.title) || 'task';
                         
                         let childAgentHtml = '';
@@ -2334,8 +2355,8 @@
                                     pendingStep = { type: 'pending-idle', label: 'IDLE', agent: '', css: 'respawn' };
                                 } else if (child.status === 'on_hold') {
                                     pendingStep = { type: 'pending-hold', label: 'ON HOLD', agent: '', css: 'feedback' };
-                                } else if (child.status === 'done') {
-                                    pendingStep = { type: 'done', label: 'EXTERNAL DONE', agent: 'external', css: 'complete', isMilestone: true };
+                                } else if (['done', 'closed'].includes(child.status)) {
+                                    pendingStep = { type: 'done', label: child.status === 'closed' ? 'EXTERNAL CLOSED' : 'EXTERNAL DONE', agent: 'external', css: 'complete', isMilestone: true };
                                 }
 
                                 lifecycleHtml = `

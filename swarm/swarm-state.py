@@ -131,6 +131,9 @@ def cmd_update(args: argparse.Namespace) -> int:
         if not target:
             print(f"task not found: {task_id}", file=sys.stderr)
             return 1
+        if getattr(args, "attempt_id", None) and target.get("launchAttemptId") != args.attempt_id:
+            print("launch attempt has changed", file=sys.stderr)
+            return 1
         target.update(patch)
         _atomic_write_json(registry, tasks)
         _append_event(
@@ -261,6 +264,7 @@ def build_parser() -> argparse.ArgumentParser:
     update.add_argument("--task-id", required=True)
     update.add_argument("--patch-json", required=True)
     update.add_argument("--reason", default="")
+    update.add_argument("--attempt-id", default="")
     update.set_defaults(func=cmd_update)
 
     remove = sub.add_parser("remove")

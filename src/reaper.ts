@@ -40,13 +40,13 @@ export function startLivenessReaper(db: MissionControlDB, events: McEventBus, op
         // This liveStatus conflates two cases: the agent finished successfully
         // (registry marked completed_by_agent) vs. a session that died while the
         // registry still said "running". Only the latter is a real problem — a
-        // finished task (or one already advanced to review/testing/done) must NOT
+        // finished task (or one already advanced to review/testing/done/closed) must NOT
         // be flagged blocked, or its card shows a false BLOCKED tag.
         const registryStatus = entry.status as string | undefined;
         const task = db.getTask(taskId);
         const finished =
           registryStatus === "completed_by_agent" ||
-          (task && ["review", "testing", "done"].includes(task.status));
+          (task && ["review", "testing", "done", "closed"].includes(task.status));
         if (finished) {
           const key = `${taskId}:settled`;
           stillHolding.add(key);

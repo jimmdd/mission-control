@@ -850,7 +850,7 @@ async function ensureTaskUpdateBody(args: ParsedArgs, id: string): Promise<Recor
     body.title = body.title ?? await ask("Title", String(record.title ?? ""));
     body.description = body.description ?? await ask("Description", String(record.description ?? ""));
     body.priority = body.priority ?? await askChoice("Priority", ["low", "normal", "high", "urgent"], String(record.priority ?? "normal"));
-    body.status = body.status ?? await askChoice("Status", ["pending_dispatch", "planning", "inbox", "assigned", "in_progress", "testing", "review", "on_hold", "done"], String(record.status ?? "inbox"));
+    body.status = body.status ?? await askChoice("Status", ["pending_dispatch", "planning", "inbox", "assigned", "in_progress", "testing", "review", "on_hold", "done", "closed"], String(record.status ?? "inbox"));
     body.task_type = body.task_type ?? await askChoice("Task type", ["implementation", "investigation", "research"], String(record.task_type ?? "implementation"));
     body.workspace_id = body.workspace_id ?? await ask("Workspace ID", String(record.workspace_id ?? "default"));
     body.assigned_agent_id = body.assigned_agent_id ?? await ask("Assigned agent ID", String(record.assigned_agent_id ?? ""));

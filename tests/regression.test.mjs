@@ -64,6 +64,47 @@ test("task counts are exact beyond the 100-row page limit", async () => {
   });
 });
 
+test("existing databases migrate to the distinct closed status without rewriting done tickets", () => {
+  const dir = mkdtempSync(join(tmpdir(), "mc-closed-migrate-"));
+  const dbPath = join(dir, "mc.db");
+  try {
+    const raw = new Database(dbPath);
+    raw.exec(`
+      CREATE TABLE tasks (
+        id TEXT PRIMARY KEY,
+        title TEXT NOT NULL,
+        description TEXT,
+        status TEXT DEFAULT 'inbox' CHECK (status IN ('pending_dispatch', 'planning', 'inbox', 'assigned', 'in_progress', 'testing', 'review', 'on_hold', 'done')),
+        priority TEXT DEFAULT 'normal' CHECK (priority IN ('low', 'normal', 'high', 'urgent')),
+        assigned_agent_id TEXT,
+        created_by_agent_id TEXT,
+        workspace_id TEXT DEFAULT 'default',
+        due_date TEXT,
+        parent_task_id TEXT,
+        external_id TEXT,
+        external_url TEXT,
+        source TEXT DEFAULT 'manual',
+        task_type TEXT DEFAULT 'implementation' CHECK (task_type IN ('implementation', 'investigation', 'research')),
+        triage_state TEXT,
+        processing_owner TEXT,
+        processing_expires_at TEXT,
+        created_at TEXT DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
+        updated_at TEXT DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))
+      );
+      INSERT INTO tasks(id, title, status) VALUES ('legacy-done', 'Already complete', 'done');
+    `);
+    raw.close();
+
+    const db = new MissionControlDB(dbPath);
+    db.initSchema();
+    assert.equal(db.getTask("legacy-done").status, "done");
+    assert.equal(db.updateTask("legacy-done", { status: "closed" }).status, "closed");
+    db.close();
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
 // Regression guard for P2: every write path must produce ISO-8601 timestamps so
 // `since`-based polling orders rows consistently.
 test("new rows use ISO-8601 timestamps across all tables", async () => {

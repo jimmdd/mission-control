@@ -99,11 +99,51 @@ End with one of:
 # flags were removed); prompt is read from stdin, read-only sandbox (review only).
 MODEL_FLAG=""
 [ -n "$CODEX_MODEL" ] && MODEL_FLAG="--model $CODEX_MODEL"
-REVIEW_OUTPUT=$(printf '%s' "$REVIEW_PROMPT" | codex exec --skip-git-repo-check --sandbox read-only $MODEL_FLAG 2>&1) || {
-  echo "Codex review failed to run"
-  echo "$REVIEW_OUTPUT" | tail -8
+# Bounded, because an unbounded review gate does not fail — it waits forever. A brew
+# upgrade re-quarantined the codex binary mid-run and wedged it before its first
+# instruction: the process stayed alive, burned no CPU and printed nothing. This call
+# had no time limit, so MET-680 spent ~37 minutes across three attempts waiting on a
+# process that was never going to speak, then escalated to a human for a gate that was
+# never actually run. A review that cannot start must report that quickly (exit 2),
+# so the caller can decide, rather than consuming the agent's review iterations.
+REVIEW_TIMEOUT_SECONDS="${PRE_REVIEW_TIMEOUT_SECONDS:-900}"
+REVIEW_TMP=$(mktemp "${TMPDIR:-/tmp}/mc-pre-review.XXXXXX")
+trap 'rm -f "$REVIEW_TMP"' EXIT
+
+printf '%s' "$REVIEW_PROMPT" \
+  | codex exec --skip-git-repo-check --sandbox read-only $MODEL_FLAG > "$REVIEW_TMP" 2>&1 &
+REVIEW_PID=$!
+
+(
+  # Kill the tree, not just the pid: codex forks codex-code-mode-host, and a
+  # surviving child holds the output open.
+  sleep "$REVIEW_TIMEOUT_SECONDS"
+  if kill -0 "$REVIEW_PID" 2>/dev/null; then
+    for child in $(pgrep -P "$REVIEW_PID" 2>/dev/null); do kill -KILL "$child" 2>/dev/null; done
+    kill -KILL "$REVIEW_PID" 2>/dev/null
+  fi
+) >/dev/null 2>&1 &
+REVIEW_KILLER=$!
+
+REVIEW_RC=0
+wait "$REVIEW_PID" 2>/dev/null || REVIEW_RC=$?
+for child in $(pgrep -P "$REVIEW_KILLER" 2>/dev/null); do kill "$child" 2>/dev/null || true; done
+kill "$REVIEW_KILLER" 2>/dev/null || true
+wait "$REVIEW_KILLER" 2>/dev/null || true
+
+REVIEW_OUTPUT=$(cat "$REVIEW_TMP" 2>/dev/null || true)
+
+if [ "$REVIEW_RC" -ne 0 ]; then
+  if [ -z "${REVIEW_OUTPUT//[[:space:]]/}" ]; then
+    echo "Codex review produced no output within ${REVIEW_TIMEOUT_SECONDS}s — the review runner is not working."
+    echo "Check that the agent CLI starts at all: \`codex --version\` should answer immediately."
+    echo "A Homebrew upgrade re-quarantines the binary, which wedges it at process start."
+  else
+    echo "Codex review failed to run"
+    echo "$REVIEW_OUTPUT" | tail -8
+  fi
   exit 2
-}
+fi
 
 echo "$REVIEW_OUTPUT"
 

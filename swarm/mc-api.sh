@@ -24,7 +24,12 @@ mc_curl() {
   local method="$1" path="$2" token
   shift 2
   token="$(mc_token_for "$method" "$path")"
-  local auth=()
-  [ -n "$token" ] && auth=(-H "Authorization: Bearer $token")
-  curl -X "$method" "${auth[@]}" "$@" "${MC_URL%/}$path"
+  # macOS bash 3.2 treats an empty array as unbound under set -u, even inside
+  # `command || true`. That used to abort a successfully started agent while
+  # merely posting its optional prompt activity, with stderr redirected away.
+  if [ -n "$token" ]; then
+    curl -X "$method" -H "Authorization: Bearer $token" "$@" "${MC_URL%/}$path"
+  else
+    curl -X "$method" "$@" "${MC_URL%/}$path"
+  fi
 }

@@ -13,7 +13,8 @@ export type TaskStatus =
   | "testing"
   | "review"
   | "on_hold"
-  | "done";
+  | "done"
+  | "closed";
 export type TaskPriority = "low" | "normal" | "high" | "urgent";
 export type TaskType = "implementation" | "investigation" | "research";
 
@@ -430,7 +431,7 @@ CREATE TABLE IF NOT EXISTS tasks (
   id TEXT PRIMARY KEY,
   title TEXT NOT NULL,
   description TEXT,
-  status TEXT DEFAULT 'inbox' CHECK (status IN ('pending_dispatch', 'planning', 'inbox', 'assigned', 'in_progress', 'testing', 'review', 'on_hold', 'done')),
+  status TEXT DEFAULT 'inbox' CHECK (status IN ('pending_dispatch', 'planning', 'inbox', 'assigned', 'in_progress', 'testing', 'review', 'on_hold', 'done', 'closed')),
   priority TEXT DEFAULT 'normal' CHECK (priority IN ('low', 'normal', 'high', 'urgent')),
   assigned_agent_id TEXT REFERENCES agents(id) ON DELETE SET NULL,
   created_by_agent_id TEXT REFERENCES agents(id) ON DELETE SET NULL,
@@ -617,6 +618,8 @@ export class MissionControlDB {
     this.migrateLinearColumns();
     this.migrateTaskType();
     this.migrateTaskLease();
+    this.migrateClosedTaskStatus();
+    this.db.exec("CREATE INDEX IF NOT EXISTS idx_tasks_status_created ON tasks(status, created_at)");
     this.migrateActivityChat();
     this.migrateTimestampFormat();
   }
@@ -706,6 +709,60 @@ export class MissionControlDB {
     if (!this.taskColumnExists("processing_expires_at")) {
       this.db.exec("ALTER TABLE tasks ADD COLUMN processing_expires_at TEXT");
     }
+    this.db.exec("CREATE INDEX IF NOT EXISTS idx_tasks_processing ON tasks(status, processing_expires_at)");
+  }
+
+  /** Add the operator-closed terminal state without rewriting completed tasks. */
+  private migrateClosedTaskStatus(): void {
+    const row = this.db
+      .prepare("SELECT sql FROM sqlite_master WHERE type='table' AND name='tasks'")
+      .get() as { sql: string } | undefined;
+    if (!row || row.sql.includes("'closed'")) return;
+
+    this.db.exec(`
+      PRAGMA foreign_keys = OFF;
+      BEGIN;
+      CREATE TABLE tasks_closed_migrated (
+        id TEXT PRIMARY KEY,
+        title TEXT NOT NULL,
+        description TEXT,
+        status TEXT DEFAULT 'inbox' CHECK (status IN ('pending_dispatch', 'planning', 'inbox', 'assigned', 'in_progress', 'testing', 'review', 'on_hold', 'done', 'closed')),
+        priority TEXT DEFAULT 'normal' CHECK (priority IN ('low', 'normal', 'high', 'urgent')),
+        assigned_agent_id TEXT REFERENCES agents(id) ON DELETE SET NULL,
+        created_by_agent_id TEXT REFERENCES agents(id) ON DELETE SET NULL,
+        workspace_id TEXT DEFAULT 'default' REFERENCES workspaces(id),
+        due_date TEXT,
+        parent_task_id TEXT REFERENCES tasks(id),
+        external_id TEXT,
+        external_url TEXT,
+        source TEXT DEFAULT 'manual',
+        task_type TEXT DEFAULT 'implementation' CHECK (task_type IN ('implementation', 'investigation', 'research')),
+        triage_state TEXT,
+        processing_owner TEXT,
+        processing_expires_at TEXT,
+        created_at TEXT DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
+        updated_at TEXT DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))
+      );
+      INSERT INTO tasks_closed_migrated(
+        id, title, description, status, priority, assigned_agent_id, created_by_agent_id,
+        workspace_id, due_date, parent_task_id, external_id, external_url, source,
+        task_type, triage_state, processing_owner, processing_expires_at, created_at, updated_at
+      )
+      SELECT
+        id, title, description, status, priority, assigned_agent_id, created_by_agent_id,
+        workspace_id, due_date, parent_task_id, external_id, external_url, source,
+        task_type, triage_state, processing_owner, processing_expires_at, created_at, updated_at
+      FROM tasks;
+      DROP TABLE tasks;
+      ALTER TABLE tasks_closed_migrated RENAME TO tasks;
+      COMMIT;
+      PRAGMA foreign_keys = ON;
+    `);
+    this.db.exec("CREATE INDEX IF NOT EXISTS idx_tasks_status ON tasks(status)");
+    this.db.exec("CREATE INDEX IF NOT EXISTS idx_tasks_assigned ON tasks(assigned_agent_id)");
+    this.db.exec("CREATE INDEX IF NOT EXISTS idx_tasks_workspace ON tasks(workspace_id)");
+    this.db.exec("CREATE INDEX IF NOT EXISTS idx_tasks_parent ON tasks(parent_task_id)");
+    this.db.exec("CREATE UNIQUE INDEX IF NOT EXISTS idx_tasks_external_id ON tasks(external_id)");
     this.db.exec("CREATE INDEX IF NOT EXISTS idx_tasks_processing ON tasks(status, processing_expires_at)");
   }
 
@@ -878,6 +935,19 @@ export class MissionControlDB {
     return this.db.prepare(sql).all(...params) as TaskRecord[];
   }
 
+  runtimeHealth(): { schemaReady: boolean; oldestQueuedAt: string | null } {
+    const schema = this.db.prepare("SELECT sql FROM sqlite_master WHERE type='table' AND name='tasks'").get() as { sql: string };
+    // One indexed row per dispatchable state; held/planning decisions are not a
+    // queue outage. Exclude tasks explicitly awaiting a human checkpoint.
+    const rows = ["inbox", "pending_dispatch", "assigned"].flatMap(status => {
+      const row = this.db.prepare(`SELECT created_at FROM tasks t WHERE status = ?
+        AND NOT EXISTS (SELECT 1 FROM task_checkpoints c WHERE c.task_id=t.id AND c.status='pending')
+        ORDER BY created_at ASC LIMIT 1`).get(status) as { created_at: string } | undefined;
+      return row ? [row.created_at] : [];
+    });
+    return { schemaReady: schema.sql.includes("'closed'"), oldestQueuedAt: rows.sort()[0] ?? null };
+  }
+
   getTask(id: string): TaskRecord | undefined {
     return this.db.prepare("SELECT * FROM tasks WHERE id = ?").get(id) as
       | TaskRecord
@@ -983,17 +1053,19 @@ export class MissionControlDB {
       // the completion webhook, and the dashboard all converge through updateTask;
       // cancelling here keeps that invariant true regardless of which path finished
       // the work. Otherwise Done tickets remain in the checkpoint inbox forever.
-      if (data.status === "done") {
+      if (data.status === "done" || data.status === "closed") {
         const now = new Date().toISOString();
         this.db
           .prepare(
             `UPDATE task_checkpoints
              SET status = 'cancelled',
-                 response = 'Cancelled because the task was completed.',
+                 response = ?,
                  resolved_at = ?
              WHERE task_id = ? AND status = 'pending'`,
           )
-          .run(now, id);
+          .run(data.status === "closed"
+            ? "Cancelled because the ticket was closed."
+            : "Cancelled because the task was completed.", now, id);
         // Status is authoritative. Keep an existing progress row from claiming a
         // completed ticket is still running or blocked after Linear/API reconciliation.
         this.db
@@ -1683,7 +1755,7 @@ export class MissionControlDB {
     for (const row of rows) {
       const entry = map[row.pid] ?? (map[row.pid] = { total: 0, open: 0 });
       entry.total += 1;
-      if (row.status !== "review" && row.status !== "done") entry.open += 1;
+      if (!["review", "done", "closed"].includes(row.status)) entry.open += 1;
     }
     return map;
   }
@@ -1726,7 +1798,7 @@ export class MissionControlDB {
       .prepare(
         `SELECT c.* FROM task_checkpoints c
          JOIN tasks t ON t.id = c.task_id
-         WHERE c.status = 'pending' AND t.status != 'done'
+         WHERE c.status = 'pending' AND t.status NOT IN ('done', 'closed')
          ORDER BY c.created_at ASC`,
       )
       .all() as CheckpointRecord[];

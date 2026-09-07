@@ -546,6 +546,42 @@ print(json.dumps({"rows": rows, "stopped": stopped, "activities": activities, "s
   }
 });
 
+test("a closed ticket terminalizes its runtime and enters the cleanup path", () => {
+  const root = mkdtempSync(join(tmpdir(), "mc-cleanup-closed-"));
+  const registry = join(root, "active-tasks.json");
+  try {
+    writeFileSync(registry, JSON.stringify([{
+      id: "MET-705-repo",
+      mcTaskId: "ffffffff-0000-0000-0000-000000000000",
+      status: "running",
+      repo: "",
+      worktree: "",
+      tmuxSession: "agent-MET-705-repo",
+    }]));
+    const result = python(`
+from pathlib import Path
+from worktree_cleanup import cleanup_completed_worktrees
+registry, state_tool = json.loads(sys.stdin.read())
+stopped = []
+rows = cleanup_completed_worktrees(
+    Path(registry), Path(state_tool), "http://mc.invalid",
+    status_lookup=lambda *_: "closed",
+    is_session_active=lambda _: True,
+    stop_active_session=lambda session: stopped.append(session) is None,
+    activity_poster=lambda *_: None,
+)
+saved = json.loads(Path(registry).read_text())[0]
+print(json.dumps({"rows": rows, "stopped": stopped, "status": saved["status"]}))
+`, [registry, join(SWARM, "swarm-state.py")]);
+
+    assert.deepEqual(result.rows, [{ task: "MET-705-repo", result: "preserved", reason: "missing_paths" }]);
+    assert.deepEqual(result.stopped, ["agent-MET-705-repo"]);
+    assert.equal(result.status, "closed");
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
 test("an unchanged cleanup blocker produces no registry or activity noise", () => {
   const root = mkdtempSync(join(tmpdir(), "mc-cleanup-quiet-"));
   const registry = join(root, "active-tasks.json");

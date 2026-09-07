@@ -12,6 +12,8 @@ import { getPreviews, startPreview, stopPreview, stopAllPreviews } from "./previ
 import { readBusConfig } from "./messagebus/config.js";
 import { sendTelegramMessage, telegramGetMe } from "./messagebus/telegram.js";
 import { sendSlackMessage, slackAuthTest } from "./messagebus/slack.js";
+import { closeLinearIssue } from "./linear.js";
+import type { LinearClosureResult } from "./linear.js";
 import type {
   AgentProgressState,
   CreateActivityInput,
@@ -61,9 +63,10 @@ export interface CreatedLinearIssue {
 export interface RouteDependencies {
   resetPullRequest?: (url: string) => Promise<ResetPullRequestResult>;
   createLinearIssue?: (input: CreateLinearIssueInput) => Promise<{ created: boolean; issue: CreatedLinearIssue }>;
+  closeLinearIssue?: (issueId: string) => Promise<LinearClosureResult>;
   transitionTaskRuntime?: (
     taskId: string,
-    transition: "hold" | "delete",
+    transition: "hold" | "close" | "delete",
   ) => Promise<TaskRuntimeTransitionResult>;
 }
 
@@ -524,7 +527,7 @@ function sanitizeProgressInput(body: Record<string, unknown>): UpsertProgressInp
   return out;
 }
 
-const TERMINAL_TASK_STATUSES = new Set(["review", "done"]);
+const TERMINAL_TASK_STATUSES = new Set(["review", "done", "closed"]);
 
 function emitTerminalCompletion(
   events: McEventBus,
@@ -740,7 +743,7 @@ function execRuntimeFile(command: string, args: string[]): Promise<void> {
  */
 export async function transitionTaskRuntime(
   taskId: string,
-  transition: "hold" | "delete",
+  transition: "hold" | "close" | "delete",
 ): Promise<TaskRuntimeTransitionResult> {
   const mcHome = process.env.MC_HOME ?? join(homedir(), ".mission-control");
   const registryPath = join(mcHome, "swarm", "active-tasks.json");
@@ -756,13 +759,15 @@ export async function transitionTaskRuntime(
 
   const stateTool = resolveRuntimePath("swarm", "swarm-state.py");
   const now = new Date().toISOString();
-  const status = transition === "hold" ? "paused" : "deleted";
+  const status = transition === "hold" ? "paused" : transition === "close" ? "closed" : "deleted";
   for (const entry of entries) {
     const runtimeId = typeof entry.id === "string" ? entry.id : "";
     if (!runtimeId) throw new Error(`Swarm entry for ${taskId} has no runtime id`);
     const patch = transition === "hold"
       ? { status, heldAt: now, lastError: null }
-      : { status, deletedAt: now, lastError: null };
+      : transition === "close"
+        ? { status, closedAt: now, lastError: null }
+        : { status, deletedAt: now, lastError: null };
     await execRuntimeFile(resolvePythonBin(), [
       stateTool,
       "--registry", registryPath,
@@ -1081,6 +1086,7 @@ async function handleApiRequest(
     const method = req.method ?? "GET";
     const readOnly = isTruthyEnv("MISSION_CONTROL_READ_ONLY");
     const runtimeTransition = dependencies.transitionTaskRuntime ?? transitionTaskRuntime;
+    const linearCloser = dependencies.closeLinearIssue ?? closeLinearIssue;
 
     const routePath = resolveApiRoutePath(pathname);
     if (routePath === null) {
@@ -1380,6 +1386,11 @@ async function handleApiRequest(
                 return;
               }
 
+              if (task.status === "closed") {
+                sendJson(res, 409, { error: "Closed tickets cannot be marked done" });
+                return;
+              }
+
               if (task.status === "done") {
                 // Re-run the terminal invariant even for idempotent completion.
                 // This repairs checkpoints created by an older process or another
@@ -1410,6 +1421,84 @@ async function handleApiRequest(
               emitTerminalCompletion(events, taskId, task.status, updated.status);
 
               sendJson(res, 200, { success: true, task: updated });
+              return;
+            }
+
+            if (segments.length === 3 && segments[2] === "close" && method === "POST") {
+              const task = db.getTask(taskId);
+              if (!task) {
+                sendJson(res, 404, { error: "Task not found" });
+                return;
+              }
+
+              if (task.status === "closed") {
+                // Re-run terminal cleanup to repair old pending checkpoints/progress.
+                const reconciled = db.updateTask(taskId, { status: "closed" } as unknown as UpdateTaskInput) ?? task;
+                sendJson(res, 200, { success: true, alreadyClosed: true, task: reconciled });
+                return;
+              }
+
+              const body = await parseBody(req);
+              const reason = isRecord(body) && typeof body.reason === "string" ? body.reason.trim() : "";
+              let linear: LinearClosureResult | null = null;
+
+              // The external transition is intentionally first. A failed Linear write
+              // must not leave MC claiming a linked ticket was closed everywhere.
+              if (task.source === "linear") {
+                if (!task.external_id) {
+                  sendJson(res, 409, { error: "Linear-linked task has no external issue id" });
+                  return;
+                }
+                try {
+                  linear = await linearCloser(task.external_id);
+                } catch (error) {
+                  const detail = error instanceof Error ? error.message : String(error);
+                  logger.error(`mission-control close: Linear sync failed for ${taskId}: ${detail}`);
+                  sendJson(res, 502, { error: `Could not close linked Linear issue: ${detail}` });
+                  return;
+                }
+              }
+
+              let runtimeWarning: string | undefined;
+              try {
+                await runtimeTransition(taskId, "close");
+              } catch (error) {
+                // Linear has already accepted the close, so converge MC on that truth
+                // and surface the local cleanup warning instead of leaving split state.
+                runtimeWarning = error instanceof Error ? error.message : String(error);
+                logger.error(`mission-control close: runtime cleanup failed for ${taskId}: ${runtimeWarning}`);
+              }
+
+              const updated = db.updateTask(taskId, { status: "closed" } as unknown as UpdateTaskInput);
+              if (!updated) {
+                sendJson(res, 500, { error: "Failed to close task" });
+                return;
+              }
+
+              const linearNote = linear
+                ? ` Linear ${linear.identifier} is ${linear.stateName}.`
+                : "";
+              db.createActivity({
+                task_id: taskId,
+                activity_type: "status_changed",
+                message: `${reason ? `Ticket closed in Mission Control. Reason: ${reason}` : "Ticket closed in Mission Control."}${linearNote}`,
+              });
+              if (runtimeWarning) {
+                db.createActivity({
+                  task_id: taskId,
+                  activity_type: "error",
+                  message: `Ticket closed, but local runtime cleanup needs attention: ${runtimeWarning}`,
+                });
+              }
+
+              rollUpDelegation(db, taskId, events);
+              events.emit("task_closed", { taskId, status: "closed", linear: linear?.identifier ?? null });
+              sendJson(res, 200, {
+                success: true,
+                task: updated,
+                linear,
+                ...(runtimeWarning ? { runtimeWarning } : {}),
+              });
               return;
             }
 
@@ -1524,44 +1613,46 @@ async function handleApiRequest(
                 let escalationCheckpoint;
                 if (input.activity_type === "needs_human") {
                   const task = db.getTask(taskId);
-                  escalationCheckpoint = db.findPendingCheckpoint(taskId, input.message) ?? db.createCheckpoint({
-                    task_id: taskId,
-                    kind: Array.isArray(body.options) ? "choice" : "question",
-                    prompt: input.message,
-                    options: Array.isArray(body.options) ? JSON.stringify(body.options) : undefined,
-                  });
-
-                  // A review-stage decision should remain attached to the draft PR.
-                  // Active implementation work, however, really is stopped by a human
-                  // escalation unless the caller explicitly marks it non-pausing.
-                  const pause = body.pause !== false && task && !["review", "done"].includes(task.status);
-                  if (pause) {
-                    await runtimeTransition(taskId, "hold");
-                    db.updateTask(taskId, { status: "on_hold" });
-                    db.upsertProgress(taskId, {
-                      state: "waiting",
-                      blocked_reason: input.message.slice(0, 500),
+                  if (!task || !["done", "closed"].includes(task.status)) {
+                    escalationCheckpoint = db.findPendingCheckpoint(taskId, input.message) ?? db.createCheckpoint({
+                      task_id: taskId,
+                      kind: Array.isArray(body.options) ? "choice" : "question",
+                      prompt: input.message,
+                      options: Array.isArray(body.options) ? JSON.stringify(body.options) : undefined,
                     });
-                  }
 
-                  let metadata: Record<string, unknown> = {};
-                  if (input.metadata) {
-                    try {
-                      const parsed = JSON.parse(input.metadata);
-                      if (isRecord(parsed)) metadata = parsed;
-                      else metadata.source_metadata = input.metadata;
-                    } catch {
-                      metadata.source_metadata = input.metadata;
+                    // A review-stage decision should remain attached to the draft PR.
+                    // Active implementation work, however, really is stopped by a human
+                    // escalation unless the caller explicitly marks it non-pausing.
+                    const pause = body.pause !== false && task && !["review", "done", "closed"].includes(task.status);
+                    if (pause) {
+                      await runtimeTransition(taskId, "hold");
+                      db.updateTask(taskId, { status: "on_hold" });
+                      db.upsertProgress(taskId, {
+                        state: "waiting",
+                        blocked_reason: input.message.slice(0, 500),
+                      });
                     }
+
+                    let metadata: Record<string, unknown> = {};
+                    if (input.metadata) {
+                      try {
+                        const parsed = JSON.parse(input.metadata);
+                        if (isRecord(parsed)) metadata = parsed;
+                        else metadata.source_metadata = input.metadata;
+                      } catch {
+                        metadata.source_metadata = input.metadata;
+                      }
+                    }
+                    input.metadata = JSON.stringify({ ...metadata, checkpoint_id: escalationCheckpoint.id });
                   }
-                  input.metadata = JSON.stringify({ ...metadata, checkpoint_id: escalationCheckpoint.id });
                 }
 
                 const activity = db.createActivity(input);
 
                 // Surface agent escalations as a push notification, now with the id of
                 // the decision the notification leads to.
-                if (input.activity_type === "needs_human") {
+                if (input.activity_type === "needs_human" && escalationCheckpoint) {
                   events.emit("needs_human", {
                     taskId,
                     message: input.message,
@@ -1993,7 +2084,7 @@ async function handleApiRequest(
                   sendJson(res, 404, { error: "Task not found" });
                   return;
                 }
-                if (task.status === "done") {
+                if (["done", "closed"].includes(task.status)) {
                   sendJson(res, 409, { error: "Completed tasks cannot accept new checkpoints" });
                   return;
                 }
@@ -2237,6 +2328,10 @@ async function handleApiRequest(
             }
             if (task.status === "on_hold") {
               sendJson(res, 409, { error: "Task is on hold; completion callback ignored" });
+              return;
+            }
+            if (task.status === "closed") {
+              sendJson(res, 409, { error: "Task is closed; completion callback ignored" });
               return;
             }
 

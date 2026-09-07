@@ -34,6 +34,8 @@ import process_level
 import gsd_plan_import
 import supercut
 from mc_api import headers_for
+from launch_state import LaunchPending, find_launch
+from runtime_health import atomic_write_json
 
 from planner import (
     generate_plan, save_plan, init_progress, load_progress,
@@ -1737,10 +1739,49 @@ def _required_pr_title(task: dict, current_title: str = "") -> str:
 
 # === Prompt Generation ===
 
+def resolved_decisions(task_id: str) -> List[dict]:
+    """Checkpoints a human has already decided, oldest first.
+
+    The agent prompt promises that a decision "appears in this task's activity
+    history. Read it on resume" — but the prompt is regenerated from the ticket on
+    every spawn and carried nothing about it, and never told the agent how to fetch
+    it. A resumed agent was blind to the very answer it had stopped for, so it
+    re-derived the same blocker and raised the same checkpoint again. MET-680 asked
+    whether to use the live Paper URLs or the plan's placeholders; without this the
+    next spawn would have asked it a second time.
+    """
+    try:
+        checkpoints = mc_request("GET", f"/api/tasks/{task_id}/checkpoints") or []
+    except Exception as e:
+        logging.warning(f"  Could not load resolved decisions for {task_id[:8]}: {e}")
+        return []
+    decided = [
+        c for c in checkpoints
+        if c.get("status") in ("approved", "rejected", "answered")
+        and str(c.get("response") or "").strip()
+    ]
+    return sorted(decided, key=lambda c: c.get("resolved_at") or c.get("created_at") or "")
+
+
+def render_decisions(decisions: List[dict]) -> str:
+    if not decisions:
+        return ""
+    out = ("\n## Decisions already made (MUST FOLLOW)\n\n"
+           "A human has already ruled on these. They are settled: follow them, and do NOT\n"
+           "raise a checkpoint asking any of them again. If one conflicts with the plan,\n"
+           "the decision wins — amend the plan to match it.\n\n")
+    for c in decisions:
+        asked = " ".join(str(c.get("prompt") or "").split())
+        answer = str(c.get("response") or "").strip()
+        out += f"### Asked\n{asked}\n\n### Decision ({c.get('status')})\n{answer}\n\n"
+    return out
+
+
 def generate_prompt(task: dict, repo_context: str, project: str, repo: str,
                     sibling_contexts: Optional[Dict[str, str]] = None,
                     knowledge: Optional[dict] = None,
-                    plan_ready: bool = False) -> str:
+                    plan_ready: bool = False,
+                    decisions: Optional[List[dict]] = None) -> str:
     title = task["title"]
     description = task.get("description", "")
     linear_url = task.get("external_url") or task.get("linear_issue_url", "")
@@ -1757,6 +1798,8 @@ def generate_prompt(task: dict, repo_context: str, project: str, repo: str,
 ## Codebase Info ({project}/{repo})
 {repo_context}
 """
+
+    prompt += render_decisions(decisions or [])
 
     if sibling_contexts:
         prompt += "\n## Related Repos (Shared Context)\n\n"
@@ -3180,6 +3223,18 @@ def spawn_agent(task_id: str, task_label: str, repo_path: Path, prompt_content: 
         task_title or task_label,
     )
 
+    # Reconcile before replacing the prompt or preparing the worktree again.
+    try:
+        if find_launch(SWARM_DIR, task_label, mc_task_id or task_id, str(repo_path), branch_name):
+            _resolve_spawn_failure_checkpoints(mc_task_id or task_id)
+            logging.info(f"  Adopted existing agent: {task_label}")
+            return True
+    except LaunchPending:
+        return AT_CAPACITY
+    except Exception as e:
+        logging.error(f"  Cannot establish launch ownership for {task_label}: {e}")
+        return False
+
     prompt_dir = SWARM_DIR / "prompts"
     prompt_dir.mkdir(parents=True, exist_ok=True)
     prompt_file = prompt_dir / f"{task_label}.md"
@@ -3246,11 +3301,29 @@ def spawn_agent(task_id: str, task_label: str, repo_path: Path, prompt_content: 
             logging.info(f"  No agent slot for {task_label} — will retry: {result.stdout.strip()}")
             return AT_CAPACITY
         else:
-            logging.error(f"  spawn-agent.sh failed: {result.stderr}")
-            return False
+            # Log the code, not just the text. MET-680 burned days on spawns that
+            # created the session, registered the agent and let it do the work, yet
+            # still came back non-zero — and the stderr held only git/bun noise. A
+            # negative code here means the script was killed by a signal (Python
+            # reports -N), which is a different fault from any exit it chose itself;
+            # without the number the two are indistinguishable in the log.
+            signal_note = f" (killed by signal {-result.returncode})" if result.returncode < 0 else ""
+            logging.error(
+                f"  spawn-agent.sh failed: rc={result.returncode}{signal_note}\n{result.stderr}"
+            )
     except Exception as e:
         logging.error(f"  Failed to spawn agent: {e}")
-        return False
+    # The parent can time out or fail after the child starts. Never spend another
+    # retry until the registry and the actual pane have been reconciled.
+    try:
+        if find_launch(SWARM_DIR, task_label, mc_task_id or task_id, str(repo_path), branch_name):
+            _resolve_spawn_failure_checkpoints(mc_task_id or task_id)
+            return True
+    except LaunchPending:
+        return AT_CAPACITY
+    except Exception as e:
+        logging.warning(f"  Could not reconcile launch {task_label}: {e}")
+    return False
 
 
 def _handle_spawn_refusal(task_id: str, outcome, what: str):
@@ -4224,7 +4297,8 @@ def _spawn_for_repos(task: dict, repos: List[dict]):
     repo_context = repo_indexes.get(f"{project}/{repo}", "")
     knowledge = recall_knowledge([r], knowledge_query)
     prompt = generate_prompt(task, repo_context, project, repo, knowledge=knowledge,
-                             plan_ready=bool(planning_dir))
+                             plan_ready=bool(planning_dir),
+                             decisions=resolved_decisions(task_id))
     task_label = f"{_task_ref(task)}-{repo}"
 
     outcome = spawn_agent(task_id, task_label, repo_path, prompt, mc_task_id=task_id, task_title=title,
@@ -7871,12 +7945,19 @@ def run_daemon(interval: int = 60):
 
     while True:
         did_work = False
+        receipt = {"pid": os.getpid(), "started_at": datetime.now(timezone.utc).isoformat()}
+        atomic_write_json(MC_HOME / "bridge" / "health.json", receipt)
         try:
             did_work = run_once()
             consecutive_failures = 0
         except Exception as e:
             consecutive_failures += 1
+            receipt["last_error"] = str(e)[:500]
             logging.error(f"Bridge error (failure #{consecutive_failures}): {e}")
+        finally:
+            receipt["finished_at"] = datetime.now(timezone.utc).isoformat()
+            receipt["consecutive_failures"] = consecutive_failures
+            atomic_write_json(MC_HOME / "bridge" / "health.json", receipt)
 
         if consecutive_failures:
             # Exponential backoff so a down Mission Control API is not hammered.

@@ -62,6 +62,7 @@
     --review:  #8994ff;
     --intake:  #26c9f5;
     --done:    #777c88;
+    --closed:  #ef6b6b;
   }
   /* The breakpoints are the desks this runs on: laptop, 27" display, and the
      ultrawide the screenshot that prompted this was taken on. */
@@ -196,6 +197,7 @@
   .rgroup.tone-review { --group: var(--review); }
   .rgroup.tone-intake, .rgroup.tone-triage { --group: var(--intake); }
   .rgroup.tone-done { --group: var(--done); color: #0c0d11; }
+  .rgroup.tone-closed { --group: var(--closed); color: #0c0d11; }
   .rlist { flex: none; display: flex; flex-direction: column; gap: 8px; padding: 0 0 22px; }
   .rt { display: block; padding: 15px 16px 14px; border-radius: 9px; text-decoration: none; color: inherit;
         border-left: 3px solid transparent; background: transparent; }
@@ -218,6 +220,7 @@
   .rlist.tone-review { --group: var(--review); }
   .rlist.tone-intake, .rlist.tone-triage { --group: var(--intake); }
   .rlist.tone-done { --group: var(--done); }
+  .rlist.tone-closed { --group: var(--closed); }
   .rt-top {
     display: flex; gap: 8px; align-items: baseline;
     font-family: var(--mono); font-size: 10.5px; color: var(--ink-3); margin-bottom: 9px;
@@ -357,11 +360,13 @@
   .summary-note + .summary-safety { margin-left: 10px; }
   .summary-action.hold { color: var(--hold); border-color: rgba(245,158,11,.42); }
   .summary-action.reset { color: var(--ink-3); }
+  .summary-action.close { color: var(--red); border-color: rgba(239,68,68,.42); }
   .summary-action:disabled { opacity: .42; cursor: not-allowed; }
   .summary-action:hover { color: var(--ink); border-color: rgba(255,255,255,.28); }
   .summary-action:disabled:hover { color: var(--ink-3); border-color: rgba(255,255,255,.14); }
   .summary-action.primary:hover { color: #031a12; filter: brightness(1.08); }
   .summary-action.hold:hover { color: #ffd48a; border-color: rgba(245,158,11,.72); background: rgba(245,158,11,.07); }
+  .summary-action.close:hover { color: #ff8a8a; border-color: rgba(239,68,68,.72); background: var(--red-bg); }
   .summary-note { margin-left: auto; font-family: var(--mono); font-size: 10px; color: var(--ink-4); }
 
   /* ─────────── progress track ─────────── */
@@ -795,6 +800,9 @@
   .ticket-status-panel.tone-done {
     --status-tone: var(--done); --status-surface: #1a1b1e; --status-surface-end: #141518;
   }
+  .ticket-status-panel.tone-closed {
+    --status-tone: var(--closed); --status-surface: #211011; --status-surface-end: #171112;
+  }
   .status-kicker {
     display: flex; align-items: center; gap: 10px; font-family: var(--mono); font-size: 11px;
     font-weight: 800; letter-spacing: .19em; text-transform: uppercase;
@@ -1047,6 +1055,7 @@ const LEGS = [
   { label: "Build",   statuses: ["in_progress"] },
   { label: "Review",  statuses: ["review", "in_review", "testing"] },
   { label: "Done",    statuses: ["done", "completed", "merged"] },
+  { label: "Closed",  statuses: ["closed", "canceled", "cancelled"] },
 ];
 
 async function getJson(path) {
@@ -1212,9 +1221,10 @@ function renderTicket(task, triage, activities, extra = {}) {
             ${planReady ? `<button class="summary-action primary" data-planopen>Open plan</button>` : ""}
             ${previewAction}
             ${inReview ? "" : `<span class="summary-note">${esc(runStatus(task, extra.plan, extra.progress, qs, extra.agentProgress))}</span>`}
-            ${!finished && (triage || task.status !== "on_hold") ? `<span class="summary-safety">
-              ${triage ? `<button class="summary-action reset" data-reset-triage>Reset triage</button>` : ""}
-              ${task.status !== "on_hold" ? `<button class="summary-action hold" data-hold-task>Pause task</button>` : ""}
+            ${!finished ? `<span class="summary-safety">
+              ${triage && !["done", "completed", "merged"].includes(task.status) ? `<button class="summary-action reset" data-reset-triage>Reset triage</button>` : ""}
+              ${!["on_hold", "done", "completed", "merged"].includes(task.status) ? `<button class="summary-action hold" data-hold-task>Pause task</button>` : ""}
+              <button class="summary-action close" data-close-task>Close ticket</button>
             </span>` : ""}
           </div>
           <div class="lifecycle-sr" aria-hidden="true">
@@ -1265,7 +1275,7 @@ function renderExecutionTarget(task, triage, side = {}) {
   const planReady = !!(side.plan && (side.plan.steps || []).length);
   const buildStarted = task?.status === "in_progress"
     || Object.values(side.progress?.steps || {}).some(s => ["in_progress", "completed", "blocked"].includes(s.status));
-  const buildDone = ["review", "in_review", "testing", "done", "completed", "merged"].includes(task?.status);
+  const buildDone = ["review", "in_review", "testing", "done", "completed", "merged", "closed", "canceled", "cancelled"].includes(task?.status);
   const legacyRepoConfirmed = !!triage?.confirmed && !("repo_confirmed" in triage);
   const repoConfirmed = !!currentRepo
     && (triage?.repo_confirmed === currentRepo || legacyRepoConfirmed);
@@ -1299,8 +1309,8 @@ function renderExecutionTarget(task, triage, side = {}) {
  * while the nav counted them. A parked ticket disappearing from the list is the
  * worst case: it is parked precisely because someone needs to come back to it.
  *
- * Done is kept, last and collapsed to a few, so the list stays a work queue rather
- * than an archive.
+ * Done and Closed are separate collapsed archives: Done means completed work;
+ * Closed means an operator ended or archived the ticket.
  */
 function railGroups(tasks) {
   // The rail is an operating queue, not a second copy of the six-step tracker.
@@ -1311,7 +1321,8 @@ function railGroups(tasks) {
     { label: "Building", statuses: ["assigned", "in_progress"], tasks: [] },
     { label: "Review", statuses: ["review", "in_review", "testing"], tasks: [] },
     { label: "Holding", statuses: ["on_hold", "pending_dispatch"], tasks: [] },
-    { label: "Done", statuses: ["done", "completed", "merged", "cancelled"], tasks: [] },
+    { label: "Done", statuses: ["done", "completed", "merged"], tasks: [] },
+    { label: "Closed", statuses: ["closed", "canceled", "cancelled"], tasks: [] },
   ];
   const other = { label: "Other", statuses: [], tasks: [] };
   for (const t of tasks || []) {
@@ -1337,6 +1348,7 @@ function railTone(label) {
   if (value.includes("review") || value.includes("test")) return "review";
   if (value.includes("triage") || value.includes("planning")) return "triage";
   if (value.includes("inbox") || value.includes("intake")) return "intake";
+  if (value.includes("closed") || value.includes("cancel")) return "closed";
   if (value.includes("done") || value.includes("complete") || value.includes("merge")) return "done";
   return "done";
 }
@@ -1346,7 +1358,8 @@ function taskTone(status) {
   if (["assigned", "in_progress"].includes(status)) return "building";
   if (["review", "in_review", "testing"].includes(status)) return "review";
   if (["planning", "triage", "triaging"].includes(status)) return "planning";
-  if (["done", "completed", "merged", "cancelled"].includes(status)) return "done";
+  if (["closed", "canceled", "cancelled"].includes(status)) return "closed";
+  if (["done", "completed", "merged"].includes(status)) return "done";
   return "intake";
 }
 
@@ -1434,7 +1447,7 @@ function renderNav(tasks, current) {
   </nav>`;
 }
 
-const DONE = ["done", "completed", "merged", "cancelled"];
+const DONE = ["done", "completed", "merged", "closed", "canceled", "cancelled"];
 
 function renderRail(tasks, current, triage, planData = {}, planCache = {}) {
   const qs = (triage && triage.questions) || [];
@@ -1512,7 +1525,7 @@ function renderRail(tasks, current, triage, planData = {}, planCache = {}) {
           <div class="rt-title">${esc(taskTitle(t))}</div>${live}</a>`;
       }).join("");
     const heading = `${g.label.toUpperCase()} · ${g.tasks.length}`;
-    return `<details class="rsection tone-${tone}" ${tone === "done" ? "" : "open"}>
+    return `<details class="rsection tone-${tone}" ${["done", "closed"].includes(tone) ? "" : "open"}>
       <summary class="rgroup tone-${tone}" aria-label="${esc(heading)}"><span>${esc(g.label.toUpperCase())}</span><b>${g.tasks.length}</b></summary>
       <div class="rlist tone-${tone}">${list}</div>
     </details>`;
@@ -2504,7 +2517,7 @@ function renderDecisions(questions, activeId, side = {}) {
     ? [task.pr_url, prDeliverable?.path].find(url => /^https?:\/\//.test(url || "")) || ""
     : "";
   const statusLabel = String(task.status || "unknown").replace(/_/g, " ");
-  const statusSymbol = ({ planning: "→", review: "✓", building: "↗", hold: "Ⅱ", done: "✓", intake: "○" })[tone] || "○";
+  const statusSymbol = ({ planning: "→", review: "✓", building: "↗", hold: "Ⅱ", done: "✓", closed: "×", intake: "○" })[tone] || "○";
   return `<section class="ticket-status-panel tone-${tone}">
       <div class="status-heading">
         <div class="status-kicker"><span class="status-symbol" aria-hidden="true">${statusSymbol}</span>${esc(statusLabel)}</div>
@@ -2927,6 +2940,8 @@ function wireConversation(triage, keptScroll = null, openGroups = []) {
 
   document.querySelector("[data-hold-task]")?.addEventListener("click", ev =>
     putTaskOnHold(ev.currentTarget));
+  document.querySelector("[data-close-task]")?.addEventListener("click", ev =>
+    closeTask(ev.currentTarget));
   document.querySelector("[data-reset-triage]")?.addEventListener("click", ev =>
     resetTaskTriage(ev.currentTarget));
 
@@ -2985,6 +3000,33 @@ async function putTaskOnHold(btn) {
     load({ force: true });
   } catch (e) {
     if (btn) { btn.disabled = false; btn.textContent = "Pause task"; }
+    const note = document.querySelector(".summary-note") || document.querySelector(".cfoot");
+    if (note) note.textContent = String(e.message || e);
+  }
+}
+
+/** Close the ticket locally and, when linked, in Linear before recording success. */
+async function closeTask(btn) {
+  const confirmed = await confirmSafety(
+    "Close this ticket?",
+    "Mission Control will move it to Closed and clear pending decisions. A linked Linear issue will be canceled too. The ticket itself is not deleted.",
+    "Close ticket",
+  );
+  if (!confirmed) return;
+  if (btn) { btn.disabled = true; btn.textContent = "Closing…"; }
+  try {
+    const res = await fetch(`/api/tasks/${encodeURIComponent(taskId)}/close`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({}),
+    });
+    if (!res.ok) {
+      const data = await res.json().catch(() => ({}));
+      throw new Error(data.error || `could not close ticket (${res.status})`);
+    }
+    load({ force: true });
+  } catch (e) {
+    if (btn) { btn.disabled = false; btn.textContent = "Close ticket"; }
     const note = document.querySelector(".summary-note") || document.querySelector(".cfoot");
     if (note) note.textContent = String(e.message || e);
   }
