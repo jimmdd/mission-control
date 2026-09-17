@@ -1325,6 +1325,26 @@ test("the rail's segments follow the steps once there is a plan", () => {
   assert.match(triaging, /class="n">2\/2</);
 });
 
+test("selecting a single-agent ticket preserves its completed step count", () => {
+  const { renderRail } = threadHelpers();
+  const task = { id: "met724", title: "MET-724", status: "in_progress" };
+  const plan = { steps: Array.from({ length: 38 }, (_, i) => ({ step: i + 1, plan: "01-01" })) };
+  const snapshot = { plan, progress: null, agentProgress: { state: "done" } };
+  for (const current of [null, task]) {
+    const html = renderRail([task], current, null, snapshot, { [task.id]: snapshot });
+    assert.match(html, /class="n">38\/38</);
+    assert.equal((html.match(/<i class="done"><\/i>/g) || []).length, 38);
+  }
+
+  // Explicit step records still win over the coarse whole-agent completion signal.
+  snapshot.progress = { steps: { "38": { status: "blocked" } } };
+  for (const current of [null, task]) {
+    const html = renderRail([task], current, null, snapshot, { [task.id]: snapshot });
+    assert.match(html, /class="n">37\/38</);
+    assert.equal((html.match(/<i class="now"><\/i>/g) || []).length, 1);
+  }
+});
+
 test("ticket rail keeps the operational group order", () => {
   const { renderRail } = threadHelpers();
   const tasks = [

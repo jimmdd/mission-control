@@ -6469,8 +6469,20 @@ Rules:
 - The reason must say what the choice buys and what it gives up. One or two sentences.
 
 Respond with ONLY valid JSON: {{"choice": "...", "reason": "..."}}"""
-    result = _parse_gemini_json(call_gemini(prompt, max_tokens=700, model=_triage_model_deep()))
-    if not result:
+    # A cut-off JSON response used to silently retry with the same small budget
+    # every daemon cycle. Allow one larger attempt, never accept partial JSON.
+    result = None
+    for max_tokens in (700, 2800):
+        response = call_gemini(prompt, max_tokens=max_tokens, model=_triage_model_deep())
+        if not response:
+            return None  # Provider errors already have their own retry policy.
+        result = _parse_gemini_json(response)
+        if isinstance(result, dict) and result:
+            break
+        logging.warning(
+            f"  Invalid decision JSON for question {question.get('id')} on {task['id'][:8]} "
+            f"(budget {max_tokens})" + (" — retrying once with 2800 tokens" if max_tokens == 700 else ""))
+    if not isinstance(result, dict) or not result:
         return None
     choice = str(result.get("choice", "")).strip()
     reason = str(result.get("reason", "")).strip()
@@ -6527,6 +6539,7 @@ def _service_task_questions(task: dict) -> bool:
             logging.warning(f"  No reply produced for question {q.get('id')} on {task_id[:8]}")
 
     for q in delegated:
+        logging.info(f"  Attempting delegated question {q.get('id')} for {task_id[:8]}")
         decision = _decide_delegated(task, q, context)
         if decision:
             choice, reason = decision
@@ -6537,6 +6550,9 @@ def _service_task_questions(task: dict) -> bool:
                 f"Decided on your behalf: **{q.get('question', '')}** → {choice}\n\n{reason}\n\n"
                 f"Marked as the agent's call — change it on the ticket if you disagree.")
             logging.info(f"  Decided delegated question {q.get('id')} for {task_id[:8]}")
+        else:
+            logging.warning(
+                f"  No valid decision produced for question {q.get('id')} on {task_id[:8]} — leaving open")
 
     if not changed:
         return False

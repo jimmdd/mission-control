@@ -239,3 +239,57 @@ print(json.dumps(out))
   assert.equal(r.asks.answer, null);
   assert.equal(r.asks.rec, "Host & Link");
 });
+
+test("delegated planning decisions retry malformed JSON once and log their outcome", () => {
+  const program = `
+import copy, io, json, logging, sys, tempfile, os
+sys.path.insert(0, ${JSON.stringify(SWARM)})
+with tempfile.TemporaryDirectory() as home:
+ os.environ["MC_HOME"] = home
+ import bridge
+ stream = io.StringIO()
+ logging.basicConfig(stream=stream, level=logging.INFO, force=True)
+ bridge._question_context = lambda task: "ticket context"
+ bridge._triage_model_deep = lambda: "test-model"
+ bridge.mc_log_activity = lambda *a, **k: None
+ results = []
+ for responses in [
+   ['{"choice": "cut off', '{"choice":"A","reason":"reversible"}'],
+   ['{"choice": "cut off', '{"choice": "still cut off'],
+   [None],
+   ['[]', 'null'],
+   ['{"choice":"off-menu","reason":"invalid"}'],
+ ]:
+  state = {"questions": [{"id":"q3", "question":"Which?", "options":["A", "B"], "delegate_requested":True}]}
+  writes, calls = [], []
+  def request(method, path, body=None):
+   if method == "GET": return copy.deepcopy(state)
+   writes.append(body)
+   return {}
+  bridge.mc_request = request
+  bridge.fetch_tasks_by_status = lambda status: [{"id":"task727"}] if status == "planning" else []
+  def model(prompt, max_tokens, model):
+   calls.append(max_tokens)
+   return responses.pop(0)
+  bridge.call_gemini = model
+  stream.seek(0); stream.truncate(0)
+  bridge.process_open_questions()
+  results.append({"calls":calls, "writes":writes, "log":stream.getvalue()})
+ print(json.dumps(results))
+`;
+  const results = JSON.parse(execFileSync("python3", ["-c", program], { encoding: "utf8" }));
+  const [recovered, exhausted, unavailable, invalidShape, offMenu] = results;
+  assert.deepEqual(recovered.calls, [700, 2800]);
+  assert.equal(recovered.writes[0].questions[0].answer, "A");
+  assert.equal(recovered.writes[0].questions[0].delegate_requested, false);
+  assert.match(recovered.log, /Attempting delegated question q3 for task727/);
+  assert.match(recovered.log, /Decided delegated question q3 for task727/);
+  for (const result of [exhausted, unavailable, invalidShape, offMenu]) {
+    assert.deepEqual(result.writes, [], "failed decisions must leave task state untouched");
+    assert.match(result.log, /No valid decision produced for question q3 on task727/);
+  }
+  assert.deepEqual(exhausted.calls, [700, 2800], "retrying is bounded");
+  assert.deepEqual(invalidShape.calls, [700, 2800]);
+  assert.deepEqual(unavailable.calls, [700], "provider failures already have their own retry policy");
+  assert.deepEqual(offMenu.calls, [700], "valid JSON with an off-menu answer is rejected");
+});

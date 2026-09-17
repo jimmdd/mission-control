@@ -192,6 +192,52 @@ test("load builds the page without calling anything that no longer exists", asyn
   assert.match(html, /id="say"/, "and the separate chat composer still rendered");
 });
 
+test("loading and revisiting a completed plan preserves progress through read failures", async () => {
+  const task = { id: "t1", title: "MET-724", status: "in_progress" };
+  const plan = { steps: Array.from({ length: 38 }, (_, i) => ({ step: i + 1, title: `Step ${i + 1}` })) };
+  const bodies = {
+    "/api/tasks/t1": task,
+    "/api/tasks/t1/plan": { plan, progress: null },
+    "/api/tasks/t1/progress": { state: "done" },
+    "/api/tasks/t1/activities": [],
+  };
+  const failures = new Set();
+  const root = { innerHTML: "" };
+  const page = new Function("root", "fetch", `
+    const document = {
+      activeElement: null,
+      querySelector: s => s === "#root" ? root : null,
+      querySelectorAll: () => [], addEventListener() {},
+    };
+    const location = { search: "?id=t1" };
+    const CSS = { escape: s => s };
+    ${BODY}
+    sideData.loaded = true;
+    sideData.tasks = [{ id: "t1", title: "MET-724", status: "in_progress" }];
+    return { load, inactive: () => renderRail(sideData.tasks, null, null, {}, ticketPlanCache) };
+  `)(root, async url => {
+    if (failures.has(url)) throw new Error("temporary read failure");
+    return { ok: true, json: async () => bodies[url] ?? [] };
+  });
+  await page.load({ force: true });
+  assert.match(root.innerHTML, /class="n">38\/38</, "load passes agent progress to the selected rail");
+  assert.match(page.inactive(), /class="n">38\/38</);
+  failures.add("/api/tasks/t1/progress");
+  await page.load({ force: true });
+  assert.match(root.innerHTML, /class="n">38\/38</, "a failed progress read retains the last snapshot");
+  failures.add("/api/tasks/t1/plan");
+  await page.load({ force: true });
+  assert.match(root.innerHTML, /class="n">38\/38</, "a failed plan read does not erase completed steps");
+  assert.match(page.inactive(), /class="n">38\/38</);
+  failures.clear();
+  bodies["/api/tasks/t1/progress"] = { state: "running" };
+  await page.load({ force: true });
+  assert.match(root.innerHTML, /class="n">0\/38</, "fresh progress wins; completion is not permanently latched");
+  bodies["/api/tasks/t1/plan"] = { plan: null, progress: null };
+  await page.load({ force: true });
+  assert.doesNotMatch(root.innerHTML, /class="n">\d+\/38</, "a successful plan removal clears the snapshot");
+});
+
 // The page replaced all of #root every fifteen seconds whether or not anything had
 // changed, and forced the stream to the bottom on every render — so it moved under
 // whoever was reading it, folded away anything they had opened, and lost their place.

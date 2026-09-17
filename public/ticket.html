@@ -1457,13 +1457,13 @@ function renderRail(tasks, current, triage, planData = {}, planCache = {}) {
   // Once there is a plan the segments are the steps, because that is what is
   // moving. Before it, they are the questions — the only progress triage has.
   const steps = (planData.plan && planData.plan.steps) || [];
-  const stepState = n => ((planData.progress && planData.progress.steps) || {})[String(n)] || {};
-  const stepsDone = steps.filter(s => stepState(s.step).status === "completed").length;
+  const states = stepStates(planData.plan, planData.progress, planData.agentProgress);
+  const stepsDone = steps.filter(s => states[s.step] === "done").length;
   const track = steps.length
     ? { word: "step", n: stepsDone, total: steps.length,
         cls: steps.map(s => {
-          const st = stepState(s.step).status;
-          return st === "completed" ? "done" : st === "in_progress" ? "now" : "";
+          const st = states[s.step];
+          return st === "done" ? "done" : ["run", "blocked"].includes(st) ? "now" : "";
         }) }
     : qs.length
       ? { word: "triage", n: settled, total: qs.length,
@@ -3306,7 +3306,9 @@ async function load({ force = false } = {}) {
     // The list endpoint enriches tasks with cross-ticket signals such as pending
     // checkpoints and preview state. Keep those while applying the fresher detail.
     const task = taskIndex >= 0 ? { ...sideData.tasks[taskIndex], ...fetchedTask } : fetchedTask;
-    const planData = await getJson(`/api/tasks/${encodeURIComponent(taskId)}/plan`).catch(() => ({}));
+    const cachedPlan = ticketPlanCache[task.id];
+    const planData = await getJson(`/api/tasks/${encodeURIComponent(taskId)}/plan`)
+      .catch(() => cachedPlan || {});
     // Activity history is what dates the tracker; never let it hide the ticket.
     const activities = await getJson(`/api/tasks/${encodeURIComponent(taskId)}/activities`).catch(() => []);
     const checkpointData = await getJson(`/api/tasks/${encodeURIComponent(taskId)}/checkpoints`).catch(() => []);
@@ -3317,7 +3319,9 @@ async function load({ force = false } = {}) {
     // works the whole plan and nothing writes per-step status, so `planData.progress`
     // stays empty and the map read "0 of 22 done" while step 01-01 was committed.
     // This is the one signal that does move: `step_label` names the plan being worked.
-    const agentProgress = await getJson(`/api/tasks/${encodeURIComponent(taskId)}/progress`).catch(() => ({}));
+    const agentProgress = await getJson(`/api/tasks/${encodeURIComponent(taskId)}/progress`)
+      .catch(() => JSON.stringify(planData.plan) === JSON.stringify(cachedPlan?.plan)
+        ? cachedPlan?.agentProgress || {} : {});
     ticketPlanCache[task.id] = { ...planData, agentProgress };
     const triage = parseTriage(task);
     const qs = (triage?.questions || []);
@@ -3375,7 +3379,7 @@ async function load({ force = false } = {}) {
 
     root.innerHTML = `<div class="shell">`
       + renderNav(sideData.tasks.length ? sideData.tasks : [task], task)
-      + renderRail(sideData.tasks, task, triage, planData, ticketPlanCache)
+      + renderRail(sideData.tasks, task, triage, { ...planData, agentProgress }, ticketPlanCache)
       + renderTicket(task, triage, activities, {
           agent: liveAgent(task, planData.progress),
           plan: planData.plan,
