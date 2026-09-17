@@ -31,3 +31,15 @@ test("evidence gate preserves product assets but catches proofs even after a del
     assert.equal(spawnSync("python3", [gate, cwd, "missing-base"], { encoding: "utf8" }).status, 2);
   } finally { rmSync(cwd, { recursive: true, force: true }); }
 });
+
+test("evidence gate rejects text proof artifacts while preserving durable docs and executable tests", () => {
+  const result = spawnSync("python3", ["-c", `
+import importlib.util, json
+s = importlib.util.spec_from_file_location("gate", ${JSON.stringify(gate)})
+m = importlib.util.module_from_spec(s); s.loader.exec_module(m)
+paths = ["docs/met-724-proof/README.md", "docs/met-724-proof/MANIFEST.json", "apps/new-ui/docs/met-725-evidence/REVIEW.md", "docs/met-999-validation.md", "docs/met-999-fix-list.md", "docs/deployment.md", "tests/e2e/proofRendering.test.ts", "tests/fixtures/screenshots/baseline.png", "apps/new-ui/static/team/headshot.webp"]
+print(json.dumps([m.is_review_evidence(p) for p in paths]))
+`], { encoding: "utf8" });
+  assert.equal(result.status, 0, result.stderr);
+  assert.deepEqual(JSON.parse(result.stdout), [true, true, true, true, true, false, false, false, false]);
+});

@@ -101,4 +101,6 @@ print(json.dumps({
   assert.match(result.policy, /including branch history/);
   assert.match(result.policy, /No-PR\/local-only tasks must keep evidence local/);
   assert.match(result.policy, /required product assets and intentional test fixtures/);
+  assert.match(result.policy, /do not create versioned proof reports or indexes/);
+  assert.doesNotMatch(result.policy, /Keep concise text validation notes and an evidence index in Git/);
 });
