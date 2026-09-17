@@ -81,3 +81,24 @@ print(json.dumps({"without": "Decisions already made" in without,
   assert.equal(result.with, true);
   assert.equal(result.answer, true);
 });
+
+test("new and staged agents receive the evidence storage policy without requiring PR publication", () => {
+  const result = python(`
+import planner
+from evidence_policy import EVIDENCE_POLICY
+task = {"id": "t1", "title": "MET-1", "description": ""}
+step = {"step": 1, "title": "Implement", "description": "fix", "files": []}
+print(json.dumps({
+    "normal": EVIDENCE_POLICY in bridge.generate_prompt(task, "", "p", "r"),
+    "ready": EVIDENCE_POLICY in bridge.generate_prompt(task, "", "p", "r", plan_ready=True),
+    "step": EVIDENCE_POLICY in planner.build_step_prompt(task, step, {"total_steps": 1}),
+    "policy": EVIDENCE_POLICY,
+}))
+`);
+  assert.equal(result.normal, true);
+  assert.equal(result.ready, true);
+  assert.equal(result.step, true);
+  assert.match(result.policy, /including branch history/);
+  assert.match(result.policy, /No-PR\/local-only tasks must keep evidence local/);
+  assert.match(result.policy, /required product assets and intentional test fixtures/);
+});

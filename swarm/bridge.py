@@ -32,6 +32,7 @@ from contextlib import contextmanager
 from typing import Dict, List, Optional, Tuple
 
 import process_level
+from evidence_policy import EVIDENCE_POLICY
 import gsd_plan_import
 import supercut
 from mc_api import headers_for
@@ -1800,6 +1801,7 @@ def generate_prompt(task: dict, repo_context: str, project: str, repo: str,
 {repo_context}
 """
 
+    prompt += EVIDENCE_POLICY
     prompt += render_decisions(decisions or [])
 
     if sibling_contexts:
@@ -3267,6 +3269,8 @@ def spawn_agent(task_id: str, task_label: str, repo_path: Path, prompt_content: 
             f"{draft_note}"
             f"\n```\ngh pr create {draft_flag}--base {pr_base} --title {shlex.quote(required_pr_title)} --body \"...\"\n```\n"
         )
+    if EVIDENCE_POLICY not in prompt_content:
+        prompt_content += EVIDENCE_POLICY
     prompt_file.write_text(prompt_content + footer)
 
     env = os.environ.copy()
@@ -4557,7 +4561,7 @@ def _start_planning_job(task: dict, worktree: Path, job: Path):
     One task's planning stopped every other task on the machine.
     """
     task_id = task["id"]
-    planning_context = _build_triage_context(task_id)
+    planning_context = _build_triage_context(task_id) + EVIDENCE_POLICY
     # Staged planning is a separate process from both triage and implementation.
     # Give it the same source material the eventual builder receives; otherwise a
     # video-first ticket gets planned from its one-line description while only the
@@ -7077,7 +7081,7 @@ The reviewer has requested changes on your PR. Address ALL feedback below.
 
 Do NOT create a new PR. Fix the existing code and push.
 Do NOT ask for confirmation. Complete all steps autonomously.
-""" + _design_prompt_section(task) + _video_prompt_section(task)
+""" + EVIDENCE_POLICY + _design_prompt_section(task) + _video_prompt_section(task)
         + _supercut_prompt_section(task) + _attachment_prompt_section(task))
 
     try:

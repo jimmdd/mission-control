@@ -28,6 +28,8 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 
+from evidence_policy import EVIDENCE_POLICY
+
 from gsd_backend import (
     backend_label,
     execute_command as gsd_execute_command,
@@ -567,6 +569,7 @@ def generate_plan(
 {codebase_context[:12000] if codebase_context else "(no codebase context available)"}
 {knowledge_section}
 
+{EVIDENCE_POLICY}
 ## Important
 Each step becomes a FULL AUTONOMOUS AGENT SESSION. The agent will:
 1. Read the codebase and understand context
@@ -1048,6 +1051,7 @@ curl -X POST {mc_base}/api/tasks/{task.get('id', 'TASK_ID')}/activities \\
 ## Codebase Info
 {repo_context if repo_context else f"(explore the codebase as part of your {gsd_name} planning step)"}
 {context_section}{knowledge_section}
+{EVIDENCE_POLICY}
 ## Constraints
 - Do NOT modify files unrelated to this step's acceptance criteria
 - Do NOT add dependencies without justification
