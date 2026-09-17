@@ -1562,7 +1562,7 @@ const DEC_H = 30, DEC_GAP = 8;
 function stepStates(plan, progress, agentProgress) {
   const perStep = (progress && progress.steps) || null;
   const out = {};
-  const current = String(agentProgress?.step_label || "").match(/^(\d+-\d+)/);
+  const current = String(agentProgress?.step_label || "").match(/^\s*["']?(\d+-\d+)/);
   const running = agentProgress?.state === "running" || agentProgress?.state === "waiting";
   // The run finished, so nothing is still in flight and nothing is still ahead.
   // Without this the plan the agent stopped on stayed drawn as unreached — MET-640
@@ -1579,10 +1579,12 @@ function stepStates(plan, progress, agentProgress) {
       continue;
     }
     if (finished) { out[s.step] = "done"; continue; }
-    if (!current || !s.plan) { out[s.step] = ""; continue; }
+    // YAML-derived plans may retain quotes around the id (for example "01-08").
+    const planId = String(s.plan || "").match(/^\s*["']?(\d+-\d+)/)?.[1];
+    if (!current || !planId) { out[s.step] = ""; continue; }
     // Plan ids are zero-padded ("01-02"), so a string compare is the right order.
-    out[s.step] = s.plan < current[1] ? "done"
-      : s.plan === current[1] ? (running ? "run" : "")
+    out[s.step] = planId < current[1] ? "done"
+      : planId === current[1] ? (running ? "run" : "")
       : "";
   }
   return out;

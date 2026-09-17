@@ -2305,3 +2305,23 @@ test("repeated checkpoints stay separate while interleaved heartbeats are omitte
   assert.equal((rail.match(/class="activity-item cevent bad"/g) || []).length, 5);
   assert.doesNotMatch(rail, /Agent heartbeat|class="xn"/);
 });
+
+
+test("quoted plan ids preserve current and completed steps in both rail states", () => {
+  const { renderRail } = threadHelpers();
+  const task = { id: "quoted", title: "Quoted plans", status: "in_progress" };
+  const plan = { steps: [
+    { step: 1, plan: '\"01-01\"' },
+    { step: 2, plan: '\"01-02\"' },
+    { step: 3, plan: '\"01-03\"' },
+  ] };
+  for (const step_label of ["01-02 — Testing", '\"01-02\" — Testing']) {
+    const snapshot = { plan, progress: null, agentProgress: { state: "waiting", step_label } };
+    for (const current of [null, task]) {
+      const html = renderRail([task], current, null, snapshot, { [task.id]: snapshot });
+      assert.match(html, /class="n">1\/3</);
+      assert.equal((html.match(/<i class="done"><\/i>/g) || []).length, 1);
+      assert.equal((html.match(/<i class="now"><\/i>/g) || []).length, 1);
+    }
+  }
+});
