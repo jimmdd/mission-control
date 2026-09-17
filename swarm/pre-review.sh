@@ -17,6 +17,10 @@ CONFIG="$SWARM_DIR/swarm-config.json"
 # like "gpt-5.4" makes the CLI reject the run).
 CODEX_MODEL=$(jq -r '.codex.model // ""' "$CONFIG" 2>/dev/null || echo "")
 
+# Resolve before cd: this script may be invoked by its installed symlink.
+EVIDENCE_GATE="$(python3 -c 'import pathlib,sys; print(pathlib.Path(sys.argv[1]).resolve().with_name("check_review_evidence.py"))' "${BASH_SOURCE[0]}")"
+python3 "$EVIDENCE_GATE" "$WORKTREE" "$BASE_BRANCH"
+
 cd "$WORKTREE"
 
 # Get the diff
