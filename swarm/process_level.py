@@ -40,6 +40,22 @@ LEVELS = ("simple", "normal", "careful")
 # is not in LEVELS.
 AUTONOMOUS = ("", "auto", "simple")
 
+# Shared by triage, project setup, planning, and the implementation prompt.
+ROUTINE_CHANGE_POLICY = """For small, reversible changes to existing UI (spacing, sticky positioning,
+styling, or copy), inspect the route, screenshot, and existing component first.
+Choose the smallest page-scoped interpretation consistent with the ticket, record
+the assumption in the plan, and verify the rendered result during implementation. Minor CSS alternatives
+are implementation decisions, not a reason to stop for a product interview.
+Keep the plan proportional: one bounded task with its verification, no adjacent
+redesign or new approval stage. The user's earlier answers are binding and outrank
+older recalled guidance; do not reopen settled routing or governance decisions.
+Inspect repository instructions to determine which governance applies. Do not ask
+the user whether a component uses a design system when code and docs can answer.
+Ask only for missing authority, credentials or licence rights, destructive actions,
+material scope changes, or genuinely conflicting product requirements. Never treat
+this policy as permission to guess financial behavior or bypass an explicit hold.
+"""
+
 # Paths whose change is not undone by reverting a commit. A migration that has run
 # has already altered something the git history does not describe.
 IRREVERSIBLE = re.compile(

@@ -931,10 +931,15 @@ def _is_repo_internal_lookup_question(question: dict) -> bool:
         r"(?:exact\s+file\s+path|component\s+name|which\s+(?:file|component)|"
         r"what\s+(?:file|component)|where\s+.*(?:rendered|implemented|defined)|"
         r"please\s+(?:find|locate|check)\s+.*(?:file|component)|"
-        r"which\s+existing\s+(?:application|app|package|workspace|directory)|"
+        r"which\s+(?:(?:existing|specific|frontend|front-end)\s+)+(?:application|app|package|workspace|directory)\b|"
+        r"which\s+(?:application|app|package)\s+(?:contains|implements|owns|renders|is responsible)\b|"
         r"what\s+(?:application|app|package)\s+(?:contains|implements|owns))",
         prompt,
         re.I,
+    ) or re.search(
+        r"\b(?:do|does|are|is)\b.{0,250}\b(?:elements?|components?|bar|border)\b"
+        r".{0,180}\b(?:governed|utilize|use)\b.{0,180}\b(?:merlin|design system)\b",
+        prompt, re.I,
     ))
 
 
@@ -1013,6 +1018,18 @@ def _execution_target(task: dict, repos: List[dict], questions: List[dict]) -> d
         app = match.group(1).rstrip("/.,;:)")
         if app not in apps:
             apps.append(app)
+
+    if any(r.get("project") == "GitProjects" and r.get("repo") == "backend" for r in repos):
+        # An answer selects the destination; the alternatives in its question do not.
+        answer_apps = []
+        for q in questions or []:
+            for app in _backend_app_paths(str(q.get("answer") or "")):
+                if app not in answer_apps:
+                    answer_apps.append(app)
+        question_apps = _backend_app_paths(decision_text)
+        apps = (answer_apps or _backend_app_paths(description)
+                or (question_apps if len(question_apps) == 1 else [])
+                or _backend_app_paths(task.get("title", "") + "\n" + description, default_ui=True))
 
     handoff = (_task_triage_state(task).get("existing_pr_handoff") or {})
     targets = []
@@ -1287,6 +1304,21 @@ def _tree_from_paths(paths: List[str], depth: int = 3) -> List[str]:
     return lines
 
 
+def _backend_app_paths(text: str, default_ui: bool = False) -> List[str]:
+    """Current destinations in the MetaDAO monorepo, with explicit paths first."""
+    paths = re.findall(r"(?<![A-Za-z0-9._/-])apps/([A-Za-z0-9_-]+)", text)
+    aliases = {"frontend": "new-ui", "accelerated": "backable", "accelerate": "backable"}
+    if paths:
+        return list(dict.fromkeys(f"apps/{aliases.get(p, p)}" for p in paths))
+    if re.search(r"\b(?:backable|permissionless|futardio|accelerate(?:d)?|accelearte)\b", text, re.I):
+        return ["apps/backable"]
+    if re.search(r"\bnew[- ]ui\b", text, re.I):
+        return ["apps/new-ui"]
+    if default_ui and re.search(r"\b(?:ui|frontend|front-end|css|metadao\.fi)\b", text, re.I):
+        return ["apps/new-ui"]
+    return []
+
+
 def _target_app_paths(description: str) -> List[str]:
     """Sub-paths a task names as its target, from a 'Target app: `apps/new-ui`' line.
 
@@ -1477,10 +1509,13 @@ TRIAGE_FAIL = {"ready": False, "repos": [], "questions": [], "reasoning": "Triag
 
 BACKEND_MONOREPO_FACT = (
     "GitProjects/backend is MetaDAO's primary monorepo, not a backend-only service. "
-    "It contains frontend applications under apps/, including apps/frontend and "
-    "apps/new-ui on master. Frontend and UI/UX work belongs in GitProjects/backend "
-    "when it targets one of those applications; route to the app subpath instead "
-    "of asking for a separate frontend repository."
+    "apps/frontend has been removed; the old UI is retired and receives no new work. "
+    "apps/new-ui is the current MetaDAO frontend and the default for UI/UX work, "
+    "including metadao.fi. Permissionless work goes to apps/backable. Futardio and "
+    "Accelerate/Accelerated are former names of Backable; do not route new work to "
+    "apps/accelerated. A specific current app explicitly chosen by the user overrides "
+    "the default. Inspect the selected app instead of asking the user to locate it. "
+    "This current routing supersedes historical paths in recalled notes."
 )
 
 
@@ -1516,8 +1551,8 @@ CODEBASE CONTEXT (actual source files from target repos):
 
 Use this codebase context to:
 - Understand existing patterns, APIs, and data models
-- Ask questions about SPECIFIC implementation choices (e.g., "Should the new endpoint follow the existing pattern in src/app/api/tasks/route.ts?")
-- Reference actual file paths, function names, and types in your questions
+- Resolve implementation choices using the existing patterns without asking the user
+- Reference actual file paths, function names, and types in your proposed solution
 - Identify potential conflicts with existing code
 """
 
@@ -1563,7 +1598,10 @@ Rules:
 - Each question MUST reference specific files, patterns, or APIs from the codebase context when available.
 - DO NOT ask generic questions like "what framework?" when the codebase context already shows the answer.
 - NEVER ask the user for a file path, component name, symbol location, framework, or any other fact that can be found by inspecting the selected repository. Repository discovery is agent work. Ask only for product choices or business decisions a human must make.
+- Current ticket instructions and answered questions override older recalled developer notes. Governance applicability is determined by inspecting instructions and components, not by asking the user to inspect them.
 - For multiple_choice questions, provide 2-4 concrete options grounded in the existing codebase. ALWAYS include "Other (please specify)" as the last option so the user can provide a custom answer if none of the choices fit.
+
+{process_level.ROUTINE_CHANGE_POLICY}
 """
 
     result = _parse_gemini_json(call_gemini(prompt, max_tokens=4096, model=model))
@@ -1802,6 +1840,9 @@ def generate_prompt(task: dict, repo_context: str, project: str, repo: str,
 """
 
     prompt += EVIDENCE_POLICY
+    prompt += "\n## Routine changes\n" + process_level.ROUTINE_CHANGE_POLICY
+    if project == "GitProjects" and repo == "backend":
+        prompt += "\n## Current repository routing\n" + BACKEND_MONOREPO_FACT
     prompt += render_decisions(decisions or [])
 
     if sibling_contexts:
@@ -3444,9 +3485,11 @@ def _build_codebase_context(repos: List[dict], base_branch: str = "",
     in full — a monorepo's real code sits below the general listing's depth.
     """
     sections = []
-    targets = _target_app_paths(description)
     for r in repos:
         project, repo = r["project"], r["repo"]
+        targets = _target_app_paths(description)
+        if project == "GitProjects" and repo == "backend":
+            targets = _backend_app_paths(description, default_ui=True) or targets
         repo_path = find_repo_path(project, repo)
         if not repo_path:
             continue
@@ -3474,6 +3517,16 @@ def _build_triage_context(task_id: str) -> str:
 
     sections = []
     handoff = ts.get("existing_pr_handoff") if ts else None
+    if any(r.get("project") == "GitProjects" and r.get("repo") == "backend"
+           for r in (ts or {}).get("triage_repos", [])):
+        sections.append("## Current repository routing (binding)\n" + BACKEND_MONOREPO_FACT)
+    discovery_tasks = (ts or {}).get("planner_discovery_tasks") or []
+    if discovery_tasks:
+        sections.append(
+            "## Repository discovery to complete (not human questions)\n"
+            "Your prior run stopped on these lookups. Inspect the repository and its "
+            "instructions, resolve them, then write the plan. Do not ask them again.\n"
+            + "\n".join(f"- {q}" for q in discovery_tasks))
     if isinstance(handoff, dict) and handoff.get("url") and not handoff.get("error"):
         sections.append(
             "## Existing PR handoff (binding)\n"
@@ -3502,7 +3555,7 @@ def _build_triage_context(task_id: str) -> str:
         lines = []
         for q in triage_qa:
             lines.append(f"**Q:** {q.get('question', q.get('q', ''))}\n**A:** {q.get('answer', '')}")
-        sections.append("## Triage Q&A\n" + "\n\n".join(lines))
+        sections.append("## Triage Q&A (binding — do not reopen settled decisions)\n" + "\n\n".join(lines))
 
     if decisions:
         lines = []
@@ -4804,8 +4857,32 @@ def route_plan_stage_outcome(task: dict, verdict: dict) -> bool:
 
     if outcome == "questions_raised":
         questions = verdict.get("questions") or []
+        lookups = [q for q in questions if _is_repo_internal_lookup_question(q)]
+        questions = [q for q in questions if not _is_repo_internal_lookup_question(q)]
+        if lookups:
+            state = mc_request("GET", f"/api/tasks/{task_id}/triage-state") or {}
+            retries = int(state.get("planner_discovery_retries") or 0)
+            state["planner_discovery_tasks"] = [q["question"] for q in lookups]
+            state["planner_discovery_retries"] = retries + 1
+            mc_request("PUT", f"/api/tasks/{task_id}/triage-state", state)
+            if not questions:
+                if retries:
+                    mc_set_progress(task_id, state="blocked", phase="planning",
+                                    blocked_reason="Planner repeated repository lookups after a corrective retry")
+                    mc_log_activity(task_id, "needs_human",
+                                    "Manual intervention needed: planner repeated repository lookups "
+                                    "after a corrective retry. This is a planner failure, not a missing product decision.")
+                else:
+                    mc_update_task(task_id, {"status": "planning"})
+                    mc_set_progress(task_id, state="running", phase="planning", blocked_reason="")
+                    mc_log_activity(task_id, "updated",
+                                    "Repository lookups returned to the planner for one corrective retry; "
+                                    "no human answer is required.")
+                return False
         post_planning_questions(task_id, questions)
         mc_update_task(task_id, {"status": "planning"})
+        mc_set_progress(task_id, state="waiting", phase="planning",
+                        blocked_reason=f"Waiting for {len(questions)} human decision(s)")
         mc_log_activity(
             task_id, "new_triage_question",
             f"Planning stopped to ask {len(questions)} question(s) only you can answer. "
@@ -5895,7 +5972,7 @@ def _run_triage(title: str, description: str, manifest: str, model: Optional[str
 
     codebase_context = ""
     if repos:
-        codebase_context = _build_codebase_context(repos, base_branch, description)
+        codebase_context = _build_codebase_context(repos, base_branch, title + "\n" + description)
         if codebase_context:
             logging.info(f"  Pass 2 — loaded {len(codebase_context)} chars of codebase context")
 
@@ -5946,6 +6023,8 @@ def _run_triage(title: str, description: str, manifest: str, model: Optional[str
         codebase_context += attach_ctx
         logging.info("  Loaded ticket attachments into triage context")
 
+    if task_id:
+        codebase_context += "\n\n" + _build_triage_context(task_id)
     triage = triage_task(title, description, manifest, codebase_context, model=model)
 
     authorized_repos = discover_local_repos()
@@ -6163,15 +6242,19 @@ def process_task(task: dict):
             logging.info(f"  Self-answered {auto_answered}/{len(questions)} questions, {len(unanswered)} remain")
 
             if not unanswered:
-                # Even when the agent self-answered everything, don't dispatch yet — the
-                # auto-answers may be wrong. Post them to planning and wait for the human
-                # to review/edit and confirm (the process_planning_tasks confirmed-gate).
-                logging.info(f"  All questions self-answered — awaiting human review + confirmation")
+                # The planning loop already honors Auto versus an explicit confirmation
+                # gate. Do not advertise a mandatory human stop on its autonomous path.
                 mc_update_task(task_id, {"status": "planning"})
-                mc_log_activity(task_id, "status_changed", "Moved to planning: agent self-answered all questions — review and confirm to start")
                 post_planning_questions(task_id, questions, triage_result=triage)
+                state = mc_request("GET", f"/api/tasks/{task_id}/triage-state") or {}
+                needs_confirm = (not state.get("confirmed") and
+                                 process_level.requires_confirmation("normal", state.get("process_level", "")))
+                mc_set_progress(task_id, state="waiting" if needs_confirm else "running", phase="planning",
+                                blocked_reason="Awaiting requested confirmation" if needs_confirm else "")
                 mc_log_activity(task_id, "updated",
-                    f"Self-answered all {len(questions)} triage questions from codebase knowledge — review the answers and confirm in Mission Control to start.")
+                    f"Self-answered all {len(questions)} triage questions from codebase knowledge — "
+                    + ("review and confirm in Mission Control to start." if needs_confirm
+                       else "continuing automatically on the next planning cycle."))
                 return
 
             for i, q in enumerate(questions, 1):
@@ -6184,6 +6267,8 @@ def process_task(task: dict):
             mc_update_task(task_id, {"status": "planning"})
             mc_log_activity(task_id, "status_changed", f"Moved to planning: {triage.get('reasoning', 'needs clarification')}")
             post_planning_questions(task_id, questions, triage_result=triage)
+            mc_set_progress(task_id, state="waiting", phase="triage",
+                            blocked_reason=f"Waiting for {len(unanswered)} human decision(s)")
             mc_log_activity(task_id, "updated",
                 f"Self-answered {auto_answered}/{len(questions)} questions. {len(unanswered)} require human follow-up in Mission Control.")
 

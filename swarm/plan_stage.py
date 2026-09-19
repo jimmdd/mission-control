@@ -41,6 +41,7 @@ from typing import Dict, List, Optional
 
 import gsd_backend
 import gsd_brief
+from process_level import ROUTINE_CHANGE_POLICY
 
 MC_HOME = Path(os.environ.get("MC_HOME", str(Path.home() / ".mission-control")))
 
@@ -69,8 +70,8 @@ def question_protocol() -> str:
     """The instruction that makes a planner's question survive the run."""
     return (
         "If you cannot write the plan because you need a decision that only a human can\n"
-        "make — a licence someone bought, a product preference, a tradeoff with no\n"
-        "technically correct answer — stop and emit exactly this, then end your run:\n"
+        "make — a licence someone bought, missing authority, or materially conflicting\n"
+        "product requirements — stop and emit exactly this, then end your run:\n"
         "\n"
         "<mc-questions>\n"
         '[{"question": "...", "why": "what changes depending on the answer",\n'
@@ -83,6 +84,7 @@ def question_protocol() -> str:
         "location, framework, or data source that repository inspection can reveal.\n"
         "Do not ask for permission to proceed, and do not ask about\n"
         "missing setup: report that as a prerequisite by saying what is missing.\n"
+        + ROUTINE_CHANGE_POLICY
     )
 
 
@@ -220,6 +222,7 @@ def build_init_prompt(task: Dict, context: str = "", provider: str = "") -> str:
     ]
     if context:
         parts.append(context)
+    parts.append(ROUTINE_CHANGE_POLICY)
     parts.append(
         f"{workflow_instruction(provider or _planning_provider(), gsd_backend.init_command())}\n"
         f"When {gsd_backend.planning_dir_name()}/ exists with the project documents in it, "
