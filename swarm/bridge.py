@@ -3237,11 +3237,16 @@ def _resolve_spawn_failure_checkpoints(task_id: str):
 
 
 def spawn_agent(task_id: str, task_label: str, repo_path: Path, prompt_content: str,
-                agent_type: str = "codex", mc_task_id: str = "", base_branch: str = "",
+                agent_type: str = "", mc_task_id: str = "", base_branch: str = "",
                 task_title: str = "", draft_pr: bool = True, no_pr: bool = False,
                 planning_dir: str = "", existing_pr_url: str = "",
                 existing_pr_meta: Optional[dict] = None):
-    """Spawn an agent. Returns True, AT_CAPACITY (no free slot), or False (failed)."""
+    """Spawn an agent. Returns True, AT_CAPACITY (no free slot), or False (failed).
+
+    An empty agent_type lets spawn-agent.sh pick agents.defaultProfile from
+    swarm-config.json and fall back to that profile's fallbackProfile when its
+    slots are full. A hardcoded runtime here silently overrode the config.
+    """
     # task_label becomes a git branch, worktree dir, tmux session, and prompt filename —
     # a "/" or space in it crashes the spawn (e.g. a prompt path with a phantom subdir).
     # Sanitize defensively, on top of _normalize_repos fixing the source.
@@ -3339,7 +3344,7 @@ def spawn_agent(task_id: str, task_label: str, repo_path: Path, prompt_content: 
             if planning_dir:
                 _consume_planning_job(resolved_task_id)
             logging.info(
-                f"  Spawned {agent_type} agent: {task_label} "
+                f"  Spawned {agent_type or 'default-profile'} agent: {task_label} "
                 f"(mc_task_id={mc_task_id or task_id}, worktree_base={worktree_base}, pr_base={pr_base})"
             )
             return True

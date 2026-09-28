@@ -278,7 +278,7 @@ print(json.dumps({"ok": ok, "args": call["args"],
 `, null);
   assert.equal(result.ok, true);
   assert.equal(result.args[3], "design/account-page");
-  assert.equal(result.args[4], "codex", "implementation spawns default to the Codex profile");
+  assert.equal(result.args[4], "", "implementation spawns defer to agents.defaultProfile in swarm-config.json");
   assert.deepEqual(result.env, {
     BASE_BRANCH: "origin/master",
     WORKTREE_BASE_REF: "origin/design/account-page",
