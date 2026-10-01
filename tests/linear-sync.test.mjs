@@ -308,6 +308,7 @@ print(json.dumps({"calls": calls, "state": state}))
 
 test("deleted Linear comment IDs stay removed from sync state", () => {
   const result = runPython(`
+linear_sync.mc_request = lambda *args: []
 linear_sync.fetch_issue_comments = lambda issue_id: [{
     "id": "live-comment",
     "body": linear_sync.BOT_REPLY_PREFIX + ": still live",
@@ -329,6 +330,138 @@ print(json.dumps(state))
 
   assert.deepEqual(result.synced_comments["issue-1"], ["live-comment"]);
   assert.deepEqual(result.answered_comments["issue-1"], []);
+});
+
+test("checkpoint holds survive backlog restoration and unavailable approval reads", () => {
+  const result = runPython(`
+linear_sync.mc_request = lambda method, path: [{"status": "pending"}] if path.endswith("checkpoints") else []
+pending = linear_sync._mc_initiated_hold("task")
+def unavailable(*args):
+    raise RuntimeError("offline")
+linear_sync.mc_request = unavailable
+offline = linear_sync._mc_initiated_hold("task")
+linear_sync.mc_request = lambda *args: []
+ordinary = linear_sync._mc_initiated_hold("task")
+print(json.dumps([pending, offline, ordinary]))
+`);
+  assert.deepEqual(result, [true, true, false]);
+});
+
+test("checkpoint threads recover after receipt loss, update resolutions, and respect intake mode", () => {
+  const result = runPython(`
+linear_sync.os.environ["LINEAR_INTERACTION"] = "updates"
+cp = {"id": "cp-1", "status": "pending", "prompt": "Another review?", "options": '["Continue", "Stop"]'}
+linear_sync.mc_request = lambda *args: [cp]
+calls = []
+def query(q, variables):
+    calls.append({"query": q, "variables": variables})
+    if "commentCreate" in q:
+        return {"commentCreate": {"success": True, "comment": {"id": "parent"}}}
+    return {"commentUpdate": {"success": True}}
+linear_sync.linear_query = query
+state = {}
+linear_sync._sync_checkpoints_to_linear("issue", "task", state, [])
+comments = [{"id": "parent", "body": calls[0]["variables"]["body"]}]
+recovered = {}
+parents = linear_sync._sync_checkpoints_to_linear("issue", "task", recovered, comments)
+cp.update(status="answered", response="No database changes")
+linear_sync._sync_checkpoints_to_linear("issue", "task", recovered, comments)
+linear_sync.os.environ["LINEAR_INTERACTION"] = "intake"
+cp.update(id="cp-2", status="pending")
+linear_sync._sync_checkpoints_to_linear("issue", "task", {}, [])
+print(json.dumps({"calls": calls, "parents": list(parents), "recovered": recovered}))
+`);
+  assert.equal(result.calls.length, 2);
+  assert.match(result.calls[0].variables.body, /\/approve/);
+  assert.match(result.calls[0].variables.body, /Continue/);
+  assert.match(result.calls[1].query, /commentUpdate/);
+  assert.match(result.calls[1].variables.body, /Status: answered/);
+  assert.match(result.calls[1].variables.body, /No database changes/);
+  assert.deepEqual(result.parents, ["parent"]);
+  assert.equal(result.recovered.checkpoint_comments["cp-1"].comment_id, "parent");
+});
+
+test("checkpoint replies persist explicit constraints before resolution and never infer approval", () => {
+  const result = runPython(`
+calls = []
+cp = {"id": "cp-1", "status": "pending", "prompt": "Continue?"}
+def request(method, path, body=None):
+    calls.append({"method": method, "path": path, "body": body})
+    if method == "GET": return {"context_comments": []}
+    if path.endswith("resolve"): return {"checkpoint": dict(cp, status="answered")}
+    return {}
+linear_sync.mc_request = request
+comment = {"id": "reply", "body": "looks good?", "user": {"name": "Nick"}}
+ignored = linear_sync._resolve_checkpoint_reply("task", cp, comment)
+comment["body"] = "/answer"
+empty = linear_sync._resolve_checkpoint_reply("task", cp, comment)
+comment["body"] = "/approve"
+comment["botActor"] = {"name": "bot"}
+bot = linear_sync._resolve_checkpoint_reply("task", cp, comment)
+del comment["botActor"]
+comment["body"] = "/answer Continue with no database changes"
+accepted = linear_sync._resolve_checkpoint_reply("task", cp, comment)
+duplicate = linear_sync._resolve_checkpoint_reply("task", cp, comment)
+print(json.dumps({"results": [ignored, empty, bot, accepted, duplicate], "calls": calls}))
+`);
+  assert.deepEqual(result.results, [false, false, false, true, false]);
+  assert.deepEqual(result.calls.map((c) => c.method), ["GET", "PATCH", "POST"]);
+  assert.match(result.calls[1].body.context_comments[0].body, /no database changes/);
+  assert.equal(result.calls[2].body.decision, "answer");
+});
+
+test("a racing checkpoint answer does not leave an unapplied decision in execution context", () => {
+  const result = runPython(`
+cp = {"id": "cp-1", "status": "pending", "prompt": "Continue?"}
+triage = {"context_comments": [{"id": "existing", "body": "Keep existing scope"}]}
+def request(method, path, body=None):
+    if path.endswith("triage-state"):
+        if body: triage.update(body)
+        return dict(triage)
+    triage["context_comments"].append({"id": "winner", "body": "Concurrent authoritative decision"})
+    raise linear_sync.urllib.error.HTTPError(path, 409, "Already resolved", {}, None)
+linear_sync.mc_request = request
+accepted = linear_sync._resolve_checkpoint_reply("task", cp, {"id": "reply", "body": "/approve", "user": {"name": "Nick"}})
+print(json.dumps({"accepted": accepted, "context": triage["context_comments"]}))
+`);
+  assert.equal(result.accepted, false);
+  assert.deepEqual(result.context.map((c) => c.id), ["existing", "winner"]);
+});
+
+test("a thread answer resolves only its checkpoint, is idempotent, and unrelated text stays context", () => {
+  const result = runPython(`
+linear_sync.os.environ["LINEAR_INTERACTION"] = "updates"
+cp = {"id": "cp-1", "status": "pending", "prompt": "Continue?"}
+comments = [
+    {"id": "parent", "body": linear_sync._checkpoint_body(cp), "user": None},
+    {"id": "reply", "body": "/approve No DB changes", "user": {"name": "Nick"}, "parent": {"id": "parent"}, "createdAt": "2026-09-17T12:00:00Z"},
+    {"id": "unrelated", "body": "Which check failed?", "user": {"name": "Nick"}, "parent": {"id": "parent"}, "createdAt": "2026-09-17T12:01:00Z"},
+]
+triage = {"context_comments": []}
+calls = []
+def request(method, path, body=None):
+    calls.append({"method": method, "path": path, "body": body})
+    if path.endswith("checkpoints"): return [dict(cp)]
+    if path.endswith("triage-state"):
+        if body: triage.update(body)
+        return dict(triage)
+    if path.endswith("resolve"):
+        cp["status"] = "approved"
+        cp["response"] = body["response"]
+        return {"checkpoint": dict(cp)}
+    return {}
+linear_sync.mc_request = request
+linear_sync.fetch_issue_comments = lambda issue: comments
+linear_sync._finalize_triage_comments = lambda *args: None
+linear_sync.linear_query = lambda *args: {"commentUpdate": {"success": True}}
+state = {}
+for _ in range(2):
+    linear_sync.sync_comments_to_mc({"id": "issue"}, {"id": "task", "status": "on_hold"}, state)
+print(json.dumps({"calls": calls, "state": state, "triage": triage}))
+`);
+  assert.equal(result.calls.filter((c) => c.path.endsWith("/resolve")).length, 1);
+  assert.equal(result.calls.filter((c) => c.path.endsWith("/activities")).length, 2);
+  assert.ok(result.triage.context_comments.some((c) => c.body === "Which check failed?"));
 });
 
 test("Linear issue creation is deterministic and a retry resolves the same issue", () => {

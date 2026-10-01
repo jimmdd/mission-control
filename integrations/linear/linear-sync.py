@@ -702,9 +702,14 @@ def _mc_initiated_hold(mc_task_id: str) -> bool:
     auto-restored to inbox on the next sync — that bounces a deliberately-parked task
     back into triage."""
     try:
+        checkpoints = mc_request("GET", f"/api/tasks/{mc_task_id}/checkpoints")
+        if not isinstance(checkpoints, list):
+            return True  # An unavailable approval boundary must not resume work.
+        if any(cp.get("status") == "pending" for cp in checkpoints):
+            return True
         acts = mc_request("GET", f"/api/tasks/{mc_task_id}/activities") or []
     except Exception:
-        return False
+        return True
     markers = ("cannot complete", "manual intervention", "parked", "plan stuck", "failed permanently")
     hold_acts = [
         a for a in acts
@@ -1657,7 +1662,7 @@ def _check_description_changed(issue: dict, mc_task: dict, state: dict) -> bool:
     # finished work (this happened to MET-515). Record the new hash so we don't
     # re-fire, note the change, and let the human fold it in via a change-request note.
     mc_status = mc_task.get("status", "")
-    if mc_status not in ("inbox", "planning", "on_hold"):
+    if mc_status not in ("inbox", "planning", "on_hold") or _mc_initiated_hold(mc_task_id):
         logging.info(f"  Description changed for {issue['identifier']} but task is '{mc_status}' — noting, not re-triaging")
         synced_info["description_hash"] = current_hash
         state.setdefault("synced_issues", {})[issue_id] = synced_info
@@ -1737,6 +1742,109 @@ def _clean_stale_comment_ids(issue_id: str, live_comment_ids: set, state: dict) 
     return cleaned
 
 
+def _checkpoint_body(checkpoint: dict) -> str:
+    marker = f"<!-- mc-checkpoint:{checkpoint['id']} -->"
+    lines = [f"{BOT_REPLY_PREFIX}: approval checkpoint", marker, "", checkpoint["prompt"]]
+    options = checkpoint.get("options")
+    if isinstance(options, str):
+        try:
+            options = json.loads(options)
+        except ValueError:
+            options = None
+    if isinstance(options, list):
+        lines.extend(["", *[f"- {option}" for option in options]])
+    if checkpoint.get("status") == "pending":
+        lines.extend(["", "Work is paused on this decision. Reply **in this thread** with "
+                      "`/approve` (optionally followed by constraints) or `/answer <decision>`. "
+                      "Other replies are imported as context but do not resolve the checkpoint."])
+    else:
+        lines.extend(["", f"**Status: {checkpoint.get('status')}**",
+                      checkpoint.get("response") or ""])
+    return "\n".join(lines)
+
+
+def _sync_checkpoints_to_linear(issue_id: str, task_id: str, state: dict,
+                                comments: List[dict]) -> Dict[str, dict]:
+    """Mirror approval threads, recovering receipts after a crash from markers."""
+    checkpoints = mc_request("GET", f"/api/tasks/{task_id}/checkpoints")
+    if not isinstance(checkpoints, list):
+        raise RuntimeError(f"Invalid checkpoint response for {task_id}")
+    receipts = state.setdefault("checkpoint_comments", {})
+    parents = {}
+    for cp in checkpoints:
+        marker = f"<!-- mc-checkpoint:{cp['id']} -->"
+        existing = next((c for c in comments if marker in (c.get("body") or "")
+                         and _is_bot_comment(c.get("body") or "")), None)
+        # The complete paginated comment snapshot is authoritative: a deleted
+        # parent must be recreated, not updated forever through a stale receipt.
+        comment_id = existing["id"] if existing else None
+        body = _checkpoint_body(cp)
+        if not comment_id and cp.get("status") == "pending" and _interaction_level() >= INTERACTION_UPDATES:
+            result = linear_query(
+                "mutation($issueId: String!, $body: String!) { commentCreate(input: "
+                "{issueId: $issueId, body: $body}) { success comment { id } } }",
+                {"issueId": issue_id, "body": body},
+            )
+            created = result.get("commentCreate") or {}
+            comment_id = (created.get("comment") or {}).get("id")
+            if not created.get("success") or not comment_id:
+                raise RuntimeError(f"Failed to post checkpoint {cp['id']}")
+        elif comment_id and _interaction_level() >= INTERACTION_UPDATES:
+            old_body = existing.get("body")
+            if old_body != body:
+                result = linear_query(
+                    "mutation($id: String!, $body: String!) { commentUpdate(id: $id, "
+                    "input: {body: $body}) { success } }",
+                    {"id": comment_id, "body": body},
+                )
+                if not _mutation_succeeded(result, "commentUpdate"):
+                    raise RuntimeError(f"Failed to update checkpoint {cp['id']}")
+        if comment_id:
+            receipts[cp["id"]] = {"issue_id": issue_id, "comment_id": comment_id, "body": body}
+            parents[comment_id] = cp
+    return parents
+
+
+def _resolve_checkpoint_reply(task_id: str, checkpoint: dict, comment: dict) -> bool:
+    """Only explicit commands in a known checkpoint thread may resume work."""
+    if checkpoint.get("status") != "pending":
+        return False
+    if _is_integration_comment(comment) or _is_bot_comment(comment.get("body") or ""):
+        return False
+    match = re.fullmatch(r"/(approve|answer)(?:\s+([\s\S]+))?", (comment.get("body") or "").strip(), re.I)
+    if not match or (match[1].lower() == "answer" and not (match[2] or "").strip()):
+        return False
+    decision = match[1].lower()
+    response = f"{_comment_author(comment)} on Linear: {(match[2] or 'Approved.').strip()}"
+    # Persist the answer where planning/dispatch actually reads it before resuming.
+    triage = mc_request("GET", f"/api/tasks/{task_id}/triage-state") or {}
+    comments = triage.get("context_comments", [])
+    context_id = f"checkpoint-reply-{comment['id']}"
+    if not any(c.get("id") == context_id for c in comments):
+        mc_request("PATCH", f"/api/tasks/{task_id}/triage-state", {"context_comments": [*comments, {
+            "id": context_id, "author": _comment_author(comment),
+            "body": f"Checkpoint decision: {checkpoint['prompt']}\n\n{response}",
+            "source": "linear", "linear_comment_id": comment["id"],
+            "created_at": comment.get("createdAt"),
+        }]})
+    try:
+        result = mc_request("POST", f"/api/checkpoints/{checkpoint['id']}/resolve",
+                            {"decision": decision, "response": response})
+    except urllib.error.HTTPError as error:
+        if error.code != 409:
+            raise
+        # Another UI/thread already resolved it. Remove our provisional decision
+        # so execution sees only the answer that actually won the resolution.
+        latest = mc_request("GET", f"/api/tasks/{task_id}/triage-state") or {}
+        mc_request("PATCH", f"/api/tasks/{task_id}/triage-state", {
+            "context_comments": [c for c in latest.get("context_comments", [])
+                                 if c.get("id") != context_id],
+        })
+        return False
+    checkpoint.update(result["checkpoint"])
+    return True
+
+
 def sync_comments_to_mc(issue: dict, mc_task: dict, state: dict) -> int:
     mc_task_id = mc_task["id"]
     issue_id = issue["id"]
@@ -1746,6 +1854,7 @@ def sync_comments_to_mc(issue: dict, mc_task: dict, state: dict) -> int:
     answered_comment_ids = set(state.get("answered_comments", {}).get(issue_id, []))
 
     comments = fetch_issue_comments(issue_id)
+    checkpoint_parents = _sync_checkpoints_to_linear(issue_id, mc_task_id, state, comments)
     synced = 0
     new_auto_answered = 0
 
@@ -1777,7 +1886,7 @@ def sync_comments_to_mc(issue: dict, mc_task: dict, state: dict) -> int:
     # with a single summary comment (keeps the Linear thread from getting noisy).
     _finalize_triage_comments(issue_id, mc_task, triage_state, state)
 
-    for comment in comments:
+    for comment in sorted(comments, key=lambda c: c.get("createdAt", "")):
         comment_id = comment["id"]
         body = comment.get("body", "")
 
@@ -1789,6 +1898,20 @@ def sync_comments_to_mc(issue: dict, mc_task: dict, state: dict) -> int:
             continue
 
         parent_id = comment.get("parent", {}).get("id") if comment.get("parent") else None
+        if parent_id in checkpoint_parents:
+            checkpoint = checkpoint_parents[parent_id]
+            if comment_id not in synced_comment_ids:
+                _resolve_checkpoint_reply(mc_task_id, checkpoint, comment)
+                # Unrecognized replies remain visible without guessing approval.
+                fresh_triage = _fetch_triage_state(mc_task_id) or {}
+                _add_comment_to_triage(mc_task_id, fresh_triage, comment)
+                mc_request("POST", f"/api/tasks/{mc_task_id}/activities", {
+                    "activity_type": "linear_comment",
+                    "message": f"**{_comment_author(comment)}** replied to checkpoint on Linear:\n\n{body}",
+                })
+                synced += 1
+                synced_comment_ids.add(comment_id)
+            continue
         if parent_id and parent_id in question_comment_ids:
             q = question_comment_ids[parent_id]
             if not q.get("answer"):

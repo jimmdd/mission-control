@@ -526,6 +526,13 @@ real time and lets them coordinate:
   the CLI (`./mc checkpoints`, `./mc checkpoints resolve <id> --decision
   approve|reject|answer`) or `POST /api/checkpoints/:id/resolve`. The board
   reports `awaitingApproval` and per-task pending counts.
+- **Linear approval threads** — with Linear interaction mode `updates` or higher,
+  the sync posts pending checkpoints on their linked issues and watches replies
+  on each sync cycle. Reply in the checkpoint's thread with `/approve`, optionally
+  followed by constraints, or `/answer <decision>`. The decision is saved in task
+  context before resolution; ordinary replies add context without resuming work.
+  The comment is updated when the checkpoint resolves, and pending checkpoints
+  keep the task held even if Linear's issue status differs.
 - **Push notifications** — escalations (`needs_human`), approval requests, and
   dead/stalled agents are pushed to a local `~/.mission-control/swarm/notify.sh`
   hook (if present) and/or a webhook (`MISSION_CONTROL_NOTIFY_WEBHOOK`), so you
