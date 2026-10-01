@@ -32,6 +32,7 @@ from contextlib import contextmanager
 from typing import Dict, List, Optional, Tuple
 
 import process_level
+import workflow_router
 from evidence_policy import EVIDENCE_POLICY
 import gsd_plan_import
 import supercut
@@ -4250,6 +4251,52 @@ def _normalize_repos(repos: List[dict]) -> List[dict]:
     return out
 
 
+WORKFLOW_SHADOW_LOG = MC_HOME / "swarm" / "workflow-shadow.jsonl"
+
+
+def _typesafe_api_key() -> str:
+    """Read fresh, not from the bridge's start-up environment: the bridge runs for days
+    and the key may be added while it is up."""
+    key = os.environ.get("TYPESAFE_API_KEY", "")
+    if key:
+        return key
+    try:
+        for line in ENV_FILE.read_text().splitlines():
+            if line.strip().startswith("TYPESAFE_API_KEY="):
+                return line.split("=", 1)[1].strip().strip('"').strip("'")
+    except OSError:
+        pass
+    return ""
+
+
+def _record_workflow_shadow(task: dict) -> None:
+    """Ask Jev whether this ticket could have taken a light workflow, and record it.
+
+    Shadow only: nothing here changes how the ticket runs. `task` must already carry
+    its triage context in the description, because that is the text the thresholds
+    were fitted on. Any failure is logged and swallowed — this never blocks dispatch.
+    MC_JEV_SHADOW=0 turns it off.
+    """
+    if os.environ.get("MC_JEV_SHADOW", "1") == "0":
+        return
+    task_id = task["id"]
+    try:
+        key = _typesafe_api_key()
+        if not key or not workflow_router.needs_verdict(WORKFLOW_SHADOW_LOG, task_id):
+            return
+        rec = workflow_router.shadow(task, key, WORKFLOW_SHADOW_LOG, ref=_task_ref(task))
+        if rec.get("error"):
+            logging.warning(f"  Jev shadow call failed for {task_id[:8]}: {rec['error']}")
+            return
+        logging.info(f"  {task_id[:8]} Jev shadow verdict {rec['verdict']}: {'; '.join(rec['why'])}")
+        mc_log_activity(task_id, "updated",
+                        f"Jev (shadow) would route this **{rec['verdict']}** — "
+                        + "; ".join(rec["why"])
+                        + ". Recorded only; the ticket runs the full workflow as usual.")
+    except Exception as e:
+        logging.warning(f"  Jev shadow skipped for {task_id[:8]}: {e}")
+
+
 def _spawn_for_repos(task: dict, repos: List[dict]):
     repos = _normalize_repos(repos)
     task_id = task["id"]
@@ -4305,6 +4352,9 @@ def _spawn_for_repos(task: dict, repos: List[dict]):
     if triage_ctx:
         description = description + "\n\n---\n\n" + triage_ctx
         task = {**task, "description": description}
+
+    if task_type == "implementation":
+        _record_workflow_shadow(task)
 
     # The spec is a precondition: plan before spending an agent. A planner's question
     # raised here stops the task while it is still cheap, instead of dying inside a

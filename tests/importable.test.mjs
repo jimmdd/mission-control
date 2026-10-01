@@ -19,7 +19,7 @@ const SWARM = fileURLToPath(new URL("../swarm", import.meta.url));
 // Everything the suite shells into, plus the daemon entrypoint itself.
 const MODULES = [
   "bridge", "planner", "gsd_backend", "plan_stage", "plan_stage_runner",
-  "questions", "process_level", "gsd_plan_import", "gsd_brief", "worktree_env",
+  "questions", "process_level", "workflow_router", "gsd_plan_import", "gsd_brief", "worktree_env",
 ];
 
 test("every module the suite drives imports on a bare interpreter", () => {
