@@ -34,9 +34,19 @@ test("the script does not reach for a capture-pane flag that does not exist", ()
 });
 
 test("tmux really does reject -l, so the old probe could only ever fail", { skip: !haveTmux }, () => {
-  const r = spawnSync("tmux", ["capture-pane", "-t", "no-such-session", "-p", "-l", "5"], { encoding: "utf8" });
-  assert.notEqual(r.status, 0);
-  assert.match(`${r.stderr}`, /unknown flag -l/);
+  // capture-pane connects to a server before it parses its flags; with no server
+  // running (a CI runner) it fails on the connection and never reaches -l. Give it
+  // a server of its own on a private socket so the flag is what gets rejected.
+  const socket = `mc-probe-flag-${process.pid}`;
+  const tmux = (...args) => spawnSync("tmux", ["-L", socket, "-f", "/dev/null", ...args], { encoding: "utf8" });
+  try {
+    assert.equal(tmux("new-session", "-d", "-s", "probe").status, 0);
+    const r = tmux("capture-pane", "-t", "probe", "-p", "-l", "5");
+    assert.notEqual(r.status, 0);
+    assert.match(`${r.stderr}`, /unknown flag -l/);
+  } finally {
+    tmux("kill-server");
+  }
 });
 
 test("a pane with output reads active, an empty one reads idle", { skip: !haveTmux }, () => {
