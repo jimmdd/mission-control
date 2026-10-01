@@ -31,6 +31,7 @@ export function startLivenessReaper(db: MissionControlDB, events: McEventBus, op
     const stillHolding = new Set<string>();
 
     for (const [taskId, entry] of Object.entries(statusMap)) {
+      if (entry.deliveryPending === true) continue;
       const liveStatus = entry.liveStatus as string | undefined;
       const lastHeartbeatAt = typeof entry.lastHeartbeatAt === "number" ? entry.lastHeartbeatAt : null;
 

@@ -1941,13 +1941,15 @@ Run the same checks that GitHub Actions CI will run:
 2. Run equivalent checks locally (e.g. `tsc --noEmit`, `npm run lint`, `npm test`, `pytest`, etc.)
 3. If any check fails, fix and re-run until all pass
 
-### Step 6: Codex Review
-Run the pre-review script to get an external Codex review on your branch diff
+### Step 6: Local Greptile + Codex Review (before every push)
+Commit the verified changes first; review requires a clean worktree and is bound to its head/base.
+Run the pre-review script to get local Greptile and external Codex reviews on your branch diff
 (reviewed against the branch you based on):
 ```bash
-                ~/.mission-control/swarm/pre-review.sh "$(pwd)" "${{BASE_BRANCH:-origin/master}}"
+                {Path(__file__).with_name("pre-review.sh")} "$(pwd)" "${{BASE_BRANCH:-origin/master}}"
 ```
-Read the output. If VERDICT is FAIL:
+Require exit 0 from the script. Greptile findings, missing authentication, runner
+failures, timeouts, and non-PASS Codex reviews block pushing. Read the output and:
 1. Fix the issues identified
 2. RE-RUN `{gsd_verify}` — fixes must not break original acceptance criteria
 3. If a review suggestion conflicts with the plan's acceptance criteria, skip it and note: "Skipped review suggestion X — conflicts with acceptance criteria Y"
@@ -1955,7 +1957,9 @@ Read the output. If VERDICT is FAIL:
 5. Maximum 3 review iterations. If still failing after 3, escalate to human (see below).
 
 ### Step 7: {"Finish + Report" if _pr_is_disabled(task) else "PR + Report"}
-Only when GSD verification passes AND review passes (or max iterations reached):
+After local verification and independent review pass, publish the PR (unless no-PR mode).
+For published PRs, wait for current-head remote CI and review resolution before reporting completion.
+Local-only tasks do not push or require remote CI:
 1. Commit all changes with conventional commit messages
 {'''2. Do NOT push, and do NOT open a pull request. This work stays local — leave it
    committed on your branch in the worktree. Pushing or opening a PR publishes work
@@ -5666,9 +5670,9 @@ def process_in_progress_plans():
                     worktree_paths.append(entry["worktree"])
             _post_gsd_artifacts(task_id, worktree_paths)
 
-            mc_log_activity(task_id, "updated", "All plan steps completed — PR created, task in review")
-            mc_update_task(task_id, {"status": "review"})
-            logging.info(f"  Plan complete for {task_id[:8]} — PR created, moved to review")
+            mc_log_activity(task_id, "updated", "All plan steps completed — PR created, awaiting CI and independent review")
+            mc_update_task(task_id, {"status": "testing"})
+            logging.info(f"  Plan complete for {task_id[:8]} — PR created, awaiting delivery gates")
 
             continue
 
@@ -5835,6 +5839,8 @@ def reap_dead_agents() -> int:
     for entry in _load_active_tasks():
         if entry.get("status") != "running":
             continue
+        if entry.get("deliveryPending"):
+            continue  # The monitor is waiting for PR gates, not a live agent.
         if _tmux_session_alive(entry.get("tmuxSession", "")):
             continue
 
@@ -5897,7 +5903,7 @@ def _agent_slots_free(registry: list) -> Optional[int]:
     cap = _max_concurrent_agents()
     if cap <= 0:
         return None
-    running = sum(1 for entry in registry if entry.get("status") == "running")
+    running = sum(1 for entry in registry if entry.get("status") == "running" and not entry.get("deliveryPending"))
     return max(0, cap - running)
 
 
@@ -6169,6 +6175,8 @@ def _self_answer_questions(questions: List[dict], title: str, description: str,
 
 
 def process_task(task: dict):
+    if _resume_checkpoint_work(task):
+        return
     task_id = task["id"]
     title = task["title"]
     description = task.get("description", "")
@@ -6912,6 +6920,8 @@ def process_planning_tasks():
 
     for task in planning_tasks:
         with cycle_boundary(f"process_planning_tasks/{task['id']}"):
+            if _resume_checkpoint_work(task):
+                continue
             task_id = task["id"]
             title = task["title"]
 
@@ -7130,7 +7140,50 @@ def _env_exports_for_entry(entry: dict) -> str:
     return " ".join(exports) + (" " if exports else "")
 
 
-def _relaunch_for_change_request(task: dict, change_requests_text: str, source: str = "dashboard"):
+def _resume_checkpoint_work(task: dict) -> bool:
+    """Consume a checkpoint resume before intake can re-plan existing work.
+
+    True means this task belongs to the resume path, including a failed launch;
+    falling through on failure would silently replace recovery with a new plan.
+    """
+    task_id = task["id"]
+    entry = _find_agent_registry_entry(task_id)
+    if not entry or entry.get("status") != "paused" or not entry.get("heldAt"):
+        return False
+    try:
+        checkpoints = mc_request("GET", f"/api/tasks/{task_id}/checkpoints")
+        if not isinstance(checkpoints, list):
+            raise RuntimeError("Checkpoint state unavailable")
+        if any(c.get("status") == "pending" for c in checkpoints):
+            return True
+        held_at = datetime.fromisoformat(entry["heldAt"].replace("Z", "+00:00"))
+        decisions = [c for c in checkpoints
+                     if c.get("status") in ("approved", "answered", "rejected")
+                     and c.get("resolved_at")]
+        if not any(datetime.fromisoformat(c["resolved_at"].replace("Z", "+00:00")) >= held_at
+                   for c in decisions):
+            return False
+        # Recover tickets already sent back to planning by older servers without
+        # racing a live planner or deleting the existing implementation worktree.
+        job = _planning_job_path(task_id)
+        state = _read_planning_job(job)
+        if state and state.get("state") == "running" and _pid_alive(state.get("pid")):
+            return True
+        decision_text = "\n\n".join(
+            f"Question: {c.get('prompt', '')}\nDecision: {c['status']}\n"
+            f"Response: {c.get('response') or '(no additional constraints)'}"
+            for c in sorted(decisions, key=lambda c: c["resolved_at"]))
+        if _relaunch_for_change_request(task, decision_text, source="checkpoint"):
+            job.unlink(missing_ok=True)
+        else:
+            mc_set_progress(task_id, state="blocked", blocked_reason="Could not resume the existing agent; retrying without re-planning.")
+    except Exception as exc:
+        logging.warning(f"Checkpoint resume for {task_id[:8]} deferred: {exc}")
+        mc_set_progress(task_id, state="blocked", blocked_reason=f"Checkpoint resume deferred: {exc}")
+    return True
+
+
+def _relaunch_for_change_request(task: dict, change_requests_text: str, source: str = "dashboard") -> bool:
     """Re-launch an agent with change request feedback from Mission Control."""
     task_id = task["id"]
 
@@ -7139,7 +7192,7 @@ def _relaunch_for_change_request(task: dict, change_requests_text: str, source: 
         logging.warning(f"  No agent registry entry for {task_id[:8]} — cannot re-launch")
         mc_log_activity(task_id, "updated",
                         "Change request received but no agent found to re-launch. Manual intervention needed.")
-        return
+        return False
 
     worktree = entry.get("worktree", "")
     session = entry.get("tmuxSession", "")
@@ -7150,12 +7203,12 @@ def _relaunch_for_change_request(task: dict, change_requests_text: str, source: 
         logging.warning(f"  Worktree not found for {task_id[:8]}: {worktree}")
         mc_log_activity(task_id, "updated",
                         "Change request received but agent worktree missing. Manual intervention needed.")
-        return
+        return False
 
     prompt_title = "Change Request from Mission Control"
     prompt_file = SWARM_DIR / "prompts" / f"{reg_id}-change-request.md"
     prompt_file.parent.mkdir(parents=True, exist_ok=True)
-    prompt_file.write_text(f"""# {prompt_title}
+    prompt = f"""# {prompt_title}
 
 The reviewer has requested changes on your PR. Address ALL feedback below.
 
@@ -7171,8 +7224,30 @@ The reviewer has requested changes on your PR. Address ALL feedback below.
 
 Do NOT create a new PR. Fix the existing code and push.
 Do NOT ask for confirmation. Complete all steps autonomously.
-""" + EVIDENCE_POLICY + _design_prompt_section(task) + _video_prompt_section(task)
-        + _supercut_prompt_section(task) + _attachment_prompt_section(task))
+"""
+    if source == "checkpoint":
+        original = SWARM_DIR / "prompts" / f"{reg_id}.md"
+        context = original.read_text() if original.exists() else str(task.get("description") or "")
+        prompt = context + EVIDENCE_POLICY + f"""
+
+## Resume existing work after checkpoint (current instruction)
+{change_requests_text}
+
+Continue in this existing worktree and branch from the interrupted step.
+Inspect the existing diff, plan, verification evidence, and task activity first.
+Do not restart triage or planning, redo completed implementation, or repeat passing
+checks unless a change or unresolved finding requires it. Respect the decisions
+above, including rejections; approval is limited to the checkpoint's scope.
+If a bare approval offers multiple paths, choose the narrowest path that preserves
+required checks. Do not ask the same checkpoint question again.
+Complete the remaining work under the original task constraints. Reuse an existing
+PR if present; otherwise create a draft only when the task authorizes it and the
+required checks pass. Do not merge or deploy based on this checkpoint alone.
+"""
+    else:
+        prompt += EVIDENCE_POLICY + _design_prompt_section(task) + _video_prompt_section(task)
+        prompt += _supercut_prompt_section(task) + _attachment_prompt_section(task)
+    prompt_file.write_text(prompt)
 
     try:
         subprocess.run(["tmux", "kill-session", "-t", session],
@@ -7192,7 +7267,7 @@ Do NOT ask for confirmation. Complete all steps autonomously.
     try:
         launched = subprocess.run(
             ["tmux", "new-session", "-d", "-s", session, "-c", worktree,
-             f"bash -lc '{env_exports}PROMPT_OVERRIDE={shlex.quote(str(prompt_file))} exec {shlex.quote(launcher)} {shlex.quote(reg_id)}'"],
+             "bash -lc " + shlex.quote(f"{env_exports}PROMPT_OVERRIDE={shlex.quote(str(prompt_file))} exec {shlex.quote(launcher)} {shlex.quote(reg_id)}")],
             capture_output=True, text=True, timeout=30,
         )
         if launched.returncode != 0:
@@ -7201,7 +7276,7 @@ Do NOT ask for confirmation. Complete all steps autonomously.
     except Exception as e:
         logging.error(f"  Failed to re-launch agent: {e}")
         mc_log_activity(task_id, "updated", f"Failed to re-launch agent for change request: {e}")
-        return
+        return False
 
     registry_file = SWARM_DIR / "active-tasks.json"
     change_request_at = datetime.now(timezone.utc).isoformat()
@@ -7210,6 +7285,7 @@ Do NOT ask for confirmation. Complete all steps autonomously.
         for e in entries:
             if e.get("id") == reg_id:
                 e["status"] = "running"
+                e["deliveryPending"] = False
                 e["changeRequestAt"] = change_request_at
                 e["changeRequestSource"] = source
                 e["runStartedAt"] = int(datetime.now(timezone.utc).timestamp() * 1000)
@@ -7229,10 +7305,11 @@ Do NOT ask for confirmation. Complete all steps autonomously.
         task_id,
         state="running",
         phase="execute",
-        step_label="Addressing review feedback",
+        step_label="Resuming after checkpoint" if source == "checkpoint" else "Addressing review feedback",
         blocked_reason="",
     )
-    mc_log_activity(task_id, "updated", "Change request received from Mission Control — re-launching agent")
+    mc_log_activity(task_id, "updated", "Checkpoint resolved — continuing the existing agent worktree without re-planning."
+                    if source == "checkpoint" else "Change request received from Mission Control — re-launching agent")
     if source == "dashboard":
         try:
             mc_log_agent_reply(
@@ -7246,6 +7323,7 @@ Do NOT ask for confirmation. Complete all steps autonomously.
             # The lifecycle poll retries this stage from registry state. A chat
             # outage must not turn a successfully launched agent into a failure.
             logging.warning(f"Could not post follow-up start for {task_id[:8]}: {e}")
+    return True
 
 
 def process_followup_lifecycle():
@@ -7393,6 +7471,7 @@ This task is investigation-only. You received new follow-up context/questions.
         for e in entries:
             if e.get("id") == reg_id:
                 e["status"] = "running"
+                e["deliveryPending"] = False
                 e["changeRequestAt"] = change_request_at
                 e["changeRequestSource"] = source
                 e["runStartedAt"] = int(datetime.now(timezone.utc).timestamp() * 1000)

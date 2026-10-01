@@ -50,7 +50,7 @@ test("progress and delegation updates emit events on the bus", async () => {
     const events = new McEventBus();
     const seen = [];
     events.subscribe((e) => seen.push(e.type));
-    const handler = createHandler(db, SILENT, events);
+    const handler = createHandler(db, SILENT, events, { checkPrReadiness: async () => ({ status: "pass", reason: "fixture current-head gates passed" }) });
     const task = db.createTask({ title: "t" });
 
     await handler(
@@ -70,7 +70,7 @@ test("progress and delegation updates emit events on the bus", async () => {
 test("SSE stream sends a ready frame and pushes subsequent events", async () => {
   await withDb(async (db) => {
     const events = new McEventBus();
-    const handler = createHandler(db, SILENT, events);
+    const handler = createHandler(db, SILENT, events, { checkPrReadiness: async () => ({ status: "pass", reason: "fixture current-head gates passed" }) });
 
     const chunks = [];
     let closeHandler = null;
@@ -134,7 +134,7 @@ test("implementation completion is rejected until a PR is supplied", async () =>
     const events = new McEventBus();
     const seen = [];
     events.subscribe((e) => { if (e.type === "task_completed") seen.push(e); });
-    const handler = createHandler(db, SILENT, events);
+    const handler = createHandler(db, SILENT, events, { checkPrReadiness: async () => ({ status: "pass", reason: "fixture current-head gates passed" }) });
     const ws = db.listWorkspaces?.()?.[0];
     const task = db.createTask({
       title: "ship the implementation",
@@ -248,7 +248,7 @@ test("review cycles stay quiet and a true done transition is announced once", as
     const events = new McEventBus();
     const seen = [];
     events.subscribe((e) => { if (e.type === "task_completed") seen.push(e); });
-    const handler = createHandler(db, SILENT, events);
+    const handler = createHandler(db, SILENT, events, { checkPrReadiness: async () => ({ status: "pass", reason: "fixture current-head gates passed" }) });
 
     const ws = db.listWorkspaces?.()?.[0];
     const task = db.createTask({
@@ -298,7 +298,7 @@ test("marking a reviewed task done emits the terminal notification once", async 
     const events = new McEventBus();
     const seen = [];
     events.subscribe((e) => { if (e.type === "task_completed") seen.push(e); });
-    const handler = createHandler(db, SILENT, events);
+    const handler = createHandler(db, SILENT, events, { checkPrReadiness: async () => ({ status: "pass", reason: "fixture current-head gates passed" }) });
     const task = db.createTask({ title: "reviewed ticket", status: "review" });
 
     const done = mockRes();
@@ -339,5 +339,46 @@ test("an unknown progress state is rejected, not silently dropped", async () => 
     const good = await post({ state: "running", phase: "planning" });
     assert.ok(good.statusCode < 400);
     assert.equal(db.getProgress(task.id).state, "running");
+  });
+});
+
+for (const gate of ["ci_failed", "pending", "unknown", "review_required", "review_blocked"]) {
+  test(`completion stays in Testing when PR readiness is ${gate}`, async () => {
+    await withDb(async (db) => {
+      const task = db.createTask({ title: "PR gate", status: "in_progress", task_type: "implementation" });
+      const handler = createHandler(db, SILENT, new McEventBus(), {
+        checkPrReadiness: async () => ({status: gate, reason: "fixture blocker"}),
+      });
+      const res = mockRes();
+      await handler(mockReq({url:"/api/webhooks/agent-completion",method:"POST",body:{task_id:task.id,status:"done",pr_url:"https://github.com/acme/app/pull/1"}}),res);
+      assert.equal(res.statusCode,409);
+      assert.equal(db.getTask(task.id).status,"testing");
+      assert.equal(db.listDeliverables(task.id).length,1);
+      assert.equal(db.listEvents(10).some(e=>e.type === "task_completed"),false);
+    });
+  });
+}
+test("hold during readiness lookup wins over an agent completion", async () => {
+  await withDb(async (db) => {
+    const task = db.createTask({title:"hold race",status:"in_progress",task_type:"implementation"});
+    const handler = createHandler(db,SILENT,new McEventBus(),{checkPrReadiness:async()=>{
+      db.updateTask(task.id,{status:"on_hold"});return {status:"pass",reason:"fixture"};
+    }});
+    const res=mockRes();
+    await handler(mockReq({url:"/api/webhooks/agent-completion",method:"POST",body:{task_id:task.id,pr_url:"https://github.com/acme/app/pull/1"}}),res);
+    assert.equal(res.statusCode,409);assert.equal(db.getTask(task.id).status,"on_hold");
+  });
+});
+
+test("a task completed during readiness lookup cannot be reopened", async () => {
+  await withDb(async (db) => {
+    const task = db.createTask({title:"done race",status:"in_progress",task_type:"implementation"});
+    const handler = createHandler(db,SILENT,new McEventBus(),{checkPrReadiness:async()=>{
+      db.updateTask(task.id,{status:"done"});return {status:"pass",reason:"fixture"};
+    }});
+    const res=mockRes();
+    await handler(mockReq({url:"/api/webhooks/agent-completion",method:"POST",body:{task_id:task.id,pr_url:"https://github.com/acme/app/pull/1"}}),res);
+    assert.equal(res.statusCode,200);assert.equal(db.getTask(task.id).status,"done");
+    assert.equal(JSON.parse(res.body).new_status,"done");
   });
 });

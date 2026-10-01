@@ -147,3 +147,17 @@ print(json.dumps({"alive": bridge._tmux_session_alive("some-session")}))
 `);
   assert.equal(r.alive, true, "tmux failing is not evidence the agent died");
 });
+
+test("an exited agent awaiting PR gates is neither reaped nor counted as executing", () => {
+  const r = python(`
+import json, bridge
+entry={"id":"ci-wait","status":"running","deliveryPending":True,"lastHeartbeatAt":1}
+bridge._load_active_tasks=lambda:[entry]
+bridge._tmux_session_alive=lambda _:False
+bridge.subprocess.run=lambda *a,**k: (_ for _ in ()).throw(RuntimeError("must not reap"))
+bridge.can_start_agent=lambda:True
+bridge._max_concurrent_agents=lambda:1
+print(json.dumps({"reaped":bridge.reap_dead_agents(),"slots":bridge._agent_slots_free([entry])}))
+`);
+  assert.deepEqual(r,{reaped:0,slots:1});
+});

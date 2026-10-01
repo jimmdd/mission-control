@@ -13,6 +13,7 @@ import { readBusConfig } from "./messagebus/config.js";
 import { sendTelegramMessage, telegramGetMe } from "./messagebus/telegram.js";
 import { sendSlackMessage, slackAuthTest } from "./messagebus/slack.js";
 import { closeLinearIssue } from "./linear.js";
+import { checkPrReadiness, type PrReadiness } from "./pr-readiness.js";
 import type { LinearClosureResult } from "./linear.js";
 import type {
   AgentProgressState,
@@ -61,6 +62,7 @@ export interface CreatedLinearIssue {
 }
 
 export interface RouteDependencies {
+  checkPrReadiness?: (url: string) => Promise<PrReadiness>;
   resetPullRequest?: (url: string) => Promise<ResetPullRequestResult>;
   createLinearIssue?: (input: CreateLinearIssueInput) => Promise<{ created: boolean; issue: CreatedLinearIssue }>;
   closeLinearIssue?: (issueId: string) => Promise<LinearClosureResult>;
@@ -716,6 +718,7 @@ export async function getSwarmAgentStatusMap(
       pr: entry.pr,
       changeRequestAt: entry.changeRequestAt,
       lastHeartbeatAt: entry.lastHeartbeatAt,
+      deliveryPending: entry.deliveryPending === true,
       heartbeatIntervalSec: entry.heartbeatIntervalSec,
     };
   }
@@ -2379,6 +2382,27 @@ async function handleApiRequest(
                 title: "Pull request",
                 path: suppliedPrUrl,
               });
+            }
+
+            const prUrl = suppliedPrUrl ?? existingPr?.path;
+            if (task.task_type === "implementation" && prUrl && task.status !== "done") {
+              const readiness = await (dependencies.checkPrReadiness ?? checkPrReadiness)(prUrl);
+              // Keep a pushed PR visible, but never turn an agent's completion
+              // claim into Review/Done while CI or independent review is missing.
+              const current = db.getTask(task.id);
+              if (!current || ["on_hold", "closed"].includes(current.status)) {
+                sendJson(res, 409, { error: "Task lifecycle changed during PR verification" });
+                return;
+              }
+              if (current.status === "done") {
+                sendJson(res, 200, { success: true, task_id: task.id, new_status: "done" });
+                return;
+              }
+              if (readiness.status !== "pass") {
+                db.updateTask(task.id, { status: "testing" });
+                sendJson(res, 409, { error: "PR delivery gate has not passed", readiness, new_status: "testing" });
+                return;
+              }
             }
 
             if (!alreadyAtOrBeyondRequestedStatus) {

@@ -449,6 +449,7 @@ TASK_JSON=$(jq -n \
     noPrMode: $noPrMode,
     startedAt: $startedAt,
     status: "running",
+    deliveryPending: false,
     notifyOnComplete: true,
     costControls: {
       maxBudgetUsd: $maxBudgetUsd,

@@ -1,5 +1,5 @@
 #!/bin/bash
-# Pre-PR Codex review on branch diff.
+# Pre-push Greptile and Codex reviews on the committed branch diff.
 # Called by the agent's ralph loop before PR creation.
 #
 # Usage: pre-review.sh <worktree-path> [base-branch]
@@ -22,17 +22,29 @@ EVIDENCE_GATE="$(python3 -c 'import pathlib,sys; print(pathlib.Path(sys.argv[1])
 python3 "$EVIDENCE_GATE" "$WORKTREE" "$BASE_BRANCH"
 
 cd "$WORKTREE"
+REVIEW_HEAD=$(git rev-parse HEAD)
+REVIEW_BASE=$(git rev-parse "$BASE_BRANCH")
+READINESS_GATE="$(dirname "$EVIDENCE_GATE")/pr_readiness.py"
+# Starting a fresh review supersedes any previous result for this commit.
+rm -f "$SWARM_DIR/pr-review-state/$REVIEW_HEAD.json"
 
 # Get the diff
-DIFF=$(git diff "$BASE_BRANCH" -- . ":(exclude)*.lock" ":(exclude)package-lock.json" ":(exclude)pnpm-lock.yaml" ":(exclude).mcp.json" 2>/dev/null)
+DIFF=$(git diff "$BASE_BRANCH" -- . 2>/dev/null)
 
 if [ -z "$DIFF" ]; then
   echo "No changes to review."
   exit 0
 fi
 
+# Findings and unavailable reviews block before Codex can issue a PASS receipt.
+# Both reviews are bound to the same clean head/base and stored outside Git.
+GREPTILE_RESULT="$SWARM_DIR/pr-review-state/greptile/$REVIEW_HEAD-$REVIEW_BASE.json"
+python3 "$(dirname "$EVIDENCE_GATE")/greptile_review.py" \
+  "$WORKTREE" "$BASE_BRANCH" "$REVIEW_HEAD" "$REVIEW_BASE" "$GREPTILE_RESULT" \
+  --timeout "${PRE_REVIEW_TIMEOUT_SECONDS:-900}"
+
 # Get changed file list
-CHANGED_FILES=$(git diff --name-only "$BASE_BRANCH" -- . ":(exclude)*.lock" 2>/dev/null)
+CHANGED_FILES=$(git diff --name-only "$BASE_BRANCH" -- . 2>/dev/null)
 FILE_COUNT=$(echo "$CHANGED_FILES" | wc -l | tr -d ' ')
 
 # Build blast radius context if code-review-graph is available
@@ -68,6 +80,7 @@ REVIEW_PROMPT="You are a senior code reviewer. Review this diff for:
 4. Test coverage gaps (functions that should have tests but don't)
 5. Style/pattern violations relative to the existing codebase
 6. Performance concerns
+7. Inspect the complete diff with git and relevant files/tests in this worktree; the excerpt below may be truncated. Confirm real-surface QA evidence for behavior changes, not just green unit tests.
 
 Changed files ($FILE_COUNT):
 $CHANGED_FILES
@@ -97,7 +110,7 @@ If no issues, respond with: LGTM
 End with one of:
 - VERDICT: PASS (no blocking issues)
 - VERDICT: FAIL (has critical or major issues that must be fixed)
-- VERDICT: WARN (minor issues, can proceed but should be addressed)"
+- VERDICT: WARN (unresolved issues; fix or document disposition and rerun review)"
 
 # Run Codex review — `codex exec` is the non-interactive mode (the old `-q`/`--effort`
 # flags were removed); prompt is read from stdin, read-only sandbox (review only).
@@ -112,10 +125,11 @@ MODEL_FLAG=""
 # so the caller can decide, rather than consuming the agent's review iterations.
 REVIEW_TIMEOUT_SECONDS="${PRE_REVIEW_TIMEOUT_SECONDS:-900}"
 REVIEW_TMP=$(mktemp "${TMPDIR:-/tmp}/mc-pre-review.XXXXXX")
-trap 'rm -f "$REVIEW_TMP"' EXIT
+REVIEW_RESULT=$(mktemp "${TMPDIR:-/tmp}/mc-pre-review-result.XXXXXX")
+trap 'rm -f "$REVIEW_TMP" "$REVIEW_RESULT"' EXIT
 
 printf '%s' "$REVIEW_PROMPT" \
-  | codex exec --skip-git-repo-check --sandbox read-only $MODEL_FLAG > "$REVIEW_TMP" 2>&1 &
+  | codex exec --skip-git-repo-check --sandbox read-only --output-last-message "$REVIEW_RESULT" $MODEL_FLAG > "$REVIEW_TMP" 2>&1 &
 REVIEW_PID=$!
 
 (
@@ -135,7 +149,8 @@ for child in $(pgrep -P "$REVIEW_KILLER" 2>/dev/null); do kill "$child" 2>/dev/n
 kill "$REVIEW_KILLER" 2>/dev/null || true
 wait "$REVIEW_KILLER" 2>/dev/null || true
 
-REVIEW_OUTPUT=$(cat "$REVIEW_TMP" 2>/dev/null || true)
+REVIEW_OUTPUT=$(cat "$REVIEW_RESULT" 2>/dev/null || true)
+if [ "$REVIEW_RC" -ne 0 ]; then REVIEW_OUTPUT=$(cat "$REVIEW_TMP" 2>/dev/null || true); fi
 
 if [ "$REVIEW_RC" -ne 0 ]; then
   if [ -z "${REVIEW_OUTPUT//[[:space:]]/}" ]; then
@@ -151,14 +166,9 @@ fi
 
 echo "$REVIEW_OUTPUT"
 
-# Parse verdict
-if echo "$REVIEW_OUTPUT" | grep -q "VERDICT: PASS\|LGTM"; then
-  exit 0
-elif echo "$REVIEW_OUTPUT" | grep -q "VERDICT: FAIL"; then
-  exit 1
-elif echo "$REVIEW_OUTPUT" | grep -q "VERDICT: WARN"; then
-  exit 0  # warnings don't block
-else
-  # No clear verdict — treat as needs review
+# Parse only explicit verdict lines. LGTM in an echoed prompt or a mixed
+# FAIL/PASS result must never authorize delivery.
+if grep -q '^VERDICT: FAIL' "$REVIEW_RESULT"; then
   exit 1
 fi
+python3 "$READINESS_GATE" record "$WORKTREE" "$BASE_BRANCH" "$REVIEW_HEAD" "$REVIEW_BASE" "$REVIEW_RESULT" "$GREPTILE_RESULT"

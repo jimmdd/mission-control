@@ -16,6 +16,7 @@ while [ -L "$SCRIPT_SRC" ]; do
 done
 SCRIPT_DIR="$(cd "$(dirname "$SCRIPT_SRC")" && pwd)"
 COMPLETION_POLICY="$SCRIPT_DIR/completion_policy.py"
+READINESS_GATE="$SCRIPT_DIR/pr_readiness.py"
 CLEANUP_TOOL="$SCRIPT_DIR/cleanup-worktrees.sh"
 REGISTRY="$SWARM_DIR/active-tasks.json"
 LOG="$SWARM_DIR/logs/monitor-$(date +%Y%m%d).log"
@@ -214,7 +215,7 @@ reconcile_completed_agents_to_mc() {
       continue
     fi
 
-    if [[ "$mc_status" =~ ^(review|done|testing|merged)$ ]]; then
+    if [[ "$mc_status" =~ ^(done|merged)$ ]]; then
       state_update "$task_id" "{\"status\": \"ready\", \"completionSyncedAt\": \"$TIMESTAMP\"}" "completion-already-synced"
       continue
     fi
@@ -226,7 +227,7 @@ reconcile_completed_agents_to_mc() {
     # A stale planner escalation can leave the MC ticket in planning even after
     # the implementation agent produced a PR (MET-644). The PR is the completion
     # evidence, so planning must be reconcilable here too.
-    if [[ "$mc_status" =~ ^(in_progress|assigned|planning)$ ]]; then
+    if [[ "$mc_status" =~ ^(in_progress|assigned|planning|testing|review)$ ]]; then
       local session
       session=$(jq -r ".[] | select(.id == \"$task_id\") | .tmuxSession // empty" "$REGISTRY" 2>/dev/null)
       if [ -n "$session" ] && tmux has-session -t "$session" 2>/dev/null; then
@@ -266,6 +267,12 @@ reconcile_completed_agents_to_mc() {
 
       if [ -n "$pr_url" ]; then
         mc_add_deliverable "$mc_task_id" "Pull Request #${pr_num:-unknown}" "$pr_url"
+      fi
+      if [ -n "$pr_url" ] && [ "$no_pr_mode" != "true" ]; then
+        # A completed process has only handed off a PR. The shared CI/review
+        # gate below owns readiness, even when its tmux session has exited.
+        state_update "$task_id" '{"status":"running","deliveryPending":true,"completionSyncedAt":null}' "completion-awaiting-gates"
+        continue
       fi
       if mc_complete_task "$mc_task_id" "Agent completed with required deliverable; reconciled to review" "review" "$pr_url" "$no_pr_mode"; then
         mc_post_activity "$mc_task_id" "updated" "Monitor reconciled completed agent to review (tmux session ended)"
@@ -577,10 +584,12 @@ extract_ci_failures() {
   CI_FAILURE_DETAILS=""
 
   local checks_json
-  checks_json=$(cd "$repo" && gh pr checks "$pr_num" --json name,state,detailsUrl 2>/dev/null) || return 1
+  local checks_rc=0
+  checks_json=$(cd "$repo" && gh pr checks "$pr_num" --json name,state,link 2>/dev/null) || checks_rc=$?
+  [ "$checks_rc" -le 1 ] || return 1
 
   local failed_names
-  failed_names=$(echo "$checks_json" | jq -r '.[] | select(.state == "FAILURE") | .name' 2>/dev/null)
+  failed_names=$(echo "$checks_json" | jq -r '.[] | select(.state == "FAILURE" or .state == "CANCELLED" or .state == "TIMED_OUT" or .state == "ACTION_REQUIRED" or .state == "ERROR") | .name' 2>/dev/null)
   [ -z "$failed_names" ] && return 1
 
   local details="Failed CI checks for PR #$pr_num:\n"
@@ -588,7 +597,7 @@ extract_ci_failures() {
   while IFS= read -r check_name; do
     details+="\\n## $check_name\\n"
     local run_id
-    run_id=$(cd "$repo" && gh run list --json databaseId,name,status -q ".[] | select(.name == \"$check_name\" and .status == \"completed\") | .databaseId" 2>/dev/null | head -1)
+    run_id=$(printf '%s' "$checks_json" | jq -r --arg name "$check_name" '.[] | select(.name == $name) | .link' | sed -nE 's@.*/actions/runs/([0-9]+).*@\1@p' | head -1)
     if [ -n "$run_id" ]; then
       local log_output
       log_output=$(cd "$repo" && gh run view "$run_id" --log-failed 2>/dev/null | tail -80)
@@ -640,6 +649,7 @@ $(echo -e "$ci_details")
 
 Do NOT create a new PR. Fix the existing code and push.
 CIFIXEOF
+  PYTHONPATH="$SCRIPT_DIR" python3 -c 'from evidence_policy import EVIDENCE_POLICY; print(EVIDENCE_POLICY)' >> "$fix_prompt"
 
   LAUNCHER=$(resolve_launcher_path "$launcher")
 
@@ -647,7 +657,7 @@ CIFIXEOF
   tmux new-session -d -s "$session" -c "$worktree" \
     "bash -lc '${env_exports}PROMPT_OVERRIDE=$fix_prompt exec $LAUNCHER $task_id'"
 
-  state_update "$task_id" "{\"status\": \"running\", \"ciFixCycles\": $cycle}" "ci-fix-relaunch"
+  state_update "$task_id" "{\"status\": \"running\", \"deliveryPending\": false, \"ciFixCycles\": $cycle}" "ci-fix-relaunch"
 
   echo "[$TIMESTAMP] CI-FIX: $task_id — relaunched for CI fix cycle $cycle" >> "$LOG"
 }
@@ -665,21 +675,30 @@ run_codex_review() {
 
   echo "[$TIMESTAMP] Running Codex review on PR #$pr_num..." >> "$LOG"
 
-  local base_branch
-  base_branch=$(jq -r ".[] | select(.id == \"$TASK_ID\") | .baseBranch // \"origin/main\"" "$REGISTRY" 2>/dev/null)
+  local base_name base_branch
+  base_name=$(printf '%s' "$READINESS" | jq -r '.baseRefName // empty')
+  [ -n "$base_name" ] || return 1
+  base_branch="refs/remotes/origin/$base_name"
+  git check-ref-format "$base_branch" >/dev/null 2>&1 || return 1
   local worktree_dir
   worktree_dir=$(jq -r ".[] | select(.id == \"$TASK_ID\") | .worktree // empty" "$REGISTRY" 2>/dev/null)
   local review_dir="${worktree_dir:-$repo}"
 
-  local review_output
-  review_output=$(cd "$review_dir" && codex review --base "$base_branch" 2>&1) || {
-    echo "[$TIMESTAMP] Codex review failed for PR #$pr_num" >> "$LOG"
-    return 1
-  }
-
+  # Review the pushed head, not another writer's unpushed commit or stale base.
+  [ "$(git -C "$review_dir" rev-parse HEAD)" = "$(printf '%s' "$READINESS" | jq -r '.head')" ] || return 1
+  git -C "$review_dir" fetch origin "+refs/heads/$base_name:$base_branch" >/dev/null 2>&1 || return 1
+  [ "$(git -C "$review_dir" rev-parse "$base_branch")" = "$(printf '%s' "$READINESS" | jq -r '.base')" ] || return 1
+  local review_output review_rc=0
+  review_output=$(bash "$SCRIPT_DIR/pre-review.sh" "$review_dir" "$base_branch" 2>&1) || review_rc=$?
   echo "$review_output" > "$review_log"
-  echo "[$TIMESTAMP] Codex review saved to $review_log" >> "$LOG"
   CODEX_REVIEW="$review_output"
+  if [ "$review_rc" -eq 2 ]; then
+    echo "[$TIMESTAMP] Codex review unavailable for PR #$pr_num" >> "$LOG"
+    return 1
+  fi
+  if [ "$review_rc" -ne 0 ]; then
+    CODEX_REVIEW+=$'\nVERDICT: FAIL — review gate did not pass'
+  fi
   return 0
 }
 
@@ -691,7 +710,7 @@ review_has_blocking_issues() {
   if echo "$review" | grep -qi "VERDICT: FAIL"; then
     return 0
   fi
-  if echo "$review" | grep -qi "critical"; then
+  if echo "$review" | grep -q '^VERDICT: WARN'; then
     return 0
   fi
   return 1
@@ -728,6 +747,7 @@ $review
 
 Do NOT create a new PR. Fix the existing code and push.
 REVIEWEOF
+  PYTHONPATH="$SCRIPT_DIR" python3 -c 'from evidence_policy import EVIDENCE_POLICY; print(EVIDENCE_POLICY)' >> "$iteration_prompt"
 
   LAUNCHER=$(resolve_launcher_path "$launcher")
 
@@ -735,7 +755,7 @@ REVIEWEOF
   tmux new-session -d -s "$session" -c "$worktree" \
     "bash -lc '${env_exports}PROMPT_OVERRIDE=$iteration_prompt exec $LAUNCHER $task_id'"
 
-  state_update "$task_id" "{\"status\": \"running\", \"reviewCycles\": $cycle}" "review-relaunch"
+  state_update "$task_id" "{\"status\": \"running\", \"deliveryPending\": false, \"reviewCycles\": $cycle}" "review-relaunch"
 
   echo "[$TIMESTAMP] ITERATE: $task_id — relaunched for review cycle $cycle" >> "$LOG"
 }
@@ -764,14 +784,15 @@ echo "$RUNNING_IDS" | while read -r TASK_ID; do
     fi
   fi
 
+  DELIVERY_PENDING=$(jq -r ".[] | select(.id == \"$TASK_ID\") | .deliveryPending // false" "$REGISTRY")
   STARTED_AT=$(jq -r ".[] | select(.id == \"$TASK_ID\") | .startedAt // .lastAttemptAt // .lastRespawnAt // 0" "$REGISTRY")
   if [ "$STARTED_AT" -eq 0 ] 2>/dev/null; then
     echo "[$TIMESTAMP] SKIP HEALTH: $TASK_ID — no start timestamp available" >> "$LOG"
-  else
+  elif [ "$DELIVERY_PENDING" != "true" ]; then
     log_health_check "$TASK_ID" "$SESSION" "$STARTED_AT" "$MC_TASK_ID"
   fi
 
-  if ! tmux has-session -t "$SESSION" 2>/dev/null; then
+  if [ "$DELIVERY_PENDING" != "true" ] && ! tmux has-session -t "$SESSION" 2>/dev/null; then
     RETRY_COUNT=$(jq -r ".[] | select(.id == \"$TASK_ID\") | .retryCount // 0" "$REGISTRY")
     MAX_RETRIES=3
 
@@ -809,7 +830,7 @@ echo "$RUNNING_IDS" | while read -r TASK_ID; do
   # live human-feedback session before its result has been reconciled.
   CHANGE_REQUEST_AT=$(jq -r ".[] | select(.id == \"$TASK_ID\") | .changeRequestAt // empty" "$REGISTRY")
   COMPLETION_SYNCED_AT=$(jq -r ".[] | select(.id == \"$TASK_ID\") | .completionSyncedAt // empty" "$REGISTRY")
-  if [ -n "$CHANGE_REQUEST_AT" ] && [ -z "$COMPLETION_SYNCED_AT" ]; then
+  if [ "$DELIVERY_PENDING" != "true" ] && [ -n "$CHANGE_REQUEST_AT" ] && [ -z "$COMPLETION_SYNCED_AT" ]; then
     echo "[$TIMESTAMP] HUMAN FOLLOW-UP RUNNING: $TASK_ID — deferring CI/review automation until completion is synced" >> "$LOG"
     continue
   fi
@@ -840,8 +861,25 @@ echo "$RUNNING_IDS" | while read -r TASK_ID; do
   fi
 
   PR_URL=$(cd "$REPO" && gh pr view "$PR_NUM" --json url -q '.url' 2>/dev/null)
-  FAILED_CHECKS=$(cd "$REPO" && gh pr checks "$PR_NUM" 2>/dev/null | grep -c "fail" || true)
-  PENDING_CHECKS=$(cd "$REPO" && gh pr checks "$PR_NUM" 2>/dev/null | grep -c "pending" || true)
+  READINESS=$(python3 "$READINESS_GATE" check "$PR_URL")
+  GATE_STATUS=$(printf '%s' "$READINESS" | jq -r '.status // "unknown"')
+  FAILED_CHECKS=0
+  PENDING_CHECKS=0
+  [ "$GATE_STATUS" = "ci_failed" ] && FAILED_CHECKS=1
+  if [[ "$GATE_STATUS" =~ ^(pending|unknown)$ ]]; then
+    echo "[$TIMESTAMP] DELIVERY WAIT: $TASK_ID — $READINESS" >> "$LOG"
+    continue
+  fi
+  if [ "$GATE_STATUS" = "review_blocked" ]; then
+    REVIEW_CYCLES=$(jq -r ".[] | select(.id == \"$TASK_ID\") | .reviewCycles // 0" "$REGISTRY")
+    if [ "$REVIEW_CYCLES" -lt "$MAX_REVIEW_CYCLES" ]; then
+      relaunch_agent_with_review "$TASK_ID" "$WORKTREE" "Read $PR_URL review feedback, fix all actionable findings, resolve addressed threads, rerun local checks and pre-review, then push and await CI." "$((REVIEW_CYCLES + 1))"
+    else
+      state_update "$TASK_ID" '{"status":"failed","lastError":"unresolved_pr_reviews"}' "review-gate-blocked"
+      [ -n "$MC_TASK_ID" ] && mc_post_activity "$MC_TASK_ID" "needs_human" "PR review findings remain unresolved; delivery is blocked, not complete"
+    fi
+    continue
+  fi
 
   if [ "$FAILED_CHECKS" -gt 0 ]; then
     CI_FIX_CYCLES=$(jq -r ".[] | select(.id == \"$TASK_ID\") | .ciFixCycles // 0" "$REGISTRY" 2>/dev/null)
@@ -885,6 +923,7 @@ echo "$RUNNING_IDS" | while read -r TASK_ID; do
       mc_post_activity "$MC_TASK_ID" "updated" "PR #$PR_NUM created but GSD verification $GSD_STATUS$detail_suffix"
       touch "$GSD_MARKER"
     fi
+    continue
   fi
 
   REVIEW_CYCLES=$(jq -r ".[] | select(.id == \"$TASK_ID\") | .reviewCycles // 0" "$REGISTRY" 2>/dev/null)
@@ -906,16 +945,24 @@ echo "$RUNNING_IDS" | while read -r TASK_ID; do
     fi
 
     if review_has_blocking_issues "$CODEX_REVIEW"; then
-      echo "[$TIMESTAMP] MAX REVIEW CYCLES: $TASK_ID — still has issues after $MAX_REVIEW_CYCLES cycles, completing with warning" >> "$LOG"
-      [ -n "$MC_TASK_ID" ] && mc_post_activity "$MC_TASK_ID" "updated" "Review still has issues after $MAX_REVIEW_CYCLES cycles — completing with manual review needed"
+      echo "[$TIMESTAMP] MAX REVIEW CYCLES: $TASK_ID — still has issues after $MAX_REVIEW_CYCLES cycles, delivery remains blocked" >> "$LOG"
+      [ -n "$MC_TASK_ID" ] && mc_post_activity "$MC_TASK_ID" "needs_human" "Review still has issues after $MAX_REVIEW_CYCLES cycles — delivery blocked; manual review needed"
+      state_update "$TASK_ID" '{"status":"failed","lastError":"review_gate_failed"}' "review-gate-failed"
+      continue
     fi
+  else
+    echo "[$TIMESTAMP] REVIEW UNAVAILABLE: $TASK_ID — keeping delivery pending" >> "$LOG"
+    continue
   fi
+
+  # A push or a new review during the independent review invalidates readiness.
+  READINESS=$(python3 "$READINESS_GATE" check "$PR_URL")
+  [ "$(printf '%s' "$READINESS" | jq -r '.status')" = "pass" ] || continue
 
   AGENT_SUMMARY=""
   extract_agent_summary "$TASK_ID" "$WORKTREE"
 
   echo "[$TIMESTAMP] READY: $TASK_ID — PR #$PR_NUM CI passed, GSD=$GSD_STATUS, reviews=$REVIEW_CYCLES" >> "$LOG"
-  state_update "$TASK_ID" "{\"status\": \"ready\", \"pr\": $PR_NUM}" "ready-with-pr"
 
   if [ -n "$MC_TASK_ID" ]; then
     gsd_note=""
@@ -927,8 +974,9 @@ echo "$RUNNING_IDS" | while read -r TASK_ID; do
     [ -n "$AGENT_SUMMARY" ] && summary_text+=$'\n'"$AGENT_SUMMARY"
 
     mc_add_deliverable "$MC_TASK_ID" "Pull Request #$PR_NUM" "$PR_URL"
-    mc_complete_task "$MC_TASK_ID" "$summary_text" "review" "$PR_URL"
+    mc_complete_task "$MC_TASK_ID" "$summary_text" "review" "$PR_URL" || continue
   fi
+  state_update "$TASK_ID" "{\"status\":\"ready\",\"pr\":$PR_NUM,\"deliveryPending\":false,\"completionSyncedAt\":\"$TIMESTAMP\"}" "ready-with-pr"
 
   # Distill knowledge from task artifacts into Context Fabrica
   if [ -f "$SWARM_DIR/knowledge-distill.py" ]; then
