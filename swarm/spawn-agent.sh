@@ -180,6 +180,12 @@ if [ "$RUNNING_PROFILE" -ge "$AGENT_MAX_AGENTS" ]; then
   fi
 fi
 
+# Per-ticket reasoning effort from the workflow tier (light: medium, heavy: high).
+# Codex only: Claude's launcher reads effort differently, and GSD tickets run there.
+if [ -n "${MC_AGENT_EFFORT:-}" ] && [ "$AGENT_LAUNCHER" = "codex" ]; then
+  AGENT_EFFORT="$MC_AGENT_EFFORT"
+fi
+
 # A fallback profile has its own ceiling. Re-check it after switching; otherwise a
 # full Codex pool could overflow the Claude pool (or vice versa) and the configured
 # 8/5 split would only be a label, not an enforced capacity boundary.

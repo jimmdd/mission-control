@@ -832,6 +832,11 @@
   .status-target .fld .k { color: var(--ink-4); }
   .status-target .fld .v { color: var(--ink-2); }
   .status-target .repo-select { background: transparent; color: var(--ink-2); }
+  .status-workflow { margin-top: 18px; padding-top: 16px; }
+  .status-workflow .status-target-grid { grid-template-columns: minmax(0, 1fr); gap: 12px; }
+  .status-workflow .fld .v { white-space: normal; }
+  .status-workflow .repo-select { max-width: 220px; }
+  .status-workflow .fld.warn .v { color: var(--amber); }
   .status-controls { margin-top: auto; padding-top: 28px; }
   .autonomy-badge { position: relative; flex: none; }
   .autonomy-badge > summary {
@@ -1220,7 +1225,7 @@ function renderTicket(task, triage, activities, extra = {}) {
           <div class="summary-actions">
             ${planReady ? `<button class="summary-action primary" data-planopen>Open plan</button>` : ""}
             ${previewAction}
-            ${inReview ? "" : `<span class="summary-note">${esc(runStatus(task, extra.plan, extra.progress, qs, extra.agentProgress))}</span>`}
+            ${inReview ? "" : `<span class="summary-note">${esc(runStatus(task, extra.plan, extra.progress, qs, extra.agentProgress, workflowFacts(triage).effective))}</span>`}
             ${!finished ? `<span class="summary-safety">
               ${triage && !["done", "completed", "merged"].includes(task.status) ? `<button class="summary-action reset" data-reset-triage>Reset triage</button>` : ""}
               ${!["on_hold", "done", "completed", "merged"].includes(task.status) ? `<button class="summary-action hold" data-hold-task>Pause task</button>` : ""}
@@ -1292,6 +1297,66 @@ function renderExecutionTarget(task, triage, side = {}) {
     field("app", apps.join(", ")),
   ].filter(Boolean).join("");
   return fields ? `<div class="status-target"><div class="status-target-grid">${fields}</div></div>` : "";
+}
+
+/**
+ * Light, heavy or GSD — which workflow this ticket gets once work starts, what Jev
+ * saw, and why. Light and heavy are one agent with no planning stage (heavy writes
+ * its own short plan); GSD is the old staged loop and only ever an explicit choice. Chosen by the bridge (`swarm/workflow_router.py`) before the confirm
+ * gate, so it is visible, and changeable, before anything is created. Once the
+ * ticket has dispatched the agent is already on a path, so the choice is read-only.
+ */
+const WORKFLOW_CHOICES = [["", "Auto"], ["light", "Light"], ["heavy", "Heavy"], ["gsd", "GSD"]];
+
+function workflowFacts(triage) {
+  const rec = triage?.workflow && typeof triage.workflow === "object" ? triage.workflow : null;
+  const escalation = triage?.workflow_escalation && typeof triage.workflow_escalation === "object"
+    ? triage.workflow_escalation : null;
+  const raw = triage?.workflow_override || "";
+  const override = WORKFLOW_CHOICES.some(([v]) => v === raw) ? raw : "";
+  // An escalation outranks the record: the agent found the ticket was not light.
+  const effective = escalation ? "heavy" : (override || rec?.workflow || "");
+  return { rec, escalation, override, effective };
+}
+
+function workflowLabel(value) {
+  return (WORKFLOW_CHOICES.find(([v]) => v && v === value) || [, value || ""])[1];
+}
+
+/** Light and heavy build straight away in one session; only GSD has a planning stage. */
+function buildsInSession(workflow) {
+  return workflow === "light" || workflow === "heavy";
+}
+
+function renderWorkflow(task, triage) {
+  if (!triage) return "";
+  const { rec, escalation, override, effective } = workflowFacts(triage);
+  if (!rec && !override && !escalation) return "";
+  const editable = !escalation && (!task || ["inbox", "planning"].includes(task.status));
+  const pct = n => `${Math.round(Number(n) * 100)}%`;
+  const decided = rec?.workflow && !rec.override ? ` (${workflowLabel(rec.workflow)})` : "";
+  const choice = editable
+    ? `<div class="fld"><span class="k">workflow</span>
+      <select class="repo-select" data-workflow-select aria-label="Workflow for this ticket">
+        ${WORKFLOW_CHOICES.map(([v, l]) => `<option value="${esc(v)}" ${v === override ? "selected" : ""}>${
+          esc(v ? l : `Auto${decided}`)}</option>`).join("")}
+      </select></div>`
+    : field("workflow", escalation ? "Heavy · escalated from light" : workflowLabel(effective));
+  const jev = rec?.jev;
+  const jevLine = jev
+    ? `UI-only ${pct(jev.ui_only)} · size ${Number(jev.scope).toFixed(1)}/3 · funds/chain/auth ${pct(jev.money_or_chain)}`
+    : "";
+  // A light call from Jev is fully explained by Jev's numbers; repeating them as
+  // "why" says the same thing twice. Every other call has a reason of its own.
+  const whyAddsSomething = !(rec?.source === "jev" && rec?.workflow === "light");
+  const fields = [
+    choice,
+    field("jev", jevLine),
+    whyAddsSomething ? field("why", (rec?.why || []).join(" · ")) : "",
+    escalation ? field("escalated", escalation.reason || "the agent switched to the heavy workflow", "warn") : "",
+  ].filter(Boolean).join("");
+  return `<div class="status-target status-workflow" data-workflow="${esc(effective || "auto")}">
+    <div class="status-target-grid">${fields}</div></div>`;
 }
 
 /**
@@ -2344,12 +2409,18 @@ function renderComposer(active, openCount, side = {}) {
       const targetLine = targetRepos.length
         ? `<div class="ctarget"><b>execution target</b> — ${esc(targetRepos.join("; "))}${targetApps.length ? ` · app ${esc(targetApps.join(", "))}` : ""}</div>`
         : `<div class="ctarget"><b>execution target unresolved</b> — wait for a repository before confirming</div>`;
+      const wf = side.workflow || {};
+      const wfLine = wf.effective
+        ? `<div class="cwhy"><b>workflow · ${esc(wf.effective)}</b>${(wf.rec?.why || []).length
+            ? ` — ${esc(wf.rec.why.join(" · "))}` : ""}</div>`
+        : "";
       return `<div class="composer"><div class="cin">
         <div class="cactive">Every question is settled. Nothing has been dispatched yet.</div>
         ${why}
+        ${wfLine}
         ${targetLine}
         <div class="cexits">
-          <button class="cpill rec" data-act="confirm">Confirm and start planning</button>
+          <button class="cpill rec" data-act="confirm">${buildsInSession(wf.effective) ? "Confirm and start building" : "Confirm and start planning"}</button>
           ${last ? `<button class="cpill esc" data-focus="${esc(last.id)}">Change a decision</button>` : ""}
         </div>
         <div class="cfoot">confirming creates the branch and worktree · nothing is written before it</div>
@@ -2457,6 +2528,7 @@ function renderAutonomy(triage) {
 
 function renderDecisions(questions, activeId, side = {}) {
   const recalled = side.recalled || null;
+  const lightRail = buildsInSession(workflowFacts(side.triage).effective);
   const rows = (questions || []).map(q => {
     let state = "open", label = "open";
     if (q.answer) { state = "set"; label = "settled"; }
@@ -2531,6 +2603,7 @@ function renderDecisions(questions, activeId, side = {}) {
         </div>
       </div>
       ${renderExecutionTarget(task, side.triage, side)}
+      ${renderWorkflow(task, side.triage)}
       ${prUrl ? `<div class="status-controls">
         <a class="status-pr" href="${esc(prUrl)}" target="_blank" rel="noopener">Go to pull request</a>
       </div>` : ""}
@@ -2545,10 +2618,11 @@ function renderDecisions(questions, activeId, side = {}) {
       ${renderActivity(side.activities, side.checkpoints)}
       ${deliverables}
       ${subtasks}
-      <div class="dsum">${blocking ? `<b>${blocking}</b> blocking planning<br>`
-        : side.needsRepoConfirm ? `<b>confirm repository</b> before planning<br>`
-        : side.needsConfirm ? `<b>confirm</b> to start planning<br>` : ""}
-        Everything settled here lands in <code>.planning/</code> as the phase brief.</div>
+      <div class="dsum">${blocking ? `<b>${blocking}</b> blocking ${lightRail ? "the build" : "planning"}<br>`
+        : side.needsRepoConfirm ? `<b>confirm repository</b> before ${lightRail ? "building" : "planning"}<br>`
+        : side.needsConfirm ? `<b>confirm</b> to start ${lightRail ? "building" : "planning"}<br>` : ""}
+        ${lightRail ? "Everything settled here goes to the agent with the ticket — there is no separate planning stage."
+          : "Everything settled here lands in <code>.planning/</code> as the phase brief."}</div>
     </div></aside>`;
 }
 
@@ -2620,14 +2694,30 @@ function renderConversation(triage, activeId, side = {}) {
   // Between the last answer and the plan landing there is a real wait — planning
   // took 18 minutes on the run this was built against. The thread says so rather
   // than ending on a rule with nothing under it.
+  // Light and heavy tickets have no planning stage, so "writing the plan" would be untrue.
+  const tier = workflowFacts(triage).effective;
+  const light = tier === "light";
+  const heavy = tier === "heavy";
   const planCard = renderPlanCard(side.plan, side.progress, qs, side.planOpen, side.agentProgress)
     || (settledMark ? `<div class="cmsg"><span class="cav">${esc(AVATAR)}</span>
         <div><div class="cbody">${needsRepoConfirm
           ? "That is everything. Choose the Repo dropdown in the status card before planning starts."
           : needsConfirm
-            ? "That is everything. Confirm below and I will branch, set up a worktree and write the plan."
-            : "That is everything. Writing the plan next — it lands here."}</div>
-        ${needsConfirm || needsRepoConfirm ? "" : `<div class="cwait"><i></i>planning<span class="el">no plan on disk yet</span></div>`}</div></div>` : "");
+            ? (light
+              ? "That is everything. It is a small frontend change, so there is no planning stage — confirm below and I will branch, set up a worktree and build it."
+              : heavy
+                ? "That is everything. Confirm below and I will branch, set up a worktree, write a short plan and build it — no separate planning stage."
+                : "That is everything. Confirm below and I will branch, set up a worktree and write the plan.")
+            : (light
+              ? "That is everything. Small frontend change — building it directly, no plan."
+              : heavy
+                ? "That is everything. Building it now — the agent writes a short plan first, in the same session."
+                : "That is everything. Writing the plan next — it lands here.")}</div>
+        ${needsConfirm || needsRepoConfirm ? "" : light
+          ? `<div class="cwait"><i></i>light workflow<span class="el">no planning stage</span></div>`
+          : heavy
+            ? `<div class="cwait"><i></i>heavy workflow<span class="el">plan written in-session</span></div>`
+            : `<div class="cwait"><i></i>planning<span class="el">no plan on disk yet</span></div>`}</div></div>` : "");
   const map = (side.planOpen && side.plan)
     ? `<div class="pmap">${planMap(side.plan, side.progress, triage, side.agentProgress)}</div>` : "";
 
@@ -2642,7 +2732,8 @@ function renderConversation(triage, activeId, side = {}) {
           // Read off the triage state here rather than only in load(), so the
           // renderer is complete on its own and testable without the page.
           assessedLevel: triage?.assessed_level || side.assessedLevel || "",
-          assessedWhy: triage?.assessed_why || side.assessedWhy || [] })}
+          assessedWhy: triage?.assessed_why || side.assessedWhy || [],
+          workflow: workflowFacts(triage) })}
     </div>
     ${renderDecisions(qs, active?.id, { ...side, needsConfirm, needsRepoConfirm, triage })}`;
 }
@@ -2768,13 +2859,23 @@ let planOpen = false;
  * Read off progress rather than status, because "in_progress" on the ticket and a
  * step actually running are different claims and only one of them is checkable.
  */
-function runStatus(task, plan, progress, questions = [], agentProgress = null) {
+function runStatus(task, plan, progress, questions = [], agentProgress = null, workflow = "") {
   const steps = (plan && plan.steps) || [];
   const st = n => (progress && progress.steps && progress.steps[String(n)]) || {};
   if (!steps.length) {
     // Saying "planning starts when the questions are settled" under a thread where
-    // they are all settled is the page disagreeing with itself.
-    return (questions.length && !blockingQuestions(questions).length)
+    // they are all settled is the page disagreeing with itself. A light ticket has
+    // no planner at all, so it does not say one is coming.
+    const settledNow = questions.length && !blockingQuestions(questions).length;
+    if (workflow === "light") {
+      return settledNow ? "everything is settled · building, no plan"
+        : "building starts when the questions are settled";
+    }
+    if (workflow === "heavy") {
+      return settledNow ? "everything is settled · plan + build in-session"
+        : "building starts when the questions are settled";
+    }
+    return settledNow
       ? "everything is settled · the planner runs next"
       : "planning starts when the questions are settled";
   }
@@ -2949,6 +3050,9 @@ function wireConversation(triage, keptScroll = null, openGroups = []) {
 
   const repoSelect = document.querySelector("[data-repo-select]");
   repoSelect?.addEventListener("change", () => confirmTaskRepo(triage, repoSelect));
+
+  const workflowSelect = document.querySelector("[data-workflow-select]");
+  workflowSelect?.addEventListener("change", () => setWorkflowOverride(workflowSelect));
 }
 
 /** One consistent safety panel for reversible but disruptive ticket actions. */
@@ -3142,6 +3246,7 @@ async function confirmTriage(triage, btn) {
   const next = JSON.parse(JSON.stringify(triage));
   next.confirmed = true;
   next.status = "answered";
+  const label = btn?.textContent || "Confirm and start planning";
   if (btn) { btn.disabled = true; btn.textContent = "Confirming…"; }
   try {
     const res = await fetch(`/api/tasks/${encodeURIComponent(taskId)}/triage-state`, {
@@ -3150,8 +3255,29 @@ async function confirmTriage(triage, btn) {
     if (!res.ok) throw new Error(`confirm failed (${res.status})`);
     load({ force: true });
   } catch (e) {
-    if (btn) { btn.disabled = false; btn.textContent = "Confirm and start planning"; }
+    if (btn) { btn.disabled = false; btn.textContent = label; }
     const note = document.querySelector(".cactive");
+    if (note) note.textContent = String(e.message || e);
+  }
+}
+
+/**
+ * Override the light/full choice. PATCH, not PUT: it merges one field, so it cannot
+ * race the bridge's own writes to the rest of the triage state. The bridge sees the
+ * override differ from its record and re-decides on its next poll.
+ */
+async function setWorkflowOverride(select) {
+  select.disabled = true;
+  try {
+    const res = await fetch(`/api/tasks/${encodeURIComponent(taskId)}/triage-state`, {
+      method: "PATCH", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ workflow_override: select.value || "" }),
+    });
+    if (!res.ok) throw new Error(`could not set workflow (${res.status})`);
+    load({ force: true });
+  } catch (e) {
+    select.disabled = false;
+    const note = document.querySelector(".dnote");
     if (note) note.textContent = String(e.message || e);
   }
 }
@@ -3367,7 +3493,7 @@ async function load({ force = false } = {}) {
       progress: planData.progress,
       agentProgress,
       planOpen,
-      status: runStatus(task, planData.plan, planData.progress, qs, agentProgress),
+      status: runStatus(task, planData.plan, planData.progress, qs, agentProgress, workflowFacts(triage).effective),
       // How much process the bridge assessed this ticket needs, and why. Shown at
       // the gate so the call can be argued with rather than merely obeyed.
       assessedLevel: triage?.assessed_level || "",

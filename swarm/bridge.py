@@ -1822,7 +1822,8 @@ def generate_prompt(task: dict, repo_context: str, project: str, repo: str,
                     sibling_contexts: Optional[Dict[str, str]] = None,
                     knowledge: Optional[dict] = None,
                     plan_ready: bool = False,
-                    decisions: Optional[List[dict]] = None) -> str:
+                    decisions: Optional[List[dict]] = None,
+                    workflow: Optional[dict] = None) -> str:
     title = task["title"]
     description = task.get("description", "")
     linear_url = task.get("external_url") or task.get("linear_issue_url", "")
@@ -1908,7 +1909,32 @@ def generate_prompt(task: dict, repo_context: str, project: str, repo: str,
               " proceeding."
         )
 
-    prompt += f"""
+    finish_title = "Finish + Report" if _pr_is_disabled(task) else "PR + Report"
+    finish_body = f"""After local verification and independent review pass, publish the PR (unless no-PR mode).
+For published PRs, wait for current-head remote CI and review resolution before reporting completion.
+Local-only tasks do not push or require remote CI:
+1. Commit all changes with conventional commit messages
+{'''2. Do NOT push, and do NOT open a pull request. This work stays local — leave it
+   committed on your branch in the worktree. Pushing or opening a PR publishes work
+   the owner has explicitly asked to keep unpublished.
+3. Report completion to Mission Control:''' if _pr_is_disabled(task) else (
+f'''2. Push commits to the existing PR branch `{existing_pr.get("branch")}`
+3. Update the existing PR at {existing_pr.get("url")}. Do NOT run `gh pr create` and do NOT open another PR.
+4. Report completion to Mission Control:''' if existing_pr and not existing_pr.get("error") else f'''2. Push your branch
+3. Create a PR with `gh pr create` — title MUST start with `[{_task_ref(task)}]`
+4. Report completion to Mission Control:''')}
+   curl -X POST {MC_BASE_URL}/api/webhooks/agent-completion \\
+     -H "Content-Type: application/json" \\
+     -d '{{"task_id": "{task['id']}", "summary": "YOUR_SUMMARY_HERE", {completion_evidence}}}'
+
+"""
+    tier = (workflow or {}).get("workflow")
+    if tier == "light":
+        prompt += _light_workflow_section(task, workflow, finish_title, finish_body)
+    elif tier == "heavy":
+        prompt += _heavy_workflow_section(task, workflow, finish_title, finish_body)
+    else:
+        prompt += f"""
 ## Mandatory Workflow ({gsd_name} + Review Loop)
 
 You MUST follow this exact workflow. Do NOT skip steps. Do NOT write code before planning.
@@ -1957,24 +1983,15 @@ failures, timeouts, and non-PASS Codex reviews block pushing. Read the output an
 4. Re-run pre-review.sh after fixes
 5. Maximum 3 review iterations. If still failing after 3, escalate to human (see below).
 
-### Step 7: {"Finish + Report" if _pr_is_disabled(task) else "PR + Report"}
-After local verification and independent review pass, publish the PR (unless no-PR mode).
-For published PRs, wait for current-head remote CI and review resolution before reporting completion.
-Local-only tasks do not push or require remote CI:
-1. Commit all changes with conventional commit messages
-{'''2. Do NOT push, and do NOT open a pull request. This work stays local — leave it
-   committed on your branch in the worktree. Pushing or opening a PR publishes work
-   the owner has explicitly asked to keep unpublished.
-3. Report completion to Mission Control:''' if _pr_is_disabled(task) else (
-f'''2. Push commits to the existing PR branch `{existing_pr.get("branch")}`
-3. Update the existing PR at {existing_pr.get("url")}. Do NOT run `gh pr create` and do NOT open another PR.
-4. Report completion to Mission Control:''' if existing_pr and not existing_pr.get("error") else f'''2. Push your branch
-3. Create a PR with `gh pr create` — title MUST start with `[{_task_ref(task)}]`
-4. Report completion to Mission Control:''')}
-   curl -X POST {MC_BASE_URL}/api/webhooks/agent-completion \\
-     -H "Content-Type: application/json" \\
-     -d '{{"task_id": "{task['id']}", "summary": "YOUR_SUMMARY_HERE", {completion_evidence}}}'
+### Step 7: {finish_title}
+{finish_body}"""
 
+    constraint_tail = (
+        "- The ticket's success criteria are the source of truth — review fixes must not break them"
+        if (workflow or {}).get("workflow") in ("light", "heavy")
+        else "- GSD verification is the source of truth — review fixes must not break it")
+
+    prompt += f"""
 ### Human Escalation
 If you encounter ANY of these situations, DO NOT guess — request a checkpoint:
 - A review suggestion conflicts with the plan's acceptance criteria
@@ -2033,11 +2050,244 @@ resume and proceed accordingly — if rejected, do NOT take the action.
 - Follow existing code patterns and conventions
 - Commit messages: conventional commits format
 - PR title MUST start with the ticket ID in brackets (e.g. `[{_task_ref(task)}] ...`)
-- GSD verification is the source of truth — review fixes must not break it
+{constraint_tail}
 """
     return (prompt + _image_prompt_section(task) + _design_prompt_section(task)
             + _video_prompt_section(task) + _supercut_prompt_section(task)
             + _attachment_prompt_section(task))
+
+
+
+# The repo copy, by absolute path: MC_HOME/swarm holds symlinks to launcher scripts only,
+# and a new helper should not need a deploy step to be reachable.
+ROLE_SH = Path(__file__).resolve().parent / "role.sh"
+
+
+def _ticket_dir(task_id: str) -> Path:
+    """Where a ticket's plan and proof live: outside the repository, per the evidence policy."""
+    return MC_HOME / "tickets" / task_id
+
+
+def _discipline_section(task: dict, workflow: dict) -> str:
+    """Rules both tiers share — the cheap part of oh-my-openagent's rigour.
+
+    Rigour here is per criterion, not per process stage: state what done means,
+    show it failing, show it passing on the real surface, stop. GSD's verify / gap
+    re-plan / coverage loops had no stopping point; these do.
+    """
+    tier = workflow.get("workflow", "light")
+    budget = workflow_router.BUDGET_MINUTES.get(tier, 45)
+    now = datetime.now(timezone.utc)
+    deadline = datetime.fromtimestamp(now.timestamp() + budget * 60, tz=timezone.utc)
+    tdir = _ticket_dir(task["id"])
+    role = ROLE_SH
+    return f"""
+### How to work (both tiers)
+- **Say the intent first**, one line: "Intent: <fix|feature|refactor> — <what> — <files I expect to touch>".
+- **Define done before coding**: 1–{2 if tier == "light" else 5} success criteria. Each has an exact scenario
+  (a command, a request, or a page + viewport), what counts as proof, and a stop line:
+  "I stop when <observable result>". A criterion that cannot fail is not a criterion.
+- **Smallest correct change wins.** Bug fix is not a refactor. Do not touch code the ticket did not ask about.
+  Work past the stop line is scope creep, not diligence.
+- **Stop exploring the moment you can name the files you will change.** Small local work you can finish
+  in a handful of tool calls is yours — do not delegate it.
+- **Prove each criterion**: where a test can express it, show it failing first, then passing. Then one proof
+  on the real surface (the page, the endpoint, the CLI). Tests alone never prove done.
+- **Run checks proportionally**: only the tests/lint/typecheck for what you touched, re-run a check only
+  when its inputs changed, and ONE full run of the app's suite right before the PR. A failure that exists
+  on the base branch is noted in the PR, not fixed.
+- **Keep proof out of git**: screenshots, logs and notes go in `{tdir}/evidence/`.
+- **Two identical failures = stop and change approach.** After a second failed fix, ask the oracle (below);
+  after a third, raise a checkpoint instead of trying again.
+
+### Helpers (each is a separate read-only run that returns a short answer)
+Put the request on stdin. Use them to keep your own context small, not to double-check yourself —
+never ask a helper to verify work you can verify directly.
+- `echo "<question>" | {role} explore --cd "$(pwd)"` — only when the answer spans 2+ modules you have not read.
+- `echo "<criteria>" | {role} looker --cd "$(pwd)" --image <png> [--image <png>]` — **every** visual check.
+  Do not open screenshots or design exports yourself. For Paper designs, read the specific values you need
+  (e.g. computed styles of one node) — never dump a whole design tree; export an image and ask the looker.
+- `echo "<ticket criteria + what you changed>" | {role} critic --cd "$(pwd)"` — the gate review (see steps).
+- `echo "<problem + both failed attempts>" | {role} oracle --cd "$(pwd)"` — after two failed fixes only.
+If a helper returns `ROLE ERROR`, continue without it and say so in the PR.
+
+### Time budget
+Started {now:%H:%M} UTC; budget {budget} minutes (until {deadline:%H:%M} UTC). Check `date -u` between steps.
+At the budget, stop: push what you have, open it as a **draft** PR, and list what is done, what is not,
+and why. A draft with an honest status beats another hour of loops.
+"""
+
+
+def _light_workflow_section(task: dict, workflow: dict, finish_title: str, finish_body: str) -> str:
+    """The default path: one agent, no planning stage, one gate review.
+
+    Chosen when Jev reads the ticket as a bounded frontend change (`workflow_router`).
+    The bounds travel with the prompt: a light run that finds backend work or a
+    sprawling diff switches to the heavy workflow in the same session and records why.
+    """
+    why = "; ".join(workflow.get("why") or []) or "judged a small frontend change"
+    task_id = task["id"]
+    role = ROLE_SH
+    return f"""
+## Light Workflow (small frontend change)
+
+Mission Control routed this ticket to the light workflow — {why}.
+There is no planning stage and no GSD on this path: do NOT run `/gsd-*` commands, do NOT create
+`.planning/`, and do NOT launch other agent CLIs (`claude -p`, `codex exec`) except through the helpers below.
+{_discipline_section(task, workflow)}
+### Steps
+1. **Read** the ticket, the files it names, and the instructions for the app you are changing
+   (its AGENTS.md / CLAUDE.md). Where the app's visual or review gate has a light variant, use it.
+2. **Intent + criteria** (1–2), as above.
+3. **Build** the smallest change, with focused commits.
+4. **Prove** each criterion; visual checks go through the looker at the viewports the ticket names.
+5. **Gate review**, once: send the critic the ticket's criteria, your proof summary and the diff
+   (`git diff origin/master...HEAD`, or your base). Fix only BLOCKERS it cites; NOTES go in the PR.
+   Re-run the critic at most twice, and only on what changed.
+6. **{finish_title}**
+{finish_body}
+### Stay inside the light bounds
+Stop building on this path if the change turns out to need any of: {workflow_router.LIGHT_BLOCKED_PATHS_HUMAN},
+or more than {workflow_router.LIGHT_MAX_FILES} changed files. Then:
+1. Record why, so the ticket page shows the escalation:
+   curl -X PATCH {MC_BASE_URL}/api/tasks/{task_id}/triage-state \\
+     -H "Content-Type: application/json" \\
+     -d '{{"workflow_escalation": {{"from": "light", "to": "heavy", "reason": "WHAT_YOU_FOUND"}}}}'
+2. Continue in this same session on the heavy steps: write the plan and have the critic review it
+   (`{role} critic`) before building further. Your budget becomes {workflow_router.BUDGET_MINUTES["heavy"]} minutes from the start.
+"""
+
+
+def _heavy_workflow_section(task: dict, workflow: dict, finish_title: str, finish_body: str) -> str:
+    """Bigger or riskier tickets: the same agent plans for itself, then builds.
+
+    Replaces GSD's separate planning stage, plan-checker, executor subagents,
+    verify / gap re-plan loop and coverage auditor with one self-written plan, one
+    bounded critic pass on it, and one bounded review at the end.
+    """
+    why = "; ".join(workflow.get("why") or []) or "not judged a small frontend change"
+    tdir = _ticket_dir(task["id"])
+    return f"""
+## Heavy Workflow
+
+Mission Control routed this ticket to the heavy workflow — {why}.
+One agent — you — plans and builds. There is no separate planning stage and no GSD: do NOT run
+`/gsd-*` commands, do NOT create `.planning/`, and do NOT launch other agent CLIs (`claude -p`,
+`codex exec`) except through the helpers below.
+{_discipline_section(task, workflow)}
+### Steps
+1. **Read** the ticket, the code it touches, and the app's AGENTS.md / CLAUDE.md. Where the app's
+   visual or review gate has a full (heavy) variant, use it.
+2. **Plan** in `{tdir}/plan.md` (outside the repo, never committed), in this shape and no longer than it needs:
+   - `## Intent` — one line.
+   - `## Must have` / `## Must NOT have` — scope, including what you will deliberately not do.
+   - `## Criteria` — each: scenario, proof, stop line (as above).
+   - `## Steps` — `- [ ] N. <change>` rows, each with the files (`path:line`) it touches and the check that
+     proves it. Implementation and its test are ONE step, never two.
+   - `## Risks` — schema, auth, money, migrations, cross-app contracts this touches, and how you will check each.
+3. **Plan review**, once: `cat {tdir}/plan.md | {ROLE_SH} critic --cd "$(pwd)"`.
+   Fix only its BLOCKERS; approval with notes is approval. Re-run at most twice.
+4. **Build** step by step with focused commits, ticking the plan's boxes as you go.
+5. **Prove** every criterion (failing first where a test can express it, then the real surface).
+6. **Final review**, once: send the critic the plan, your proof summary and the diff. Fix only BLOCKERS it
+   cites; at most two re-reviews of what changed, then list anything unresolved in the PR.
+7. **{finish_title}** — put the plan's Intent, Criteria and proof summary in the PR description.
+{finish_body}"""
+
+
+def _triage_state_of(task: dict) -> dict:
+    raw = task.get("triage_state")
+    if isinstance(raw, dict):
+        return raw
+    if isinstance(raw, str) and raw.strip():
+        try:
+            parsed = json.loads(raw)
+            return parsed if isinstance(parsed, dict) else {}
+        except Exception:
+            return {}
+    return {}
+
+
+def _workflow_routing_enabled() -> bool:
+    """Read fresh each call, like the TypeSafe key: flipping the switch in
+    swarm-config.json must not need a bridge restart."""
+    try:
+        return workflow_router.routing_enabled(json.loads(SWARM_CONFIG_PATH.read_text()))
+    except Exception:
+        return False
+
+
+def _choose_workflow(task: dict) -> dict:
+    """Light, heavy or GSD for this ticket — decided once, recorded on the ticket, reused.
+
+    With routing off (the default) the answer is GSD, as before, unless the ticket
+    carries an explicit override; that answer is neither recorded nor cached, so
+    turning routing on later still reaches tickets that have not started.
+
+    The poll loop reaches dispatch every minute while planning runs, so a routed
+    decision is cached in triage state and only recomputed when the ticket's
+    override changes. Anything that has already started down the GSD path stays on it.
+    """
+    task_id = task["id"]
+    state = _triage_state_of(task)
+    override = str(state.get("workflow_override") or "")
+    if override not in workflow_router.OVERRIDES:
+        override = ""
+    enabled = _workflow_routing_enabled()
+    if not enabled and not override:
+        return workflow_router.choose_workflow(None, enabled=False)
+    recorded = state.get("workflow")
+    if (isinstance(recorded, dict) and recorded.get("workflow") in workflow_router.WORKFLOWS
+            and recorded.get("source") != "off"
+            and recorded.get("override", "") == override):
+        return recorded
+
+    jev, jev_error = None, ""
+    if state.get("workflow_escalation") and override != "light":
+        decision = {"workflow": "heavy", "source": "escalation",
+                    "why": ["a light run escalated: "
+                            + str((state.get("workflow_escalation") or {}).get("reason") or "no reason given")]}
+    elif _read_planning_job(_planning_job_path(task_id)) is not None and override != "light":
+        # A GSD planning job from before this change: let it finish the way it started.
+        decision = {"workflow": "gsd", "source": "rules", "why": ["GSD planning had already started"]}
+    else:
+        key = _typesafe_api_key()
+        if key and override == "":
+            try:
+                # Routing waits longer than shadow does: here the answer decides the run.
+                jev = workflow_router.summarise(workflow_router.ask_jev(task, key, timeout=20.0, retries=3))
+            except Exception as e:
+                jev_error = type(e).__name__ + (f" {e.code}" if hasattr(e, "code") else "")
+                logging.warning(f"  Jev workflow call failed for {task_id[:8]}: {e}")
+        decision = workflow_router.choose_workflow(
+            jev, enabled=enabled, override=override, level=str(state.get("assessed_level") or ""),
+            jev_error=jev_error if key else "")
+
+    record = {**decision, "jev": jev, "override": override,
+              "decided_at": datetime.now(timezone.utc).isoformat()}
+    try:
+        mc_request("PATCH", f"/api/tasks/{task_id}/triage-state", {"workflow": record})
+        mc_log_activity(task_id, "updated",
+                        f"Workflow: **{record['workflow']}** — " + "; ".join(record["why"]))
+    except Exception as e:
+        logging.warning(f"  Could not record workflow for {task_id[:8]}: {e}")
+    # The caller's task dict is reused for the rest of this tick; without this the
+    # dispatch below would see no record and ask Jev (and log) a second time.
+    task["triage_state"] = {**state, "workflow": record}
+    logging.info(f"  {task_id[:8]} workflow {record['workflow']} ({record['source']}): {'; '.join(record['why'])}")
+    return record
+
+
+def _with_triage_context(task: dict) -> dict:
+    """The task as the agent prompt will describe it: description plus triage context.
+
+    Jev's thresholds were fitted on that text, so it reads the same thing here.
+    Returns a copy; the caller carries `triage_state` back after choosing.
+    """
+    ctx = _build_triage_context(task["id"])
+    if not ctx:
+        return dict(task)
+    return {**task, "description": (task.get("description") or "") + "\n\n---\n\n" + ctx}
 
 
 def generate_investigation_prompt(task: dict, repo_context: str, project: str, repo: str,
@@ -3245,12 +3495,15 @@ def spawn_agent(task_id: str, task_label: str, repo_path: Path, prompt_content: 
                 agent_type: str = "", mc_task_id: str = "", base_branch: str = "",
                 task_title: str = "", draft_pr: bool = True, no_pr: bool = False,
                 planning_dir: str = "", existing_pr_url: str = "",
-                existing_pr_meta: Optional[dict] = None):
+                existing_pr_meta: Optional[dict] = None, effort: str = ""):
     """Spawn an agent. Returns True, AT_CAPACITY (no free slot), or False (failed).
 
     An empty agent_type lets spawn-agent.sh pick agents.defaultProfile from
     swarm-config.json and fall back to that profile's fallbackProfile when its
     slots are full. A hardcoded runtime here silently overrode the config.
+
+    `effort` overrides the profile's reasoning effort for Codex runs (spawn-agent.sh
+    applies it only to the codex launcher); "" keeps the profile's own.
     """
     # task_label becomes a git branch, worktree dir, tmux session, and prompt filename —
     # a "/" or space in it crashes the spawn (e.g. a prompt path with a phantom subdir).
@@ -3330,6 +3583,7 @@ def spawn_agent(task_id: str, task_label: str, repo_path: Path, prompt_content: 
     env["WORKTREE_BASE_REF"] = worktree_base
     env["PR_BASE_BRANCH"] = pr_base
     env["MC_NO_PR_MODE"] = "1" if no_pr else "0"
+    env["MC_AGENT_EFFORT"] = effort or ""
     env["MC_EXISTING_PR_URL"] = existing_pr_url
     # The plan the staged run already wrote. Without it the agent gets a bare
     # worktree and plans the same phase over again — the stage would be a duplicate
@@ -4360,10 +4614,18 @@ def _spawn_for_repos(task: dict, repos: List[dict]):
     # raised here stops the task while it is still cheap, instead of dying inside a
     # two-hundred-turn session that has already started writing code.
     planning_dir = ""
+    workflow = None
     if task_type == "implementation":
-        proceed, planning_dir = stage_planning(task, repos)
-        if not proceed:
-            return
+        # Light tickets skip the planning stage entirely — that stage is most of the
+        # wall-clock on a small change. See `workflow_router` for how it is decided.
+        workflow = _choose_workflow(task)
+        # Only GSD has a separate planning stage. Light and heavy plan inside the one
+        # agent session (heavy writes its own short plan) — the stage and its critic
+        # loop were minutes to hours of wall-clock before any code was written.
+        if workflow.get("workflow") == "gsd":
+            proceed, planning_dir = stage_planning(task, repos)
+            if not proceed:
+                return
 
     mc_update_task(task_id, {"status": "assigned"})
     mc_log_activity(task_id, "status_changed",
@@ -4414,10 +4676,17 @@ def _spawn_for_repos(task: dict, repos: List[dict]):
     knowledge = recall_knowledge([r], knowledge_query)
     prompt = generate_prompt(task, repo_context, project, repo, knowledge=knowledge,
                              plan_ready=bool(planning_dir),
-                             decisions=resolved_decisions(task_id))
+                             decisions=resolved_decisions(task_id),
+                             workflow=workflow)
     task_label = f"{_task_ref(task)}-{repo}"
 
+    tier = (workflow or {}).get("workflow", "")
     outcome = spawn_agent(task_id, task_label, repo_path, prompt, mc_task_id=task_id, task_title=title,
+                          # GSD's commands are Claude Code skills. A Codex agent handed them
+                          # launches `claude -p` to run them and then polls it — MET-790 spent
+                          # 56 minutes of high-effort Codex turns waiting on one such process.
+                          **({"agent_type": "claude"} if tier == "gsd" else {}),
+                          effort=workflow_router.EFFORT.get(tier, ""),
                           base_branch=_resolve_base_branch(task, repo_path), draft_pr=_pr_is_draft(task),
                           no_pr=_pr_is_disabled(task), planning_dir=planning_dir,
                           existing_pr_url=existing_pr_url, existing_pr_meta=existing_pr_meta)
@@ -7100,6 +7369,19 @@ def process_planning_tasks():
             # A ticket with no questions therefore needs its state created here, or
             # there is nowhere for `confirmed` to be written and the gate can never be
             # satisfied.
+            # Light or full, decided before the gate so the person confirming sees which
+            # path the ticket will take — and can flip it — rather than finding out after.
+            if task.get("task_type", "implementation") == "implementation":
+                try:
+                    augmented = _with_triage_context(task)
+                    chosen = _choose_workflow(augmented)
+                    # The gate below writes triage state by full replacement; carry the
+                    # record in `state` too, or that write would erase it.
+                    state = {**(state or {}), "workflow": chosen}
+                    task = {**task, "triage_state": state}
+                except Exception as e:
+                    logging.warning(f"  Workflow choice failed for {task_id[:8]}: {e}")
+
             if not (state or {}).get("confirmed"):
                 # How much process this ticket needs, from what is already known — no
                 # extra model call, and the reasons travel with the verdict so the

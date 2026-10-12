@@ -97,6 +97,18 @@ stop_heartbeat() {
 
 trap 'stop_heartbeat; stop_stall_watchdog; rm -f "$AGENT_PID_FILE" "${AGENT_PID_FILE}.stalled"' EXIT INT TERM
 
+# Run in Mission Control's own Codex home: the operator's ~/.codex loads oh-my-codex
+# and oh-my-openagent, a second and third orchestrator on every turn (see
+# codex_home.py). Off by default (MC_CODEX_ISOLATE=1 opts in); a failure falls back to ~/.codex.
+if [ "${MC_CODEX_ISOLATE:-0}" = "1" ]; then
+  if ISO_HOME=$(python3 "$SCRIPT_DIR/codex_home.py" ensure 2>>"$LOG") && [ -n "$ISO_HOME" ]; then
+    export CODEX_HOME="$ISO_HOME"
+    echo "  Codex home: $CODEX_HOME (isolated)" | tee -a "$LOG"
+  else
+    echo "  warning: could not build the isolated Codex home — using ~/.codex" | tee -a "$LOG"
+  fi
+fi
+
 attempt=0
 exit_code=1
 hung_attempts=0

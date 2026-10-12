@@ -29,7 +29,7 @@ jobs:
           python-version: "3.12"
       - name: Python imports on a bare interpreter
         run: |
-          for m in bridge planner gsd_backend plan_stage process_level workflow_router gsd_plan_import gsd_brief; do
+          for m in bridge planner gsd_backend plan_stage process_level workflow_router codex_home roles gsd_plan_import gsd_brief; do
             python3 -c "import sys; sys.path.insert(0, 'swarm'); import $m" || exit 1
           done
       - run: npm ci
