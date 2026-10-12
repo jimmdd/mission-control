@@ -81,6 +81,8 @@ REVIEW_PROMPT="You are a senior code reviewer. Review this diff for:
 5. Style/pattern violations relative to the existing codebase
 6. Performance concerns
 7. Inspect the complete diff with git and relevant files/tests in this worktree; the excerpt below may be truncated. Confirm real-surface QA evidence for behavior changes, not just green unit tests.
+8. Review evidence is deliberately outside Git. Inspect .codex-evidence/ directly (including ticket README files, stamped check outputs, browser probes, screenshots and recordings); ignored files are absent from git ls-files and ordinary repository searches. Verify evidence against this head and the changed component content, and state any actual remaining gap.
+9. This reviewer runs in a read-only sandbox. Distinguish inability to create test temporary files from a code defect; inspect the recorded check output and report the execution limitation accurately. Do not invoke the pre-review gate recursively from this review.
 
 Changed files ($FILE_COUNT):
 $CHANGED_FILES
