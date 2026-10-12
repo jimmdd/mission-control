@@ -97,7 +97,13 @@ CRITICAL: You are running in FULLY AUTONOMOUS mode. There is NO human to respond
 - COMPLETE ALL STEPS before stopping.'
 
 run_claude() {
-  local cmd=(claude -p --model "$MODEL" --dangerously-skip-permissions --max-turns "$EFFECTIVE_TURNS")
+  # stream-json, not the default text output: text prints nothing until the run ends,
+  # so the stall watchdog read every Claude run longer than its startup window as a
+  # hang and killed it (MET-833/837/870 all failed over to codex this way).
+  # claude_stream_log.py renders the stream back into the readable log the checks
+  # below expect.
+  local cmd=(claude -p --model "$MODEL" --dangerously-skip-permissions --max-turns "$EFFECTIVE_TURNS"
+             --output-format stream-json --verbose)
 
   [ -n "$BUDGET" ] && cmd+=(--max-budget-usd "$BUDGET")
   [ -n "$FALLBACK" ] && cmd+=(--fallback-model "$FALLBACK")
@@ -107,12 +113,13 @@ run_claude() {
     cmd+=(--agents "$AGENTS_DEF")
   fi
 
-  # Index 1, not 0: this is a three-stage pipeline and stage 0 is the prompt feeder,
-  # which succeeds whatever claude does. Reading [0] reported every crashed, killed
-  # or non-zero claude run as exit 0, so the attempt was marked
-  # `completed_by_agent` and the ticket moved to review on an empty worktree.
+  # Index 1, not 0: stage 0 is the prompt feeder, which succeeds whatever claude
+  # does. Reading [0] reported every crashed, killed or non-zero claude run as exit 0,
+  # so the attempt was marked `completed_by_agent` and the ticket moved to review on
+  # an empty worktree.
   { cat "$PROMPT_FILE"; echo "$AUTONOMY_SUFFIX"; } \
     | run_with_pidfile "$AGENT_PID_FILE" "${cmd[@]}" 2>&1 \
+    | python3 -u "$SCRIPT_DIR/claude_stream_log.py" \
     | tee -a "$LOG"
   return ${PIPESTATUS[1]}
 }
@@ -194,7 +201,10 @@ while [ "$attempt" -lt "$MAX_RETRIES" ]; do
   # retry ladder (the repo keeps the commits already made, so a retry resumes rather
   # than restarts) and, if the ladder runs out, leaves the agent marked `failed`
   # instead of complete — which is the state a human can act on.
-  attempt_output=$(tail -c "+$((log_mark + 1))" "$LOG" 2>/dev/null || true)
+  # Progress lines ([agent]/[tool], see claude_stream_log.py) are what the agent said
+  # and did, not how the run ended — an agent discussing rate limits must not be
+  # classified as having hit one. Classify on the result and raw CLI output only.
+  attempt_output=$(tail -c "+$((log_mark + 1))" "$LOG" 2>/dev/null | grep -vE '^\[(agent|tool)\] ' || true)
 
   # The same exit-0 trap, for the account rather than the run. MET-642 printed
   # "You've hit your session limit · resets 3pm" and exited 0 after seven seconds,
@@ -286,7 +296,7 @@ while [ "$attempt" -lt "$MAX_RETRIES" ]; do
       if [ "$TASK_TYPE" = "investigation" ]; then
         HAS_FINDINGS=$(mc_curl GET "/api/tasks/$MC_TASK_ID/activities" -s 2>/dev/null | jq '[.[] | select(.activity_type == "investigation_findings")] | length' 2>/dev/null)
         if [ "${HAS_FINDINGS:-0}" = "0" ]; then
-          FINDINGS=$(sed -n '/^=== Claude Agent starting/,/^=== Claude Agent completed/{/^===/d;p}' "$LOG" | tail -200)
+          FINDINGS=$(sed -n '/^=== Claude Agent starting/,/^=== Claude Agent completed/{/^===/d;p}' "$LOG" | grep -vE '^\[(agent|tool)\] ' | tail -200)
           if [ -n "$FINDINGS" ]; then
             ESCAPED=$(echo "$FINDINGS" | python3 -c 'import sys,json; print(json.dumps(sys.stdin.read()))')
             mc_curl POST "/api/tasks/$MC_TASK_ID/activities" -s \

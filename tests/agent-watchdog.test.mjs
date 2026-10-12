@@ -148,3 +148,92 @@ test("a claude run that exits non-zero is not reported as a completion", () => {
   assert.doesNotMatch(log, /completed successfully/);
   assert.equal(h.registry().status, "failed");
 });
+
+// `claude -p` in text mode printed nothing until the run ended, so the watchdog read
+// every Claude run longer than its startup window as a hang: MET-833, MET-837 and
+// MET-870 each lost three attempts and failed over to codex. The launcher now asks
+// for stream-json and renders it, so a working Claude keeps the log growing.
+const ev = (o) => `echo '${JSON.stringify(o).replaceAll("'", "'\\''")}'`;
+const streamingClaude = (...events) =>
+  `cat >/dev/null; for a in "$@"; do :; done\n` +
+  `case " $* " in *" --output-format stream-json "*) ;; *) echo "not streaming: $*"; exit 9;; esac\n` +
+  events.join("\n");
+
+test("a claude run that streams progress past the startup window is left alone", () => {
+  const h = harness("WD-claude-slow");
+  stub(h.binDir, "claude", streamingClaude(
+    ev({ type: "system", subtype: "init" }),
+    ev({ type: "assistant", message: { content: [{ type: "text", text: "Reading the repo" }] } }),
+    "sleep 1",
+    ev({ type: "assistant", message: { content: [{ type: "tool_use", name: "Bash", input: { command: "git status" } }] } }),
+    "sleep 1",
+    ev({ type: "assistant", message: { content: [{ type: "text", text: "Still working" }] } }),
+    "sleep 1",
+    ev({ type: "assistant", message: { content: [{ type: "text", text: "Almost there" }] } }),
+    "sleep 1",
+    ev({ type: "result", subtype: "success", is_error: false, result: "Opened PR #1" }),
+  ));
+
+  // 4s of work against a 2s startup window and 3s stall window: text mode would
+  // have been silent the whole time and killed at 2s.
+  h.run("run-claude.sh", { AGENT_PROFILE: "claude", AGENT_STALL_TIMEOUT_SECONDS: "3" });
+  const log = h.log();
+
+  assert.doesNotMatch(log, /WATCHDOG/);
+  assert.doesNotMatch(log, /Failing over/);
+  assert.match(log, /^\[agent\] Reading the repo$/m);
+  assert.match(log, /^\[tool\] Bash: git status$/m);
+  assert.match(log, /^Opened PR #1$/m);
+  assert.match(log, /Claude Agent completed successfully/);
+  assert.equal(h.registry().status, "completed_by_agent");
+});
+
+test("a streamed max-turns stop is still not a completion", () => {
+  const h = harness("WD-claude-turns");
+  stub(h.binDir, "claude", streamingClaude(
+    ev({ type: "assistant", message: { content: [{ type: "text", text: "Working" }] } }),
+    ev({ type: "result", subtype: "error_max_turns", is_error: true, num_turns: 200 }),
+  ));
+
+  assert.throws(() => h.run("run-claude.sh", { AGENT_PROFILE: "claude" }));
+  const log = h.log();
+
+  assert.match(log, /^Error: Reached max turns \(200\)$/m);
+  assert.match(log, /Stopped on the turn limit/);
+  assert.doesNotMatch(log, /completed successfully/);
+  assert.equal(h.registry().lastError, "exit_code_75");
+});
+
+test("an agent that only talks about limits is not classified as limited", () => {
+  const h = harness("WD-claude-chatter");
+  stub(h.binDir, "claude", streamingClaude(
+    ev({ type: "assistant", message: { content: [{ type: "text", text: "The API returns 'rate limit reached' and 'Reached max turns' in tests" }] } }),
+    ev({ type: "assistant", message: { content: [{ type: "tool_use", name: "Bash", input: { command: "grep -rn 'usage limit reached' src" } }] } }),
+    ev({ type: "result", subtype: "success", is_error: false, result: "Done" }),
+  ));
+
+  h.run("run-claude.sh", { AGENT_PROFILE: "claude" });
+  const log = h.log();
+
+  assert.doesNotMatch(log, /Stopped by the account limit/);
+  assert.doesNotMatch(log, /Stopped on the turn limit/);
+  assert.match(log, /Claude Agent completed successfully/);
+  assert.equal(h.registry().status, "completed_by_agent");
+});
+
+test("a streamed account limit is still detected", () => {
+  const h = harness("WD-claude-limit");
+  stub(h.binDir, "claude", streamingClaude(
+    ev({ type: "assistant", error: "rate_limit", message: { model: "<synthetic>", content: [{ type: "text", text: "You've hit your session limit · resets 3pm" }] } }),
+    ev({ type: "result", subtype: "success", is_error: true, result: "You've hit your session limit · resets 3pm" }),
+  ));
+
+  assert.throws(() => h.run("run-claude.sh", { AGENT_PROFILE: "claude" }), (err) => {
+    assert.equal(err.status, 75);
+    return true;
+  });
+  const log = h.log();
+
+  assert.match(log, /Stopped by the account limit, not by finishing: You've hit your session limit/);
+  assert.equal(h.registry().status, "rate_limited");
+});
