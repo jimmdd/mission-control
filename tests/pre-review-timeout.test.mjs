@@ -49,7 +49,7 @@ else if (args[1] === 'status') {
     chmodSync(greptile, 0o755);
     const stub = join(dir, "codex");
     writeFileSync(stub, `#!/bin/bash
-touch ${JSON.stringify(join(dir, "codex-called"))}
+echo call >> ${JSON.stringify(join(dir, "codex-called"))}
 while [ "$#" -gt 0 ]; do
   if [ "$1" = "--output-last-message" ]; then result="$2"; shift; fi
   shift
@@ -70,6 +70,7 @@ cat "$result"
     const receipt = join(dir, "swarm", "pr-review-state", `${head}.json`);
     return { status: r.status, out: `${r.stdout}${r.stderr}`,
       codexCalled: existsSync(join(dir, "codex-called")),
+      attempts: existsSync(join(dir, "codex-called")) ? readFileSync(join(dir, "codex-called"), "utf8").trim().split("\n").length : 0,
       receipt: existsSync(receipt) ? JSON.parse(readFileSync(receipt, "utf8")) : null };
   } finally {
     rmSync(dir, { recursive: true, force: true });
@@ -82,7 +83,7 @@ test("a reviewer that hangs silently is cut off and reported, not waited on", ()
   const elapsed = (Date.now() - started) / 1000;
 
   assert.equal(status, 2, "an unrunnable review must exit 2, not block or pass");
-  assert.match(out, /produced no output within 3s/);
+  assert.match(out, /within 3s total budget/);
   // The operator needs to know it is the runner, not the diff, that is broken.
   assert.match(out, /codex --version/);
   assert.ok(elapsed < 60, `should give up near the bound, took ${elapsed}s`);
@@ -115,6 +116,7 @@ test("a reviewer that crashes keeps reporting its own error, not the timeout mes
  test("an echoed LGTM or mixed failure cannot authorize delivery", () => {
   assert.equal(runWithStubCodex('cat >/dev/null; echo "LGTM"').status, 1);
   assert.equal(runWithStubCodex('cat >/dev/null; printf "VERDICT: FAIL\\nVERDICT: PASS\\n"').status, 1);
+  assert.equal(runWithStubCodex('cat >/dev/null; printf "VERDICT: WARN\\nVERDICT: PASS\\n"').status, 1);
 });
 
 test("lockfile-only changes receive independent review instead of an empty success", () => {
@@ -155,4 +157,39 @@ test("a delivery receipt includes completed Greptile evidence for the same commi
   assert.equal(result.receipt.greptile.base, result.receipt.base);
   assert.equal(result.receipt.greptile.status, "COMPLETED");
   assert.deepEqual(result.receipt.greptile.review.comments, []);
+});
+
+
+test("MET-939: an exit-zero host failure gets one fresh review, not a human stop", () => {
+  const result = runWithStubCodex('cat >/dev/null; count=$(wc -l < "$0-called"); if [ "$count" -eq 1 ]; then echo "timed out negotiating with the code-mode host"; else echo "VERDICT: PASS"; fi');
+  assert.equal(result.status, 0);
+  assert.equal(result.attempts, 2);
+  assert.match(result.out, /retrying once/);
+  assert.equal(result.receipt.verdict, "PASS");
+});
+
+test("persistent infrastructure failure cannot pass even if it appends PASS", () => {
+  const result = runWithStubCodex('cat >/dev/null; echo "timed out negotiating with the code-mode host"; echo "VERDICT: PASS"');
+  assert.equal(result.status, 2);
+  assert.equal(result.attempts, 2);
+  assert.equal(result.receipt, null);
+  assert.match(result.out, /No review receipt was issued/);
+});
+
+test("substantive FAIL and WARN are never retried into a more agreeable verdict", () => {
+  for (const verdict of ["FAIL", "WARN"]) {
+    const result = runWithStubCodex(`cat >/dev/null; echo "Fix a real code defect"; echo "VERDICT: ${verdict}"`);
+    assert.equal(result.status, 1);
+    assert.equal(result.attempts, 1);
+    assert.equal(result.receipt, null);
+  }
+});
+
+test("a timed-out partial PASS never becomes a receipt", () => {
+  const start = Date.now();
+  const result = runWithStubCodex('cat >/dev/null; echo "VERDICT: PASS"; sleep 300', { timeoutSeconds: 2 });
+  assert.equal(result.status, 2);
+  assert.equal(result.attempts, 2);
+  assert.equal(result.receipt, null);
+  assert.ok(Date.now() - start < 8000);
 });

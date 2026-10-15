@@ -114,58 +114,16 @@ End with one of:
 - VERDICT: FAIL (has critical or major issues that must be fixed)
 - VERDICT: WARN (unresolved issues; fix or document disposition and rerun review)"
 
-# Run Codex review — `codex exec` is the non-interactive mode (the old `-q`/`--effort`
-# flags were removed); prompt is read from stdin, read-only sandbox (review only).
-MODEL_FLAG=""
-[ -n "$CODEX_MODEL" ] && MODEL_FLAG="--model $CODEX_MODEL"
-# Bounded, because an unbounded review gate does not fail — it waits forever. A brew
-# upgrade re-quarantined the codex binary mid-run and wedged it before its first
-# instruction: the process stayed alive, burned no CPU and printed nothing. This call
-# had no time limit, so MET-680 spent ~37 minutes across three attempts waiting on a
-# process that was never going to speak, then escalated to a human for a gate that was
-# never actually run. A review that cannot start must report that quickly (exit 2),
-# so the caller can decide, rather than consuming the agent's review iterations.
-REVIEW_TIMEOUT_SECONDS="${PRE_REVIEW_TIMEOUT_SECONDS:-900}"
-REVIEW_TMP=$(mktemp "${TMPDIR:-/tmp}/mc-pre-review.XXXXXX")
+# Retry transient runner failures once, within one shared timeout budget. The
+# helper owns only its spawned process group and never changes security settings.
 REVIEW_RESULT=$(mktemp "${TMPDIR:-/tmp}/mc-pre-review-result.XXXXXX")
-trap 'rm -f "$REVIEW_TMP" "$REVIEW_RESULT"' EXIT
-
-printf '%s' "$REVIEW_PROMPT" \
-  | codex exec --skip-git-repo-check --sandbox read-only --output-last-message "$REVIEW_RESULT" $MODEL_FLAG > "$REVIEW_TMP" 2>&1 &
-REVIEW_PID=$!
-
-(
-  # Kill the tree, not just the pid: codex forks codex-code-mode-host, and a
-  # surviving child holds the output open.
-  sleep "$REVIEW_TIMEOUT_SECONDS"
-  if kill -0 "$REVIEW_PID" 2>/dev/null; then
-    for child in $(pgrep -P "$REVIEW_PID" 2>/dev/null); do kill -KILL "$child" 2>/dev/null; done
-    kill -KILL "$REVIEW_PID" 2>/dev/null
-  fi
-) >/dev/null 2>&1 &
-REVIEW_KILLER=$!
-
+trap 'rm -f "$REVIEW_RESULT"' EXIT
 REVIEW_RC=0
-wait "$REVIEW_PID" 2>/dev/null || REVIEW_RC=$?
-for child in $(pgrep -P "$REVIEW_KILLER" 2>/dev/null); do kill "$child" 2>/dev/null || true; done
-kill "$REVIEW_KILLER" 2>/dev/null || true
-wait "$REVIEW_KILLER" 2>/dev/null || true
-
+printf '%s' "$REVIEW_PROMPT" | python3 "$(dirname "$EVIDENCE_GATE")/codex_review.py" \
+  "$REVIEW_RESULT" --timeout "${PRE_REVIEW_TIMEOUT_SECONDS:-900}" \
+  --model "$CODEX_MODEL" || REVIEW_RC=$?
+[ "$REVIEW_RC" -eq 0 ] || exit "$REVIEW_RC"
 REVIEW_OUTPUT=$(cat "$REVIEW_RESULT" 2>/dev/null || true)
-if [ "$REVIEW_RC" -ne 0 ]; then REVIEW_OUTPUT=$(cat "$REVIEW_TMP" 2>/dev/null || true); fi
-
-if [ "$REVIEW_RC" -ne 0 ]; then
-  if [ -z "${REVIEW_OUTPUT//[[:space:]]/}" ]; then
-    echo "Codex review produced no output within ${REVIEW_TIMEOUT_SECONDS}s — the review runner is not working."
-    echo "Check that the agent CLI starts at all: \`codex --version\` should answer immediately."
-    echo "A Homebrew upgrade re-quarantines the binary, which wedges it at process start."
-  else
-    echo "Codex review failed to run"
-    echo "$REVIEW_OUTPUT" | tail -8
-  fi
-  exit 2
-fi
-
 echo "$REVIEW_OUTPUT"
 
 # Parse only explicit verdict lines. LGTM in an echoed prompt or a mixed
