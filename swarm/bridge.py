@@ -6436,7 +6436,7 @@ def _run_triage(title: str, description: str, manifest: str, model: Optional[str
     # Rebuilding only repository context discarded linked design/handoff facts
     # (MET-938), turning known rules into unnecessary human decisions.
     triage["_answer_context"] = "\n\n".join(filter(None, [
-        design_ctx, video_ctx, supercut_ctx, attach_ctx, triage_context,
+        triage_context, design_ctx, video_ctx, supercut_ctx, attach_ctx,
     ]))
     return triage, repos
 

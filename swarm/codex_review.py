@@ -51,6 +51,22 @@ def infrastructure_failure(answer, transcript):
     return False
 
 
+def retain_failure(attempt, returncode, timed_out, answer, transcript):
+    root = Path(os.environ.get("MC_HOME", str(Path.home() / ".mission-control")))
+    root = root / "swarm" / "pr-review-state" / "codex-errors"
+    try:
+        root.mkdir(parents=True, exist_ok=True, mode=0o700)
+        path = root / f"{time.time_ns()}-{os.getpid()}-{attempt}.json"
+        payload = {"attempt": attempt, "returncode": returncode, "timedOut": timed_out,
+                   "answerTail": answer[-8000:], "transcriptTail": transcript[-24000:]}
+        fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+        with os.fdopen(fd, "w") as output:
+            json.dump(payload, output)
+        print(f"Codex runner diagnostic retained locally for attempt {attempt}.")
+    except OSError:
+        print("Codex runner diagnostic could not be retained; inspect this invocation's output.")
+
+
 def run(prompt, result, timeout, model="", executable="codex"):
     result = Path(result)
     result.unlink(missing_ok=True)
@@ -73,7 +89,7 @@ def run(prompt, result, timeout, model="", executable="codex"):
                     process = subprocess.Popen(args, stdin=subprocess.PIPE, stdout=log,
                                                stderr=subprocess.STDOUT, start_new_session=True)
                     try:
-                        process.communicate(input=prompt.encode(), timeout=min(remaining, timeout / 2))
+                        process.communicate(input=prompt.encode(), timeout=remaining)
                     except subprocess.TimeoutExpired:
                         timed_out = True
                         stop_group(process)
@@ -86,6 +102,8 @@ def run(prompt, result, timeout, model="", executable="codex"):
             answer = output.read_text() if output.exists() else ""
             log_text = transcript.read_text()
             infrastructure = infrastructure_failure(answer, log_text)
+            if timed_out or infrastructure or process.returncode != 0:
+                retain_failure(attempt, process.returncode, timed_out, answer, log_text)
             if timed_out:
                 last_reason = f"produced no completed review within {timeout:g}s total budget"
             elif infrastructure:
@@ -104,9 +122,9 @@ def run(prompt, result, timeout, model="", executable="codex"):
                 print(answer)
                 return 0
             verdicts = VERDICT.findall(answer)
-            # A substantive warning/finding must not be replaced by a second verdict.
-            # Explicit host errors remain retryable even if the CLI appends WARN.
-            if "FAIL" in verdicts:
+            # Never infer that a WARN is only about infrastructure: it can also
+            # contain real findings. Only failures with no verdict are retryable.
+            if any(verdict in ("FAIL", "WARN") for verdict in verdicts):
                 print(answer)
                 return 1
             if attempt < 2 and time.monotonic() < deadline:
@@ -118,6 +136,13 @@ def run(prompt, result, timeout, model="", executable="codex"):
 
 
 if __name__ == "__main__":
+    def cancel(signum, _frame):
+        # Raising unwinds communicate's finally block, killing/reaping only the
+        # active owned group. Default signal exit would strand the new session.
+        raise SystemExit(128 + signum)
+
+    signal.signal(signal.SIGTERM, cancel)
+    signal.signal(signal.SIGHUP, cancel)
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("result")
     parser.add_argument("--timeout", type=float, default=900)

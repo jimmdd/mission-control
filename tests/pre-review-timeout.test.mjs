@@ -7,7 +7,7 @@
 
 import assert from "node:assert/strict";
 import { spawnSync, execFileSync } from "node:child_process";
-import { mkdtempSync, mkdirSync, writeFileSync, chmodSync, rmSync, existsSync, readFileSync } from "node:fs";
+import { mkdtempSync, mkdirSync, writeFileSync, chmodSync, rmSync, existsSync, readFileSync, readdirSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { fileURLToPath } from "node:url";
 import { join } from "node:path";
@@ -68,9 +68,11 @@ cat "$result"
       },
     });
     const receipt = join(dir, "swarm", "pr-review-state", `${head}.json`);
+    const diagnostics = join(dir, "swarm", "pr-review-state", "codex-errors");
     return { status: r.status, out: `${r.stdout}${r.stderr}`,
       codexCalled: existsSync(join(dir, "codex-called")),
       attempts: existsSync(join(dir, "codex-called")) ? readFileSync(join(dir, "codex-called"), "utf8").trim().split("\n").length : 0,
+      diagnostics: existsSync(diagnostics) ? readdirSync(diagnostics).map(name => JSON.parse(readFileSync(join(diagnostics, name), "utf8"))) : [],
       receipt: existsSync(receipt) ? JSON.parse(readFileSync(receipt, "utf8")) : null };
   } finally {
     rmSync(dir, { recursive: true, force: true });
@@ -174,6 +176,8 @@ test("persistent infrastructure failure cannot pass even if it appends PASS", ()
   assert.equal(result.attempts, 2);
   assert.equal(result.receipt, null);
   assert.match(result.out, /No review receipt was issued/);
+  assert.equal(result.diagnostics.length, 2);
+  assert.match(result.diagnostics[0].answerTail, /timed out negotiating/);
 });
 
 test("substantive FAIL and WARN are never retried into a more agreeable verdict", () => {
@@ -189,7 +193,22 @@ test("a timed-out partial PASS never becomes a receipt", () => {
   const start = Date.now();
   const result = runWithStubCodex('cat >/dev/null; echo "VERDICT: PASS"; sleep 300', { timeoutSeconds: 2 });
   assert.equal(result.status, 2);
-  assert.equal(result.attempts, 2);
+  assert.equal(result.attempts, 1, "a full-budget timeout leaves no time for another attempt");
   assert.equal(result.receipt, null);
   assert.ok(Date.now() - start < 8000);
+});
+
+test("an infrastructure signature cannot replace a substantive WARN with a later PASS", () => {
+  const result = runWithStubCodex('cat >/dev/null; count=$(wc -l < "$0-called"); if [ "$count" -eq 1 ]; then echo "timed out negotiating with the code-mode host"; echo "Real unresolved finding"; echo "VERDICT: WARN"; else echo "VERDICT: PASS"; fi');
+  assert.equal(result.status, 1);
+  assert.equal(result.attempts, 1);
+  assert.equal(result.receipt, null);
+  assert.match(result.out, /Real unresolved finding/);
+});
+
+test("a healthy reviewer retains the full original timeout window", () => {
+  const result = runWithStubCodex('cat >/dev/null; sleep 2.5; echo "VERDICT: PASS"', { timeoutSeconds: 4 });
+  assert.equal(result.status, 0);
+  assert.equal(result.attempts, 1);
+  assert.equal(result.receipt.verdict, "PASS");
 });

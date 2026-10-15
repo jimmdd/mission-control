@@ -49,3 +49,42 @@ print(json.dumps([codex_review.infrastructure_failure('VERDICT: PASS',quoted),
 `);
   assert.deepEqual(result, [false, true]);
 });
+
+test("cancelling the helper reaps its detached reviewer before the deadline", () => {
+  const result = python(`
+import os,pathlib,signal,subprocess,tempfile,time
+helper=pathlib.Path(${JSON.stringify(SWARM)})/'codex_review.py'
+outcomes=[]
+for cancellation in [signal.SIGTERM,signal.SIGHUP]:
+ with tempfile.TemporaryDirectory(prefix='mc-review-cancel-') as temp:
+  root=pathlib.Path(temp); ready=root/'ready'; survived=root/'survived'
+  stub=root/'codex'
+  stub.write_text('#!/usr/bin/env python3\\nimport os,pathlib,time\\n'
+   +'pathlib.Path('+repr(str(ready))+').write_text(str(os.getpid()))\\n'
+   +'time.sleep(1.2)\\npathlib.Path('+repr(str(survived))+').write_text("orphan")\\n'
+   +'time.sleep(30)\\n')
+  stub.chmod(0o755)
+  process=subprocess.Popen([sys.executable,str(helper),str(root/'answer'),'--timeout','2'],
+   stdin=subprocess.PIPE,stdout=subprocess.DEVNULL,stderr=subprocess.PIPE,
+   env={**os.environ,'PATH':str(root)+os.pathsep+os.environ['PATH']},start_new_session=True)
+  child=None
+  try:
+   process.stdin.write(b'review');process.stdin.close()
+   until=time.monotonic()+2
+   while not ready.exists() and time.monotonic()<until: time.sleep(.01)
+   assert ready.exists(),'fixture did not start'
+   child=int(ready.read_text());os.kill(process.pid,cancellation)
+   code=process.wait(timeout=2);time.sleep(1.3)
+   outcomes.append({'code':code,'survived':survived.exists(),'result':(root/'answer').exists()})
+  finally:
+   if process.poll() is None: process.kill();process.wait()
+   if child:
+    try:os.killpg(child,signal.SIGKILL)
+    except ProcessLookupError:pass
+print(json.dumps(outcomes))
+`);
+  assert.deepEqual(result, [
+    { code: 143, survived: false, result: false },
+    { code: 129, survived: false, result: false },
+  ]);
+});
