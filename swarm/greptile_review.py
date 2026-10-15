@@ -10,6 +10,7 @@ import sys
 import time
 
 from pr_readiness import run
+from review_run import inherited_lock_fds
 
 
 def capture(args, worktree, deadline):
@@ -17,15 +18,20 @@ def capture(args, worktree, deadline):
     if remaining <= 0:
         raise TimeoutError("Greptile review exceeded the review timeout")
     process = subprocess.Popen(args, cwd=worktree, text=True, stdout=subprocess.PIPE,
-                               stderr=subprocess.PIPE, start_new_session=True)
+                               stderr=subprocess.PIPE, start_new_session=True,
+                               pass_fds=inherited_lock_fds())
     try:
         stdout, stderr = process.communicate(timeout=remaining)
     except subprocess.TimeoutExpired as error:
         raise TimeoutError("Greptile review exceeded the review timeout") from error
     finally:
-        if process.poll() is None:
+        # An exited CLI leader can leave descendants holding the pipes and the
+        # inherited review lease. Reclaim our session even after leader exit.
+        try:
             os.killpg(process.pid, signal.SIGKILL)
-            process.communicate()
+        except ProcessLookupError:
+            pass
+        process.communicate()
     if process.returncode:
         raise RuntimeError(f"Greptile command failed (exit {process.returncode}): {stderr[-2000:]} {stdout[-2000:]}")
     return json.loads(stdout)
@@ -76,6 +82,11 @@ def review_branch(worktree, base, head, base_oid, output, timeout):
 
 
 if __name__ == "__main__":
+    def cancel(signum, _frame):
+        # Unwind capture's finally so its owned detached CLI cannot outlive a hold.
+        raise SystemExit(128 + signum)
+    signal.signal(signal.SIGTERM, cancel)
+    signal.signal(signal.SIGHUP, cancel)
     parser = argparse.ArgumentParser()
     for name in ("worktree", "base", "head", "base_oid", "output"):
         parser.add_argument(name)

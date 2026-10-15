@@ -14,6 +14,10 @@ import sys
 from urllib.parse import quote
 
 
+class EvidenceChanged(ValueError):
+    """Recoverable local QA drift, distinct from a code finding."""
+
+
 def evaluate(meta, receipt=None, threads=None):
     head, base = meta.get("headRefOid"), meta.get("baseRefOid")
     def result(status, reason):
@@ -134,7 +138,7 @@ def record(worktree, base, expected_head, expected_base, output, greptile_output
     text = Path(output).read_text()
     # Never accept a stray LGTM, an echoed prompt, or a mixed FAIL/PASS response.
     verdicts = re.findall(r"^VERDICT: (PASS|FAIL|WARN)\b.*$", text, re.MULTILINE)
-    if not verdicts or verdicts[-1] != "PASS" or "FAIL" in verdicts:
+    if not verdicts or verdicts[-1] != "PASS" or "FAIL" in verdicts or "WARN" in verdicts:
         raise ValueError("An explicit independent PASS verdict is required")
     head = run(["git", "rev-parse", "HEAD"], worktree)
     base_oid = run(["git", "rev-parse", base], worktree)
@@ -143,9 +147,14 @@ def record(worktree, base, expected_head, expected_base, output, greptile_output
     greptile = json.loads(Path(greptile_output).read_text())
     if not greptile_pass(greptile, head, base_oid):
         raise ValueError("A completed local Greptile review without findings is required")
+    from review_run import evidence_fingerprint
+    fingerprint = evidence_fingerprint(worktree)
+    if os.environ.get("MC_REVIEW_EVIDENCE_FINGERPRINT", fingerprint) != fingerprint:
+        raise EvidenceChanged("QA evidence changed during review; complete it and rerun against the final evidence")
     root = receipt_dir()
     root.mkdir(parents=True, exist_ok=True)
-    payload = {"head": head, "base": base_oid, "verdict": "PASS", "review": text, "greptile": greptile}
+    payload = {"head": head, "base": base_oid, "verdict": "PASS", "review": text,
+               "evidenceFingerprint": fingerprint, "greptile": greptile}
     temp = root / f".{head}.{os.getpid()}.tmp"
     temp.write_text(json.dumps(payload))
     temp.replace(root / f"{head}.json")
@@ -165,6 +174,11 @@ if __name__ == "__main__":
     else:
         try:
             record(args.worktree, args.base, args.head, args.base_oid, args.output, args.greptile_output)
+        except EvidenceChanged as error:
+            print(str(error), file=sys.stderr)
+            print("REVIEW_REASON: qa_gap")
+            print("VERDICT: WARN")
+            sys.exit(1)
         except (ValueError, OSError, subprocess.SubprocessError) as error:
             print(str(error), file=sys.stderr)
             sys.exit(1)

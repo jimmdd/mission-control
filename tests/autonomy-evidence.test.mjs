@@ -50,6 +50,15 @@ print(json.dumps([codex_review.infrastructure_failure('VERDICT: PASS',quoted),
   assert.deepEqual(result, [false, true]);
 });
 
+test("MET-939: primitive JSON transcript lines do not crash or masquerade as host errors", () => {
+  const result = python(`
+import codex_review
+transcript='\\n'.join(json.dumps(x) for x in ['plain output',None,True,7,[],{'item':'text'}])
+print(json.dumps(codex_review.infrastructure_failure('VERDICT: PASS',transcript)))
+`);
+  assert.equal(result, false);
+});
+
 test("cancelling the helper reaps its detached reviewer before the deadline", () => {
   const result = python(`
 import os,pathlib,signal,subprocess,tempfile,time
@@ -66,7 +75,7 @@ for cancellation in [signal.SIGTERM,signal.SIGHUP]:
   stub.chmod(0o755)
   process=subprocess.Popen([sys.executable,str(helper),str(root/'answer'),'--timeout','2'],
    stdin=subprocess.PIPE,stdout=subprocess.DEVNULL,stderr=subprocess.PIPE,
-   env={**os.environ,'PATH':str(root)+os.pathsep+os.environ['PATH']},start_new_session=True)
+   env={**os.environ,'MC_HOME':str(root),'PATH':str(root)+os.pathsep+os.environ['PATH']},start_new_session=True)
   child=None
   try:
    process.stdin.write(b'review');process.stdin.close()

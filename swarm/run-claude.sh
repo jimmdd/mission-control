@@ -117,7 +117,7 @@ run_claude() {
   # does. Reading [0] reported every crashed, killed or non-zero claude run as exit 0,
   # so the attempt was marked `completed_by_agent` and the ticket moved to review on
   # an empty worktree.
-  { cat "$PROMPT_FILE"; echo "$AUTONOMY_SUFFIX"; } \
+  python3 "$SCRIPT_DIR/execution_prompt.py" "$PROMPT_FILE" "$AUTONOMY_SUFFIX" \
     | run_with_pidfile "$AGENT_PID_FILE" "${cmd[@]}" 2>&1 \
     | python3 -u "$SCRIPT_DIR/claude_stream_log.py" \
     | tee -a "$LOG"

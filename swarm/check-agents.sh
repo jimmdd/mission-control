@@ -197,6 +197,13 @@ reconcile_completed_agents_to_mc() {
     task_type=$(echo "$task_json" | jq -r '.task_type // "implementation"' 2>/dev/null)
     mc_status=$(echo "$task_json" | jq -r '.status // "unknown"' 2>/dev/null)
 
+    local review_only
+    review_only=$(jq -r ".[] | select(.id == \"$task_id\") | (.reviewOnly == true or .agentEnv.MC_REVIEW_ONLY == \"1\")" "$REGISTRY" 2>/dev/null)
+    if [ "$review_only" = "true" ]; then
+      echo "[$TIMESTAMP] LOCAL REVIEW COMPLETE: $task_id — retaining local outcome; publication and delivery gates remain separate" >> "$LOG"
+      continue
+    fi
+
     if [ "$task_type" = "investigation" ] && [[ "$mc_status" =~ ^(in_progress|assigned|planning|inbox)$ ]]; then
       if [ -n "$synced_at" ]; then
         echo "[$TIMESTAMP] RECONCILE: $task_id — stale completionSyncedAt detected while MC is active ($mc_status), forcing resync" >> "$LOG"
@@ -790,6 +797,14 @@ echo "$RUNNING_IDS" | while read -r TASK_ID; do
     echo "[$TIMESTAMP] SKIP HEALTH: $TASK_ID — no start timestamp available" >> "$LOG"
   elif [ "$DELIVERY_PENDING" != "true" ]; then
     log_health_check "$TASK_ID" "$SESSION" "$STARTED_AT" "$MC_TASK_ID"
+  fi
+
+  REVIEW_ONLY=$(jq -r ".[] | select(.id == \"$TASK_ID\") | (.reviewOnly == true or .agentEnv.MC_REVIEW_ONLY == \"1\")" "$REGISTRY" 2>/dev/null)
+  if [ "$REVIEW_ONLY" = "true" ]; then
+    # Only the bridge's locked, fresh-state and bounded recovery may relaunch
+    # this worker. This monitor must not race Hold or replace its restricted prompt.
+    echo "[$TIMESTAMP] LOCAL REVIEW: $TASK_ID — deferring respawn and PR/CI automation to bounded bridge recovery" >> "$LOG"
+    continue
   fi
 
   if [ "$DELIVERY_PENDING" != "true" ] && ! tmux has-session -t "$SESSION" 2>/dev/null; then

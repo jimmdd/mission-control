@@ -14,7 +14,7 @@ import { join } from "node:path";
 import { test } from "node:test";
 
 const PRE_REVIEW = fileURLToPath(new URL("../swarm/pre-review.sh", import.meta.url));
-function runWithStubCodex(body, { timeoutSeconds = 30, filename = "file.txt", greptileMode = "pass" } = {}) {
+function runWithStubCodex(body, { timeoutSeconds = 30, filename = "file.txt", greptileMode = "pass", repeat = 1 } = {}) {
   const dir = mkdtempSync(join(tmpdir(), "mc-prereview-"));
   try {
     const repo = join(dir, "repo");
@@ -58,7 +58,8 @@ done
 cat "$result"
 `);
     chmodSync(stub, 0o755);
-    const r = spawnSync("bash", [PRE_REVIEW, repo, "HEAD^"], {
+    let r;
+    for (let i = 0; i < repeat; i++) r = spawnSync("bash", [PRE_REVIEW, repo, "HEAD^"], {
       encoding: "utf8",
       env: {
         ...process.env,
@@ -113,6 +114,18 @@ test("a reviewer that crashes keeps reporting its own error, not the timeout mes
   assert.match(out, /Codex review failed to run/);
   assert.match(out, /boom/);
   assert.doesNotMatch(out, /produced no output within/);
+});
+
+test("a nonzero reviewer exit preserves substantive WARN and FAIL without accepting PASS", () => {
+  for (const verdict of ["WARN", "FAIL"]) {
+    const result = runWithStubCodex(`cat >/dev/null; echo "REVIEW_REASON: code_findings"; echo "VERDICT: ${verdict}"; exit 7`);
+    assert.equal(result.status, 1);
+    assert.equal(result.attempts, 1);
+    assert.equal(result.receipt, null);
+    assert.match(result.out, new RegExp(`VERDICT: ${verdict}`));
+    assert.doesNotMatch(result.out, /runner_unavailable/);
+  }
+  assert.equal(runWithStubCodex('cat >/dev/null; echo "VERDICT: PASS"; exit 7').status, 2);
 });
 
  test("an echoed LGTM or mixed failure cannot authorize delivery", () => {
@@ -211,4 +224,11 @@ test("a healthy reviewer retains the full original timeout window", () => {
   assert.equal(result.status, 0);
   assert.equal(result.attempts, 1);
   assert.equal(result.receipt.verdict, "PASS");
+});
+
+test("a resumed exact-head PASS reuses its completed review instead of starting another CLI", () => {
+  const result = runWithStubCodex('cat >/dev/null; echo "VERDICT: PASS"', { repeat: 2 });
+  assert.equal(result.status, 0);
+  assert.equal(result.attempts, 1);
+  assert.match(result.out, /Reused completed review for exact head/);
 });

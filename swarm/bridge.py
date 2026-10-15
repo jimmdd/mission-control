@@ -13,6 +13,7 @@ Run modes:
 """
 
 import argparse
+import fcntl
 import hashlib
 import json
 import logging
@@ -1991,6 +1992,17 @@ Use an existing supported healthy installation where available; never weaken the
 disable sandboxing/hooks, alter Gatekeeper/quarantine settings or restart shared services as
 an automatic recovery. Escalate only the concrete remaining action that requires approval,
 with the attempted recovery and its evidence. Never claim PASS when the reviewer did not run.
+
+Review recovery outcomes are retained outside Git with exact head/base and a nextAction.
+Exit 3 means another review owns the worktree: wait for its result instead of duplicating it.
+A completed review is reusable only for the same clean head/base and unchanged QA evidence.
+Missing local QA, stale receipts, or unavailable independent review lanes are unfinished
+verification: complete the permitted checks/reports automatically, refresh the evidence,
+and then re-review. Do not raise a human question merely because a WARN exists. Do not
+spend code-fix iterations on missing proof or runner timeouts. Repeating an unchanged WARN
+without addressing its evidence is not recovery. Preserve real authorization, explicit
+holds and conflicting product decisions; request only the concrete permission/decision
+that remains, never approval to skip required checks or a generic "continue?".
 
 ### Step 7: {finish_title}
 {finish_body}"""
@@ -7545,6 +7557,17 @@ def _resume_checkpoint_work(task: dict) -> bool:
 
 
 def _relaunch_for_change_request(task: dict, change_requests_text: str, source: str = "dashboard") -> bool:
+    if source not in ("review-recovery", "auto-monitor"):
+        return _apply_change_request(task, change_requests_text, source)
+    # Hold transitions use this same registry lock before stopping runtimes.
+    # If Hold wins first, the fresh paused state rejects launch. If launch wins,
+    # Hold waits, then pauses/stops that exact session. Recovery never unholds it.
+    with (SWARM_DIR / "active-tasks.lock").open("a+") as lock:
+        fcntl.flock(lock.fileno(), fcntl.LOCK_EX)
+        return _apply_change_request(task, change_requests_text, source)
+
+
+def _apply_change_request(task: dict, change_requests_text: str, source: str = "dashboard") -> bool:
     """Re-launch an agent with change request feedback from Mission Control."""
     task_id = task["id"]
 
@@ -7554,6 +7577,19 @@ def _relaunch_for_change_request(task: dict, change_requests_text: str, source: 
         mc_log_activity(task_id, "updated",
                         "Change request received but no agent found to re-launch. Manual intervention needed.")
         return False
+
+    if source in ("review-recovery", "auto-monitor"):
+        current = mc_request("GET", f"/api/tasks/{task_id}")
+        eligible = entry.get("status") in ("completed_by_agent", "ready", "failed")
+        if source == "review-recovery" and _review_only_entry(entry) and entry.get("status") == "running":
+            eligible = True  # Lost local worker; retained outcome and retry budget own recovery.
+        if (not current or current.get("status") not in ("in_progress", "testing", "review")
+                or _has_pending_checkpoint(task_id)
+                or not eligible
+                or _tmux_session_alive(entry.get("tmuxSession", ""))):
+            return False
+        if source == "auto-monitor" and _review_only_entry(entry):
+            return False
 
     worktree = entry.get("worktree", "")
     session = entry.get("tmuxSession", "")
@@ -7605,16 +7641,52 @@ Complete the remaining work under the original task constraints. Reuse an existi
 PR if present; otherwise create a draft only when the task authorizes it and the
 required checks pass. Do not merge or deploy based on this checkpoint alone.
 """
+    elif source == "review-recovery":
+        original = SWARM_DIR / "prompts" / f"{reg_id}.md"
+        context = (prompt_file.read_text() if prompt_file.exists() else
+                   original.read_text() if original.exists() else str(task.get("description") or ""))
+        prompt = context + f"""
+
+## Automatic local review recovery — current instruction, NO-PR MODE
+{change_requests_text}
+
+Complete the missing permitted local verification and independent reports in this same
+worktree. Preserve prior user decisions, explicit holds, source, commits and ignored QA
+evidence. Do not re-plan or repeat still-applicable passing checks. Resolve the recorded
+technical gap before starting one new review; wait for an existing review lease instead
+of duplicating it. A runner timeout is not a code finding. No security/configuration
+changes, shared restarts, real-environment tests, push, PR creation or publication are
+authorized by this automatic recovery. After the local gate, report exact readiness and
+remaining external checks. Ask a human only for a concrete missing permission or product
+decision; do not ask for permission merely to complete missing local proof.
+"""
     else:
         prompt += EVIDENCE_POLICY + _design_prompt_section(task) + _video_prompt_section(task)
         prompt += _supercut_prompt_section(task) + _attachment_prompt_section(task)
+    if source != "review-recovery" and _review_only_entry(entry):
+        from execution_prompt import REVIEW_ONLY_SUFFIX
+        prompt += REVIEW_ONLY_SUFFIX
     prompt_file.write_text(prompt)
 
-    try:
-        subprocess.run(["tmux", "kill-session", "-t", session],
-                       capture_output=True, timeout=10)
-    except Exception:
-        pass
+    if source == "review-recovery":
+        # The shell monitor and profile failover must resume this same restricted
+        # prompt, rather than reviving the original publication workflow.
+        entry["reviewOnly"] = True
+        entry["agentEnv"] = {**(entry.get("agentEnv") or {}),
+                             "MC_REVIEW_ONLY": "1", "PROMPT_OVERRIDE": str(prompt_file)}
+        registry_file = SWARM_DIR / "active-tasks.json"
+        entries = json.loads(registry_file.read_text())
+        for saved_entry in entries:
+            if saved_entry.get("id") == reg_id:
+                saved_entry.update(reviewOnly=True, agentEnv=entry["agentEnv"])
+        atomic_write_json(registry_file, entries)
+
+    if source != "review-recovery":
+        try:
+            subprocess.run(["tmux", "kill-session", "-t", session],
+                           capture_output=True, timeout=10)
+        except Exception:
+            pass
 
     launcher = _launcher_for_entry(entry)
     env_exports = _env_exports_for_entry(entry)
@@ -7624,6 +7696,8 @@ required checks pass. Do not merge or deploy based on this checkpoint alone.
     # the reaper false-flags it "stalled". Same reason spawn-agent.sh forwards it.
     _relaunch_mc_id = entry.get("mcTaskId") or task_id
     env_exports += f"export MC_TASK_ID={shlex.quote(str(_relaunch_mc_id))}; "
+    if source == "review-recovery":
+        env_exports += "export MC_REVIEW_ONLY=1; "
 
     try:
         launched = subprocess.run(
@@ -7661,12 +7735,14 @@ required checks pass. Do not merge or deploy based on this checkpoint alone.
     except Exception:
         pass
 
-    mc_update_task(task_id, {"status": "in_progress"})
+    if source != "review-recovery":
+        mc_update_task(task_id, {"status": "in_progress"})
     mc_set_progress(
         task_id,
         state="running",
-        phase="execute",
-        step_label="Resuming after checkpoint" if source == "checkpoint" else "Addressing review feedback",
+        phase="review" if source == "review-recovery" else "execute",
+        step_label=("Completing recoverable local review gaps" if source == "review-recovery" else
+                    "Resuming after checkpoint" if source == "checkpoint" else "Addressing review feedback"),
         blocked_reason="",
     )
     mc_log_activity(task_id, "updated", "Checkpoint resolved — continuing the existing agent worktree without re-planning."
@@ -7685,6 +7761,73 @@ required checks pass. Do not merge or deploy based on this checkpoint alone.
             # outage must not turn a successfully launched agent into a failure.
             logging.warning(f"Could not post follow-up start for {task_id[:8]}: {e}")
     return True
+
+
+def process_local_review_recovery():
+    """Resume bounded technical gaps only; never unhold tasks or invent approval."""
+    from review_run import snapshot
+    for status in ("in_progress", "testing", "review"):
+        for task in fetch_tasks_by_status(status):
+            with cycle_boundary(f"local_review_recovery/{task['id']}"):
+                task_id = task["id"]
+                entry = _find_agent_registry_entry(task_id) or {}
+                eligible = entry.get("status") in ("completed_by_agent", "ready", "failed")
+                if _review_only_entry(entry) and entry.get("status") == "running":
+                    eligible = True
+                if (not eligible
+                        or _tmux_session_alive(entry.get("tmuxSession", ""))
+                        or _has_pending_checkpoint(task_id)):
+                    continue
+                worktree = entry.get("worktree")
+                if not worktree:
+                    continue
+                key = hashlib.sha256(str(Path(worktree).resolve()).encode()).hexdigest()[:24]
+                outcome_path = SWARM_DIR / "pr-review-state/runs" / key / "latest.json"
+                try:
+                    outcome = json.loads(outcome_path.read_text())
+                    ended = datetime.fromisoformat(outcome["endedAt"].replace("Z", "+00:00")).timestamp()
+                    state = snapshot(worktree, outcome["baseRef"])
+                except (OSError, ValueError, KeyError, subprocess.SubprocessError):
+                    continue
+                floor = _escalation_floor(task_id)
+                budget = entry.get("reviewRecovery") or {}
+                attempts = int(budget.get("attempts", 0)) if budget.get("head") == state["head"] and budget.get("base") == state["base"] else 0
+                lost_owned_attempt = (
+                    _review_only_entry(entry) and entry.get("changeRequestSource") == "review-recovery"
+                    and (entry.get("status") == "running" or
+                         (entry.get("status") == "failed" and entry.get("lastError") == "agent_session_lost"))
+                    and budget.get("lastRunId") == outcome.get("runId") and attempts > 0)
+                if (outcome.get("nextAction") not in ("complete_local_qa", "complete_independent_review", "bounded_readonly_diagnosis", "resume_review")
+                        or not outcome.get("runId") or (floor and ended < floor and not lost_owned_attempt)
+                        or not state["clean"] or state["head"] != outcome.get("head")
+                        or state["base"] != outcome.get("base")):
+                    continue
+                if budget.get("lastRunId") == outcome["runId"] and not lost_owned_attempt:
+                    continue
+                if attempts >= 2:
+                    mc_set_progress(task_id, state="blocked", phase="review",
+                                    blocked_reason="Bounded local review recovery exhausted; inspect the retained technical failure. No approval to skip checks is requested.")
+                    continue
+                patch = {"reviewRecovery": {"head": state["head"], "base": state["base"],
+                         "attempts": attempts + 1, "lastTriedRunId": outcome["runId"]}}
+                saved = subprocess.run([sys.executable, str(SWARM_DIR / "swarm-state.py"), "update",
+                        "--task-id", entry["id"], "--patch-json", json.dumps(patch),
+                        "--reason", "local-review-recovery"], capture_output=True, text=True, timeout=30)
+                if saved.returncode != 0:
+                    continue
+                current = mc_request("GET", f"/api/tasks/{task_id}")
+                if not current or current.get("status") not in ("in_progress", "testing", "review") or _has_pending_checkpoint(task_id):
+                    continue
+                instruction = (f"Retained review {outcome['runId']} at head {state['head']} / base {state['base']} "
+                               f"requires {outcome['nextAction']}. Read its log at {outcome.get('log', '')}. "
+                               "Complete this technical work automatically within the existing local authority; "
+                               "preserve the prior verdict until its cause is addressed. This is not publication approval.")
+                if _relaunch_for_change_request(current, instruction, source="review-recovery"):
+                    patch["reviewRecovery"]["lastRunId"] = outcome["runId"]
+                    subprocess.run([sys.executable, str(SWARM_DIR / "swarm-state.py"), "update",
+                        "--task-id", entry["id"], "--patch-json", json.dumps(patch),
+                        "--reason", "local-review-recovery-started"], capture_output=True, text=True, timeout=30)
+                    mc_log_activity(task_id, "updated", "Automatically resumed missing local review work; publication and genuine decision gates remain enforced.")
 
 
 def process_followup_lifecycle():
@@ -7870,6 +8013,8 @@ def _capture_pr_for_task(task: dict):
     The agent runs `gh pr create` in its worktree but nothing pulls the URL back —
     look it up by the task's branch and store it as a 'pr' deliverable."""
     task_id = task["id"]
+    if _review_only_entry(_find_agent_registry_entry(task_id) or {}):
+        return  # Capture also enforces PR titles; local verification cannot edit them.
     try:
         delivs = mc_request("GET", f"/api/tasks/{task_id}/deliverables") or []
         existing_url = next((d.get("path") for d in delivs
@@ -8192,6 +8337,17 @@ def _pr_comment_signals(meta: dict) -> dict:
     return {"ext": ext, "mention": mention}
 
 
+def _review_only_entry(entry: dict) -> bool:
+    env = entry.get("agentEnv") if isinstance(entry.get("agentEnv"), dict) else {}
+    return entry.get("reviewOnly") is True or str(env.get("MC_REVIEW_ONLY", "")) == "1"
+
+
+def _review_runtime_busy(task_id: str) -> bool:
+    entry = _find_agent_registry_entry(task_id) or {}
+    return (_review_only_entry(entry) or entry.get("status") == "running"
+            or bool(entry.get("tmuxSession") and _tmux_session_alive(entry["tmuxSession"])))
+
+
 def _auto_review_monitor(task: dict) -> bool:
     """Relaunch the agent to fix a review-state PR (conflicts / CI / new review comments).
     Returns True if it triggered a relaunch. Dedup + a per-task cap prevent loops."""
@@ -8200,6 +8356,8 @@ def _auto_review_monitor(task: dict) -> bool:
     if task.get("task_type", "implementation") != "implementation":
         return False
     task_id = task["id"]
+    if _review_runtime_busy(task_id):
+        return False
     try:
         delivs = mc_request("GET", f"/api/tasks/{task_id}/deliverables") or []
     except Exception:
@@ -8313,6 +8471,8 @@ def process_review_tasks():
             title = task["title"]
             task_type = task.get("task_type", "implementation")
 
+            if _review_only_entry(_find_agent_registry_entry(task_id) or {}):
+                continue  # No PR capture/title edits or delivery automation in this mode.
             _capture_pr_for_task(task)
             if _check_pr_status_for_task(task):
                 continue  # PR is terminal -> task done; nothing more to do
@@ -8327,6 +8487,10 @@ def process_review_tasks():
             # automatic review feedback run through that human boundary.
             if _has_pending_checkpoint(task_id):
                 logging.info(f"  {task_id[:8]} has a pending human checkpoint — review automation paused")
+                continue
+
+            if _review_runtime_busy(task_id):
+                logging.info(f"  {task_id[:8]} has an active or local-only run — preserving review scope")
                 continue
 
             dashboard_feedback = _collect_dashboard_feedback(task_id)
@@ -8530,6 +8694,8 @@ def run_once():
     # look like a capacity problem.
     with cycle_boundary("reap_dead_agents"):
         reap_dead_agents()
+    with cycle_boundary("process_local_review_recovery"):
+        process_local_review_recovery()
     with cycle_boundary("recover_dispatches"):
         recover_interrupted_dispatches()
     with cycle_boundary("process_open_questions"):

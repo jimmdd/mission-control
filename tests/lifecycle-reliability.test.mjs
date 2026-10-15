@@ -1119,12 +1119,17 @@ with tempfile.TemporaryDirectory() as root:
     bridge.mc_update_task = lambda task_id, body: calls.append(["status", task_id, body])
     bridge.mc_set_progress = lambda task_id, **body: calls.append(["progress", task_id, body])
     bridge.mc_log_activity = lambda *_args, **_kwargs: None
+    bridge.mc_request = lambda *_args, **_kwargs: {"id": "task-646", "status": "review"}
+    bridge._has_pending_checkpoint = lambda _: False
+    bridge._tmux_session_alive = lambda _: False
 
     bridge.subprocess.run = lambda args, **kwargs: subprocess.CompletedProcess(args, 0, "", "")
     bridge._relaunch_for_change_request({"id": "task-646"}, "fix conflict", source="auto-monitor")
     success_calls = list(calls)
 
     calls.clear()
+    registry[0]["status"] = "ready"
+    (bridge.SWARM_DIR / "active-tasks.json").write_text(json.dumps(registry))
     def fail_new_session(args, **kwargs):
         code = 1 if args[:2] == ["tmux", "new-session"] else 0
         return subprocess.CompletedProcess(args, code, "", "cannot create session" if code else "")

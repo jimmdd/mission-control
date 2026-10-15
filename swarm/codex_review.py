@@ -14,6 +14,7 @@ import subprocess
 import sys
 import tempfile
 import time
+from review_run import inherited_lock_fds
 
 
 TRANSIENT = re.compile(
@@ -44,7 +45,11 @@ def infrastructure_failure(answer, transcript):
             event = json.loads(line)
         except ValueError:
             continue
+        if not isinstance(event, dict):
+            continue
         item = event.get("item") or event
+        if not isinstance(item, dict):
+            continue
         if item.get("type") in ("error", "agent_message"):
             if TRANSIENT.search(str(item.get("message") or item.get("text") or "")):
                 return True
@@ -67,11 +72,24 @@ def retain_failure(attempt, returncode, timed_out, answer, transcript):
         print("Codex runner diagnostic could not be retained; inspect this invocation's output.")
 
 
+def retain_transcript(root, attempt, args, process, timed_out, interrupted, prompt, answer, transcript):
+    root.mkdir(parents=True, exist_ok=True, mode=0o700)
+    for name, text in ((f'answer-{attempt}.txt', answer), (f'transcript-{attempt}.jsonl', transcript), ('prompt.txt', prompt)):
+        with open(root / name, 'w', opener=lambda path, flags: os.open(path, flags, 0o600)) as output:
+            output.write(text)
+    with open(root / f'attempt-{attempt}.json', 'w', opener=lambda path, flags: os.open(path, flags, 0o600)) as output:
+        json.dump({'attempt': attempt, 'args': args, 'returncode': process.returncode,
+                   'timedOut': timed_out, 'interrupted': interrupted}, output)
+
+
 def run(prompt, result, timeout, model="", executable="codex"):
     result = Path(result)
     result.unlink(missing_ok=True)
     deadline = time.monotonic() + timeout
     last_reason = ""
+    archive = Path(os.environ.get('MC_HOME', str(Path.home() / '.mission-control')))
+    archive = Path(os.environ.get('MC_REVIEW_ARCHIVE_DIR', str(archive / 'swarm/pr-review-state/codex-transcripts')))
+    archive = archive / f'{time.time_ns()}-{os.getpid()}'
     with tempfile.TemporaryDirectory(prefix="mc-codex-review-") as temp:
         for attempt in range(1, 3):
             remaining = deadline - time.monotonic()
@@ -87,20 +105,26 @@ def run(prompt, result, timeout, model="", executable="codex"):
             try:
                 with transcript.open("w+") as log:
                     process = subprocess.Popen(args, stdin=subprocess.PIPE, stdout=log,
-                                               stderr=subprocess.STDOUT, start_new_session=True)
+                                               stderr=subprocess.STDOUT, start_new_session=True,
+                                               pass_fds=inherited_lock_fds())
                     try:
                         process.communicate(input=prompt.encode(), timeout=remaining)
                     except subprocess.TimeoutExpired:
                         timed_out = True
-                        stop_group(process)
                     finally:
+                        interrupted = sys.exc_info()[0] is not None
                         # Also reclaim descendants if a parent exits before its host.
                         stop_group(process)
+                        log.flush()
+                        answer = output.read_text() if output.exists() else ""
+                        log_text = transcript.read_text()
+                        retain_transcript(archive, attempt, args, process, timed_out, interrupted, prompt, answer, log_text)
             except OSError as error:
                 print(f"Codex review failed to run: {error}")
                 return 2
             answer = output.read_text() if output.exists() else ""
             log_text = transcript.read_text()
+            print(f"Codex full transcript retained locally: {archive / f'transcript-{attempt}.jsonl'}")
             infrastructure = infrastructure_failure(answer, log_text)
             if timed_out or infrastructure or process.returncode != 0:
                 retain_failure(attempt, process.returncode, timed_out, answer, log_text)
@@ -109,6 +133,9 @@ def run(prompt, result, timeout, model="", executable="codex"):
             elif infrastructure:
                 last_reason = "code-mode host or transport failed before review completed"
             elif process.returncode != 0:
+                if any(verdict in ("FAIL", "WARN") for verdict in VERDICT.findall(answer)):
+                    print(answer)
+                    return 1
                 print("Codex review failed to run")
                 print("\n".join(log_text.splitlines()[-8:]))
                 return 2

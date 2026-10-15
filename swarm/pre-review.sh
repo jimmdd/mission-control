@@ -9,6 +9,13 @@ set -euo pipefail
 
 WORKTREE=$1
 BASE_BRANCH=${2:-origin/main}
+# The guard holds one lease per worktree, preserves every outcome, and can reuse
+# only a completed exact-head/base review with unchanged evidence. A nested call
+# cannot inherit ownership: its parent is not the guard process.
+if [ "${MC_REVIEW_GUARD_PID:-}" != "$PPID" ]; then
+  GUARD=$(python3 -c 'import pathlib,sys; print(pathlib.Path(sys.argv[1]).resolve().with_name("review_run.py"))' "${BASH_SOURCE[0]}")
+  exec python3 "$GUARD" "${BASH_SOURCE[0]}" "$WORKTREE" "$BASE_BRANCH"
+fi
 MC_HOME="${MC_HOME:-$HOME/.mission-control}"
 SWARM_DIR="$MC_HOME/swarm"
 CONFIG="$SWARM_DIR/swarm-config.json"
@@ -83,6 +90,7 @@ REVIEW_PROMPT="You are a senior code reviewer. Review this diff for:
 7. Inspect the complete diff with git and relevant files/tests in this worktree; the excerpt below may be truncated. Confirm real-surface QA evidence for behavior changes, not just green unit tests.
 8. Review evidence is deliberately outside Git. Inspect .codex-evidence/ directly (including ticket README files, stamped check outputs, browser probes, screenshots and recordings); ignored files are absent from git ls-files and ordinary repository searches. Verify evidence against this head and the changed component content, and state any actual remaining gap.
 9. This reviewer runs in a read-only sandbox. Distinguish inability to create test temporary files from a code defect; inspect the recorded check output and report the execution limitation accurately. Do not invoke the pre-review gate recursively from this review.
+10. Required independent code-reviewer and architect lanes may already have been coordinated outside this CLI. Inspect their distinct reports in .codex-evidence/, verify both exact head/base and their own evidence, and use valid completed reports. Do not demand a duplicate pair merely because this CLI cannot launch agents. Missing lane reports or local QA are unfinished technical work for automatic completion; neither is a human product/authorization question.
 
 Changed files ($FILE_COUNT):
 $CHANGED_FILES
@@ -112,7 +120,8 @@ If no issues, respond with: LGTM
 End with one of:
 - VERDICT: PASS (no blocking issues)
 - VERDICT: FAIL (has critical or major issues that must be fixed)
-- VERDICT: WARN (unresolved issues; fix or document disposition and rerun review)"
+- VERDICT: WARN (unresolved issues; fix or document disposition and rerun review)
+For WARN or FAIL, also include exactly one REVIEW_REASON: qa_gap | independent_review | code_findings | authorization | product_decision line. Choose code_findings for an actual defect even if QA is also missing; choose authorization/product_decision only for a concrete missing permission or conflicting product requirement. Never infer permission to publish from any verdict."
 
 # Retry transient runner failures once, within one shared timeout budget. The
 # helper owns only its spawned process group and never changes security settings.

@@ -298,7 +298,7 @@ bridge.mc_request = lambda method, path, body=None: ([{
     "deliverable_type": "pr", "path": "https://github.com/metaDAOproject/backend/pull/646"
 }] if method == "GET" else None)
 bridge._ensure_pr_title = lambda task, url, current_title="": seen.append((task["title"], url)) or "[MET-646] Fix"
-bridge._find_agent_registry_entry = lambda task_id: (_ for _ in ()).throw(AssertionError("must not need registry"))
+bridge._find_agent_registry_entry = lambda task_id: {"id": "normal", "reviewOnly": False}
 bridge._capture_pr_for_task({"id": "t1", "title": "[MET-646] Fix"})
 print(json.dumps(seen))
 `, LADDER);
