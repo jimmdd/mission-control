@@ -37,12 +37,12 @@ def snapshot(worktree, base):
 def classify(code, output):
     verdicts = re.findall(r'^VERDICT: (PASS|FAIL|WARN)\b', output, re.M)
     reasons = re.findall(r'^REVIEW_REASON: (qa_gap|independent_review|authorization|product_decision|code_findings)\s*$', output, re.M)
+    if reasons and reasons[-1] in ('authorization', 'product_decision'):
+        return {'status': reasons[-1], 'nextAction': 'request_specific_decision', 'humanRequired': True}
     if 'FAIL' in verdicts:
         return {'status': 'findings', 'nextAction': 'fix_code', 'humanRequired': False}
     if code == 0 and verdicts and set(verdicts) == {'PASS'}:
         return {'status': 'complete', 'nextAction': 'none', 'humanRequired': False}
-    if reasons and reasons[-1] in ('authorization', 'product_decision'):
-        return {'status': reasons[-1], 'nextAction': 'request_specific_decision', 'humanRequired': True}
     if reasons and reasons[-1] == 'code_findings':
         return {'status': 'findings', 'nextAction': 'fix_code', 'humanRequired': False}
     if code == 2:

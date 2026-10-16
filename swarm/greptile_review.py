@@ -76,6 +76,7 @@ def review_branch(worktree, base, head, base_oid, output, timeout):
     print(f"Greptile evidence: {output}")
     if review["comments"]:
         print("Greptile found issues. Address the findings, commit, and rerun pre-review before pushing.")
+        print("VERDICT: FAIL\nREVIEW_REASON: code_findings")
         return 1
     print("Greptile review: PASS")
     return 0

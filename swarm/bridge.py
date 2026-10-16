@@ -40,6 +40,7 @@ import supercut
 from mc_api import headers_for
 from launch_state import LaunchPending, find_launch
 from runtime_health import atomic_write_json
+import review_authorization
 
 from planner import (
     generate_plan, save_plan, init_progress, load_progress,
@@ -1983,7 +1984,7 @@ failures, timeouts, and non-PASS Codex reviews block pushing. Read the output an
 2. RE-RUN `{gsd_verify}` — fixes must not break original acceptance criteria
 3. If a review suggestion conflicts with the plan's acceptance criteria, skip it and note: "Skipped review suggestion X — conflicts with acceptance criteria Y"
 4. Re-run pre-review.sh after fixes
-5. Maximum 3 review iterations. If still failing after 3, escalate to human (see below).
+5. {review_authorization.instructions(task, decisions or [], project=project, repo=repo)}
 
 An exit-2 runner/transport failure is not review feedback and does not spend a code-review
 iteration. pre-review.sh retries a transient runner failure once within a shared deadline.
@@ -7663,6 +7664,8 @@ decision; do not ask for permission merely to complete missing local proof.
     else:
         prompt += EVIDENCE_POLICY + _design_prompt_section(task) + _video_prompt_section(task)
         prompt += _supercut_prompt_section(task) + _attachment_prompt_section(task)
+    prompt += "\n## Review rerun scope (current instruction)\n" + review_authorization.instructions(
+        task, resolved_decisions(task_id), entry)
     if source != "review-recovery" and _review_only_entry(entry):
         from execution_prompt import REVIEW_ONLY_SUFFIX
         prompt += REVIEW_ONLY_SUFFIX
@@ -7797,7 +7800,11 @@ def process_local_review_recovery():
                     and (entry.get("status") == "running" or
                          (entry.get("status") == "failed" and entry.get("lastError") == "agent_session_lost"))
                     and budget.get("lastRunId") == outcome.get("runId") and attempts > 0)
-                if (outcome.get("nextAction") not in ("complete_local_qa", "complete_independent_review", "bounded_readonly_diagnosis", "resume_review")
+                permitted_actions = {"complete_local_qa", "complete_independent_review", "bounded_readonly_diagnosis", "resume_review"}
+                if review_authorization.authorized(task, resolved_decisions(task_id), entry):
+                    permitted_actions.add("fix_code")
+                if (outcome.get("humanRequired") is True
+                        or outcome.get("nextAction") not in permitted_actions
                         or not outcome.get("runId") or (floor and ended < floor and not lost_owned_attempt)
                         or not state["clean"] or state["head"] != outcome.get("head")
                         or state["base"] != outcome.get("base")):
@@ -7818,6 +7825,9 @@ def process_local_review_recovery():
                 current = mc_request("GET", f"/api/tasks/{task_id}")
                 if not current or current.get("status") not in ("in_progress", "testing", "review") or _has_pending_checkpoint(task_id):
                     continue
+                if (outcome.get("nextAction") == "fix_code" and not
+                        review_authorization.authorized(current, resolved_decisions(task_id), entry)):
+                    continue  # Consent may have been revoked while inspecting the outcome.
                 instruction = (f"Retained review {outcome['runId']} at head {state['head']} / base {state['base']} "
                                f"requires {outcome['nextAction']}. Read its log at {outcome.get('log', '')}. "
                                "Complete this technical work automatically within the existing local authority; "
