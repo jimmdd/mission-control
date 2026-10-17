@@ -7841,7 +7841,7 @@ def process_local_review_recovery():
                         continue
                     try:
                         state = snapshot(worktree, feedback["baseRef"])
-                    except (OSError, ValueError, KeyError, subprocess.SubprocessError):
+                    except (OSError, ValueError, KeyError, TypeError, subprocess.SubprocessError):
                         _return_delivery_for_retry(entry)
                         continue
                     if not state["clean"] or any(state[key] != feedback.get(key) for key in ("head", "base")):
@@ -7874,9 +7874,9 @@ def process_local_review_recovery():
                 outcome_path = SWARM_DIR / "pr-review-state/runs" / key / "latest.json"
                 try:
                     outcome = json.loads(outcome_path.read_text())
-                    ended = datetime.fromisoformat(outcome["endedAt"].replace("Z", "+00:00")).timestamp()
+                    ended = datetime.fromisoformat(str(outcome["endedAt"]).replace("Z", "+00:00")).timestamp()
                     state = snapshot(worktree, outcome["baseRef"])
-                except (OSError, ValueError, KeyError, subprocess.SubprocessError):
+                except (OSError, ValueError, KeyError, TypeError, subprocess.SubprocessError):
                     _return_delivery_for_retry(entry)
                     continue
                 cursor = entry.get("deliveryReview")

@@ -339,7 +339,9 @@ with tempfile.TemporaryDirectory(prefix='mc-recovery-outcome-') as temp:
             if config.get('newerBeforeSave'):
                 rows=json.loads((root/'active-tasks.json').read_text());rows[0].update(config['newerBeforeSave'])
                 (root/'active-tasks.json').write_text(json.dumps(rows))
-            return real_run([args[0],str(Path(${JSON.stringify(swarm)})/'swarm-state.py'),*args[2:]],**kwargs)
+            return real_run([args[0],str(Path(${JSON.stringify(swarm)})/'swarm-state.py'),
+                '--registry',str(root/'active-tasks.json'),'--lock',str(root/'active-tasks.lock'),
+                '--events',str(root/'state-events.jsonl'),*args[2:]],**kwargs)
         rows=json.loads((root/'active-tasks.json').read_text());rows[0].update(patch);(root/'active-tasks.json').write_text(json.dumps(rows))
         return subprocess.CompletedProcess(args,0,'','')
     bridge.subprocess.run=run

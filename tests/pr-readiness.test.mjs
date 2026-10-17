@@ -170,6 +170,7 @@ test('monitor reviews existing PR handoffs against the PR target, not the worktr
     const fn=source.slice(source.indexOf('pin_delivery_base() {'),source.indexOf('review_has_blocking_issues() {'));
     const script=`
 REGISTRY=${JSON.stringify(registry)}
+export MC_HOME=${JSON.stringify(dir)}
 SWARM_DIR=${JSON.stringify(dir)}
 SCRIPT_DIR=${JSON.stringify(dir)}
 LOG=${JSON.stringify(join(dir,'log'))}
@@ -186,6 +187,31 @@ run_codex_review ${JSON.stringify(checkout)} feature/handoff 1
     const output=execFileSync('bash',['-c',script],{encoding:'utf8'});
     assert.match(output,/FIRST=1 CURSOR=\n/);
     assert.equal(readFileSync(captured,'utf8'),'refs/remotes/origin/release/test');
+    writeFileSync(join(dir,'review_run.py'),readFileSync(join(swarm,'review_run.py')));
+    writeFileSync(join(dir,'pre-review.sh'),`python3 - "$1" "$2" <<'PY'
+import sys,os,hashlib,datetime,json
+from pathlib import Path
+sys.path.insert(0,${JSON.stringify(swarm)})
+import review_run
+work,base=sys.argv[1:]
+state=review_run.snapshot(work,base)
+key=hashlib.sha256(str(Path(work).resolve()).encode()).hexdigest()[:24]
+path=Path(os.environ['MC_HOME'])/'swarm/pr-review-state/runs'/key/'latest.json'
+path.parent.mkdir(parents=True)
+now=datetime.datetime.now(datetime.timezone.utc).isoformat()
+path.write_text(json.dumps({**state,'baseRef':base,'runId':'fresh-fixture','startedAt':now,'endedAt':now,
+ 'humanRequired':False,'nextAction':'bounded_readonly_diagnosis'}))
+PY
+echo 'VERDICT: WARN'
+exit 2
+`);
+    const typed=execFileSync('bash',['-c',`${script.slice(0,script.indexOf('git(){'))}
+rc=0
+run_codex_review ${JSON.stringify(checkout)} feature/handoff 1 || rc=$?
+printf 'EXIT=%s CURSOR=%s\\n' "$rc" "$REVIEW_OUTCOME_CURSOR"
+`],{encoding:'utf8'});
+    assert.match(typed,/EXIT=2 CURSOR=\{"runId": "fresh-fixture"/);
+    assert.match(typed,new RegExp(head));
   } finally {rmSync(dir,{recursive:true,force:true});}
 });
 

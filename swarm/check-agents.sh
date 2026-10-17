@@ -1036,7 +1036,8 @@ echo "$RUNNING_IDS" | while read -r TASK_ID; do
   NO_PR_MODE=$(jq -r ".[] | select(.id == \"$TASK_ID\") | (.noPrMode == true or .agentEnv.MC_NO_PR_MODE == \"1\")" "$REGISTRY")
   TASK_NO_PR=$(printf '%s' "${MC_TASK_JSON:-null}" | jq -r '
     . as $task | (.triage_state // {} | if type == "string" then fromjson else . end) as $triage |
-    ($triage.no_pr == true or (($task.description // "") | test("^\\s*(pr\\s*:\\s*none|no\\s+pr)\\s*$"; "im")))' 2>/dev/null) || continue
+    ($triage.no_pr == true or (($task.description // "") | split("\n") |
+      any(test("^\\s*(pr\\s*:\\s*none|no\\s+pr)\\s*$"; "i"))))' 2>/dev/null) || continue
   PLANNER_NO_PR=false
   if [ -f "${CONFIG:-$SWARM_DIR/swarm-config.json}" ]; then
     PLANNER_NO_PR=$(jq -r '.planner.no_pr // false' "${CONFIG:-$SWARM_DIR/swarm-config.json}" 2>/dev/null) || continue
@@ -1141,7 +1142,7 @@ echo "$RUNNING_IDS" | while read -r TASK_ID; do
   REVIEW_RC=0
   run_codex_review "$REPO" "$BRANCH" "$PR_NUM" || REVIEW_RC=$?
   if [ "$REVIEW_RC" -ne 0 ] || review_has_blocking_issues "$CODEX_REVIEW"; then
-    if [ -n "$REVIEW_OUTCOME_CURSOR" ]; then
+    if [ "$REVIEW_RC" -ne 3 ] && [ -n "$REVIEW_OUTCOME_CURSOR" ]; then
       # The retained typed outcome is already keyed to this exact worktree.
       # CAS relinquishes delivery only when the observed execution still owns it.
       REVIEW_HANDOFF=$(jq -cn --argjson cursor "$REVIEW_OUTCOME_CURSOR" \
