@@ -41,6 +41,32 @@ print(json.dumps(out))
   assert.deepEqual(result, [true, false, false, false, false, false, false, false]);
 });
 
+test("delivery consumes only a fresh finished outcome for its exact clean head, base and evidence", () => {
+  const result = python(`
+with tempfile.TemporaryDirectory() as temp:
+ root=pathlib.Path(temp);os.environ['MC_HOME']=str(root);wt=root/'work'
+ state={'head':'head','base':'base','clean':True,'evidenceFingerprint':'proof'}
+ review_run.snapshot=lambda *_:state
+ key=review_run.hashlib.sha256(str(wt.resolve()).encode()).hexdigest()[:24]
+ path=root/'swarm/pr-review-state/runs'/key/'latest.json';path.parent.mkdir(parents=True)
+ now=time.time();stamp=lambda value:review_run.datetime.datetime.fromtimestamp(value,review_run.datetime.timezone.utc).isoformat()
+ outcome={**state,'runId':'new-run','baseRef':'origin/main','startedAt':stamp(now),
+  'endedAt':stamp(now+1),'nextAction':'complete_local_qa','humanRequired':False}
+ def consume(patch=None):
+  path.write_text(json.dumps({**outcome,**(patch or {})}))
+  return review_run.consumable_outcome(wt,'origin/main',now-.1) is not None
+ answers=[consume()]
+ for patch in [{'startedAt':stamp(now-10)},{'endedAt':None},{'runId':None},
+  {'head':'old'},{'base':'old'},{'baseRef':'origin/other'},{'evidenceFingerprint':'old'},
+  {'nextAction':'none'},{'humanRequired':None}]:answers.append(consume(patch))
+ answers.append(consume({'nextAction':'request_specific_decision','humanRequired':True}))
+ state['clean']=False;answers.append(consume())
+ path.unlink();answers.append(review_run.consumable_outcome(wt,'origin/main',now-.1) is not None)
+ print(json.dumps(answers))
+`);
+  assert.deepEqual(result, [true, ...Array(9).fill(false), true, false, false]);
+});
+
 test("QA fingerprint changes with receipts and ignores symlink targets", () => {
   const result = python(`
 with tempfile.TemporaryDirectory() as temp:

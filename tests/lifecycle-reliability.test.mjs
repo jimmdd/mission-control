@@ -1150,7 +1150,7 @@ with tempfile.TemporaryDirectory() as root:
   assert.deepEqual(result.failure, [], "a failed tmux launch must not claim the task is running");
 });
 
-test("a fourth automated review-comment fix round holds the ticket and alerts a human", () => {
+test("a fourth automated review-comment fix round records a blocker without stopping execution", () => {
   const result = python(`
 import bridge, tempfile
 from pathlib import Path
@@ -1176,6 +1176,7 @@ with tempfile.TemporaryDirectory() as root:
         "statusCheckRollup": [], "_repo": "acme/backend", "_num": "709",
     }
     bridge._pr_comment_signals = lambda _: {"ext": 101, "mention": 0}
+    bridge.mc_set_progress = lambda task_id, **body: calls.append(["progress", task_id, body])
     bridge.mc_update_task = lambda task_id, body: calls.append(["patch", task_id, body])
     bridge.mc_log_activity = lambda task_id, kind, message: calls.append(["activity", task_id, kind, message])
     bridge._relaunch_for_change_request = lambda *_a, **_kw: calls.append(["relaunch"])
@@ -1186,11 +1187,12 @@ with tempfile.TemporaryDirectory() as root:
 `, null);
 
   assert.equal(result.triggered, true);
-  assert.deepEqual(result.calls[0], ["patch", "task-709", { status: "on_hold" }]);
-  assert.equal(result.calls[1][0], "activity");
-  assert.equal(result.calls[1][2], "needs_human", "needs_human is routed to Telegram/action alerts");
+  assert.equal(result.calls[0][0], "progress");
+  assert.equal(result.calls[0][2].state, "blocked");
+  assert.equal(result.calls[1][2], "updated");
   assert.match(result.calls[1][3], /after 3 automated fix rounds/);
-  assert.match(result.calls[1][3], /\/unhold/);
+  assert.ok(!result.calls.some(call => call[0] === "patch"));
+  assert.doesNotMatch(result.calls[1][3], /\/unhold/);
   assert.equal(result.calls.some(call => call[0] === "relaunch"), false, "the fourth round must not relaunch again");
   assert.equal(result.state.reviewCommentRounds, 4);
   assert.equal(result.state.lastCommentId, 101, "the triggering comment is consumed so it cannot alert twice");
@@ -1251,7 +1253,7 @@ with tempfile.TemporaryDirectory() as root:
   assert.equal(result.firstState.lastCommentId, 55, "existing comments remain baselined");
 });
 
-test("a completed conflict repair retries the same head, then holds and alerts at the cap", () => {
+test("a completed conflict repair retries the same head, then records a non-stopping blocker at the cap", () => {
   const result = python(`
 import bridge, tempfile
 from pathlib import Path
@@ -1276,6 +1278,7 @@ with tempfile.TemporaryDirectory() as root:
         "statusCheckRollup": [], "_repo": "acme/backend", "_num": "694",
     }
     bridge._auto_fix_run_finished = lambda _: True
+    bridge.mc_set_progress = lambda task_id, **body: calls.append(["progress", task_id, body])
     bridge.mc_update_task = lambda task_id, body: calls.append(["patch", task_id, body])
     bridge.mc_log_activity = lambda task_id, kind, message: calls.append(
         ["activity", task_id, kind, message]
@@ -1294,11 +1297,13 @@ with tempfile.TemporaryDirectory() as root:
   assert.equal(result.capped, true);
   assert.equal(result.state.autoCount, 5);
   assert.deepEqual(result.calls[1], ["relaunch", "task-646", "auto-monitor"]);
-  assert.deepEqual(result.calls[2], ["patch", "task-646", { status: "on_hold" }]);
+  assert.equal(result.calls[2][0], "progress");
+  assert.equal(result.calls[2][2].state, "blocked");
+  assert.ok(!result.calls.some(call => call[0] === "patch"));
   assert.equal(result.calls[3][0], "activity");
-  assert.equal(result.calls[3][2], "needs_human");
+  assert.equal(result.calls[3][2], "updated");
   assert.match(result.calls[3][3], /after 5 automated repair attempts/);
-  assert.match(result.calls[3][3], /\/unhold/);
+  assert.doesNotMatch(result.calls[3][3], /\/unhold/);
 });
 
 test("merged PRs complete tickets while closed unmerged PRs preserve unfinished delivery", () => {
@@ -1501,4 +1506,33 @@ print(json.dumps({"ok": ok, "calls": calls}))
   assert.equal(result.calls[0][1], "/api/checkpoints/spawn/resolve");
   assert.equal(result.calls[0][2].decision, "approve");
   assert.match(result.calls[0][2].response, /spawn succeeded/i);
+});
+
+test("retry-budget bookkeeping cannot stop a human worker launched during GitHub inspection", () => {
+  const result=python(`
+import bridge,tempfile
+from pathlib import Path
+results=[]
+for comments in [True,False]:
+ with tempfile.TemporaryDirectory() as root:
+  bridge.SWARM_DIR=Path(root);bridge._REVIEW_MONITOR_FILE=Path(root)/'review-monitor.json'
+  bridge._REVIEW_MONITOR_FILE.write_text(json.dumps({'task':{'autoCount':3 if comments else 5,
+   'reviewCommentRounds':3 if comments else 0,'lastCommentId':100,'lastMentionId':0}}))
+  busy={'human':False};calls=[]
+  bridge._review_runtime_busy=lambda _:busy['human']
+  bridge.mc_request=lambda *a:[{'deliverable_type':'pr','path':'https://github.com/acme/backend/pull/1'}]
+  def meta(_):
+   busy['human']=True
+   return {'state':'OPEN','headRefOid':'head','mergeable':'MERGEABLE' if comments else 'CONFLICTING',
+    'statusCheckRollup':[],'_repo':'acme/backend','_num':'1'}
+  bridge._gh_pr_meta=meta;bridge._pr_comment_signals=lambda _:{'ext':101,'mention':0}
+  bridge._auto_fix_run_finished=lambda _:True
+  bridge.mc_update_task=lambda *a,**k:calls.append('patch')
+  bridge.mc_set_progress=lambda *a,**k:calls.append('progress')
+  bridge.mc_log_activity=lambda *a,**k:calls.append('activity')
+  bridge._relaunch_for_change_request=lambda *a,**k:calls.append('launch')
+  results.append({'acted':bridge._auto_review_monitor({'id':'task','task_type':'implementation'}),'calls':calls})
+print(json.dumps(results))
+`,null);
+  assert.deepEqual(result,[{acted:false,calls:[]},{acted:false,calls:[]}]);
 });

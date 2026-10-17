@@ -314,12 +314,13 @@ with tempfile.TemporaryDirectory(prefix='mc-recovery-outcome-') as temp:
     outcome.update(config.get('outcome',{}))
     key=hashlib.sha256(str(Path(entry['worktree']).resolve()).encode()).hexdigest()[:24]
     state=root/'pr-review-state/runs'/key/'latest.json';state.parent.mkdir(parents=True);state.write_text(json.dumps(outcome))
+    if config.get('missingOutcome'):state.unlink()
     launches=[];progress=[];api=[];patches=[]
     bridge.fetch_tasks_by_status=lambda status:[task] if status==task['status'] else []
     bridge._tmux_session_alive=lambda _:config.get('live',False)
     bridge._escalation_floor=lambda _:config.get('floor')
     bridge.cycle_boundary=lambda _:nullcontext()
-    review_run.snapshot=lambda *_:{'head':'head947','base':'base947','clean':True}
+    review_run.snapshot=lambda *_:{'head':'head947','base':'base947','clean':True,**config.get('snapshotPatch',{})}
     def request(method,path,*args):
         api.append([method,path])
         if method!='GET':raise AssertionError('no checkpoint or real-environment writes permitted')
@@ -330,9 +331,15 @@ with tempfile.TemporaryDirectory(prefix='mc-recovery-outcome-') as temp:
     bridge.mc_set_progress=lambda *a,**kw:progress.append(kw)
     bridge.mc_log_activity=lambda *a,**kw:None
     bridge._relaunch_for_change_request=lambda task,prompt,source,**kwargs: launches.append({'source':source,'prompt':prompt}) or True
+    real_run=subprocess.run
     def run(args,**kwargs):
         assert 'swarm-state.py' in str(args[1]),args
         patch=json.loads(args[args.index('--patch-json')+1]);patches.append(patch)
+        if config.get('useRealState'):
+            if config.get('newerBeforeSave'):
+                rows=json.loads((root/'active-tasks.json').read_text());rows[0].update(config['newerBeforeSave'])
+                (root/'active-tasks.json').write_text(json.dumps(rows))
+            return real_run([args[0],str(Path(${JSON.stringify(swarm)})/'swarm-state.py'),*args[2:]],**kwargs)
         rows=json.loads((root/'active-tasks.json').read_text());rows[0].update(patch);(root/'active-tasks.json').write_text(json.dumps(rows))
         return subprocess.CompletedProcess(args,0,'','')
     bridge.subprocess.run=run
@@ -473,4 +480,31 @@ test('delivery review recovery honors typed authorization stops and bounded tech
   assert.equal(human.launches.length,0);
   assert.equal(local.launches.length,1);
   assert.equal(local.launches[0].source,'review-recovery');
+});
+
+for (const gap of [
+  {missingOutcome:true}, {snapshotPatch:{base:'new-base'}},
+  {outcome:{nextAction:'none'}},
+  {entry:{deliveryReview:{runId:'new-run',head:'head947',base:'base947',baseRef:'origin/master'}}},
+]) {
+  test(`an unusable delivery review handoff returns to ordinary delivery: ${JSON.stringify(gap)}`, () => {
+    const result=recoveryOutcome({...gap,useRealState:true,entry:{status:'running',
+      changeRequestSource:'delivery-review',deliveryPending:true,...gap.entry}});
+    assert.equal(result.launches.length,0);
+    assert.equal(result.saved.changeRequestSource,'delivery');
+    assert.equal(result.saved.deliveryPending,true);
+    assert.equal(result.saved.deliveryReview,null);
+  });
+}
+
+test('stale feedback bases return to delivery without overwriting a newer human worker', () => {
+  const entry={status:'running',changeRequestSource:'delivery-feedback',deliveryPending:true,
+    deliveryFeedback:{head:'head947',base:'old-base',baseRef:'origin/master',kind:'ci_failed'}};
+  const retry=recoveryOutcome({entry,useRealState:true});
+  assert.equal(retry.saved.changeRequestSource,'delivery');
+  assert.equal(retry.saved.deliveryFeedback,null);
+  const newer={status:'running',changeRequestSource:'dashboard',runStartedAt:2,deliveryPending:false};
+  const raced=recoveryOutcome({entry,useRealState:true,newerBeforeSave:newer});
+  for (const [key,value] of Object.entries(newer)) assert.deepEqual(raced.saved[key],value);
+  assert.equal(raced.launches.length,0);
 });

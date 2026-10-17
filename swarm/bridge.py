@@ -7802,6 +7802,17 @@ missing permission or product decision, not merely to complete missing local pro
     return True
 
 
+def _return_delivery_for_retry(entry: dict):
+    """Release an unusable bridge handoff without overwriting a newer owner."""
+    if entry.get("changeRequestSource") not in ("delivery-review", "delivery-feedback"):
+        return
+    subprocess.run([sys.executable, str(SWARM_DIR / "swarm-state.py"), "update",
+        "--task-id", entry["id"], "--patch-json", json.dumps({"status": "running", "changeRequestSource": "delivery",
+        "deliveryPending": True, "deliveryFeedback": None, "deliveryReview": None}),
+        "--expected-json", json.dumps(entry), "--reason", "delivery-context-retry"],
+        capture_output=True, text=True, timeout=30)
+
+
 def process_local_review_recovery():
     """Resume bounded technical gaps only; never unhold tasks or invent approval."""
     from review_run import snapshot
@@ -7826,12 +7837,15 @@ def process_local_review_recovery():
                 feedback = entry.get("deliveryFeedback")
                 if entry.get("changeRequestSource") == "delivery-feedback":
                     if not isinstance(feedback, dict) or feedback.get("kind") not in ("ci_failed", "review_blocked"):
+                        _return_delivery_for_retry(entry)
                         continue
                     try:
                         state = snapshot(worktree, feedback["baseRef"])
                     except (OSError, ValueError, KeyError, subprocess.SubprocessError):
+                        _return_delivery_for_retry(entry)
                         continue
                     if not state["clean"] or any(state[key] != feedback.get(key) for key in ("head", "base")):
+                        _return_delivery_for_retry(entry)
                         continue
                     attempts = int(feedback.get("attempts", 0))
                     previous = entry.get("deliveryRecovery") or {}
@@ -7863,6 +7877,15 @@ def process_local_review_recovery():
                     ended = datetime.fromisoformat(outcome["endedAt"].replace("Z", "+00:00")).timestamp()
                     state = snapshot(worktree, outcome["baseRef"])
                 except (OSError, ValueError, KeyError, subprocess.SubprocessError):
+                    _return_delivery_for_retry(entry)
+                    continue
+                cursor = entry.get("deliveryReview")
+                if (entry.get("changeRequestSource") == "delivery-review"
+                        and (not state["clean"] or any(state[k] != outcome.get(k) for k in ("head", "base"))
+                             or (isinstance(cursor, dict) and any(cursor.get(k) != outcome.get(k)
+                                 for k in ("runId", "head", "base", "baseRef")))
+                             or outcome.get("nextAction") == "none")):
+                    _return_delivery_for_retry(entry)
                     continue
                 floor = _escalation_floor(task_id)
                 budget = entry.get("reviewRecovery") or {}
@@ -8517,12 +8540,14 @@ def _auto_review_monitor(task: dict) -> bool:
             _save_review_monitor(state)
             reason = (
                 f"New review feedback arrived after {_MAX_REVIEW_COMMENT_FIX_ROUNDS} automated fix rounds. "
-                "Mission Control put the ticket on hold to stop an unbounded review loop. "
-                "Review the remaining comments, then use /unhold when it is ready to continue."
+                "Automatic review recovery reached its bounded retry limit. "
+                "Retained review feedback remains blocked for inspection; existing execution authority is unchanged."
             )
-            logging.warning(f"  Auto-review-monitor: {task_id[:8]} exceeded review-comment fix limit — holding")
-            mc_update_task(task_id, {"status": "on_hold"})
-            mc_log_activity(task_id, "needs_human", reason)
+            if _review_runtime_busy(task_id):
+                return False
+            logging.warning(f"  Auto-review-monitor: {task_id[:8]} exceeded review-comment fix limit")
+            mc_set_progress(task_id, state="blocked", phase="review", blocked_reason=reason)
+            mc_log_activity(task_id, "updated", reason)
             return True
         mk["reviewCommentRounds"] = rounds + 1
 
@@ -8531,13 +8556,15 @@ def _auto_review_monitor(task: dict) -> bool:
         _save_review_monitor(state)
         reason = (
             f"The PR still has {kind.replace('_', ' ')} after "
-            f"{_MAX_AUTO_FIX_PER_TASK} automated repair attempts. Mission Control put the ticket "
-            "on hold to stop a stalled repair loop. Inspect the PR and agent history, then use "
-            "/unhold when it is ready to continue."
+            f"{_MAX_AUTO_FIX_PER_TASK} automated repair attempts. Automatic review recovery reached "
+            "its bounded retry limit. Retained PR and agent evidence remains blocked for inspection; "
+            "existing execution authority is unchanged."
         )
-        logging.warning(f"  Auto-review-monitor: {task_id[:8]} exhausted repair limit — holding")
-        mc_update_task(task_id, {"status": "on_hold"})
-        mc_log_activity(task_id, "needs_human", reason)
+        if _review_runtime_busy(task_id):
+            return False
+        logging.warning(f"  Auto-review-monitor: {task_id[:8]} exhausted repair limit")
+        mc_set_progress(task_id, state="blocked", phase="review", blocked_reason=reason)
+        mc_log_activity(task_id, "updated", reason)
         return True
 
     mk["autoCount"] = mk.get("autoCount", 0) + 1

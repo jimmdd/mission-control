@@ -827,14 +827,8 @@ CIFIXEOF
   echo "[$TIMESTAMP] CI-FIX: $task_id — relaunched for CI fix cycle $cycle" >> "$LOG"
 }
 
-run_codex_review() {
+pin_delivery_base() {
   local repo="$1"
-  local branch="$2"
-  local pr_num="$3"
-  local review_log="$SWARM_DIR/logs/codex-review-${pr_num}.log"
-
-  echo "[$TIMESTAMP] Running Codex review on PR #$pr_num..." >> "$LOG"
-
   local base_name base_branch
   base_name=$(printf '%s' "$READINESS" | jq -r '.baseRefName // empty')
   [ -n "$base_name" ] || return 1
@@ -842,16 +836,33 @@ run_codex_review() {
   git check-ref-format "$base_branch" >/dev/null 2>&1 || return 1
   local worktree_dir
   worktree_dir=$(jq -r ".[] | select(.id == \"$TASK_ID\") | .worktree // empty" "$REGISTRY" 2>/dev/null)
-  local review_dir="${worktree_dir:-$repo}"
+  DELIVERY_REVIEW_DIR="${worktree_dir:-$repo}"
+  DELIVERY_BASE_REF="$base_branch"
 
   # Review the pushed head, not another writer's unpushed commit or stale base.
-  [ "$(git -C "$review_dir" rev-parse HEAD)" = "$(printf '%s' "$READINESS" | jq -r '.head')" ] || return 1
-  git -C "$review_dir" fetch origin "+refs/heads/$base_name:$base_branch" >/dev/null 2>&1 || return 1
-  [ "$(git -C "$review_dir" rev-parse "$base_branch")" = "$(printf '%s' "$READINESS" | jq -r '.base')" ] || return 1
+  [ "$(git -C "$DELIVERY_REVIEW_DIR" rev-parse HEAD)" = "$(printf '%s' "$READINESS" | jq -r '.head')" ] || return 1
+  git -C "$DELIVERY_REVIEW_DIR" fetch origin "+refs/heads/$base_name:$base_branch" >/dev/null 2>&1 || return 1
+  [ "$(git -C "$DELIVERY_REVIEW_DIR" rev-parse "$base_branch")" = "$(printf '%s' "$READINESS" | jq -r '.base')" ] || return 1
+}
+
+run_codex_review() {
+  local repo="$1"
+  local branch="$2"
+  local pr_num="$3"
+  local review_log="$SWARM_DIR/logs/codex-review-${pr_num}.log"
+  REVIEW_OUTCOME_CURSOR=""
+  echo "[$TIMESTAMP] Running Codex review on PR #$pr_num..." >> "$LOG"
+  pin_delivery_base "$repo" || return 1
+  local started
+  started=$(python3 -c 'import time; print(time.time())') || return 1
   local review_output review_rc=0
-  review_output=$(bash "$SCRIPT_DIR/pre-review.sh" "$review_dir" "$base_branch" 2>&1) || review_rc=$?
+  review_output=$(bash "$SCRIPT_DIR/pre-review.sh" "$DELIVERY_REVIEW_DIR" "$DELIVERY_BASE_REF" 2>&1) || review_rc=$?
   echo "$review_output" > "$review_log"
   CODEX_REVIEW="$review_output"
+  if [ "$review_rc" -ne 0 ] && [ "$review_rc" -ne 3 ]; then
+    REVIEW_OUTCOME_CURSOR=$(python3 "$SCRIPT_DIR/review_run.py" --consumable-outcome \
+      "$DELIVERY_REVIEW_DIR" "$DELIVERY_BASE_REF" "$started") || REVIEW_OUTCOME_CURSOR=""
+  fi
   # Keep typed WARN/lease/unavailable exits intact. The bounded bridge owns
   # their next action; they are never synthetic code findings.
   return "$review_rc"
@@ -1024,8 +1035,13 @@ echo "$RUNNING_IDS" | while read -r TASK_ID; do
 
   NO_PR_MODE=$(jq -r ".[] | select(.id == \"$TASK_ID\") | (.noPrMode == true or .agentEnv.MC_NO_PR_MODE == \"1\")" "$REGISTRY")
   TASK_NO_PR=$(printf '%s' "${MC_TASK_JSON:-null}" | jq -r '
-    (.triage_state // {}) | (if type == "string" then fromjson else . end) | .no_pr == true' 2>/dev/null) || continue
-  if [ "$NO_PR_MODE" = "true" ] || [ "$TASK_NO_PR" = "true" ]; then
+    . as $task | (.triage_state // {} | if type == "string" then fromjson else . end) as $triage |
+    ($triage.no_pr == true or (($task.description // "") | test("^\\s*(pr\\s*:\\s*none|no\\s+pr)\\s*$"; "im")))' 2>/dev/null) || continue
+  PLANNER_NO_PR=false
+  if [ -f "${CONFIG:-$SWARM_DIR/swarm-config.json}" ]; then
+    PLANNER_NO_PR=$(jq -r '.planner.no_pr // false' "${CONFIG:-$SWARM_DIR/swarm-config.json}" 2>/dev/null) || continue
+  fi
+  if [ "$NO_PR_MODE" = "true" ] || [ "$TASK_NO_PR" = "true" ] || [ "${MC_NO_PR:-}" = "1" ] || [ "$PLANNER_NO_PR" = "true" ]; then
     echo "[$TIMESTAMP] LOCAL WORK: $TASK_ID — no-PR scope defers PR/CI delivery automation" >> "$LOG"
     continue
   fi
@@ -1087,6 +1103,9 @@ echo "$RUNNING_IDS" | while read -r TASK_ID; do
   fi
   if [ "$GATE_STATUS" = "review_blocked" ] || [ "$FAILED_CHECKS" -gt 0 ]; then
     if [ "$GATE_STATUS" = "review_blocked" ] || [ "$CFG_CI_FIX_ENABLED" = "true" ]; then
+      # Failed fetches and stale local refs must remain ordinary delivery work;
+      # a bridge handoff is only usable once the PR's exact base is present.
+      pin_delivery_base "$REPO" || continue
       FEEDBACK=$(printf '%s' "$READINESS" | jq -ce --arg kind "$GATE_STATUS" '
         select((.head | type == "string" and length > 0) and (.base | type == "string" and length > 0) and
                (.baseRefName | type == "string" and length > 0)) |
@@ -1118,16 +1137,19 @@ echo "$RUNNING_IDS" | while read -r TASK_ID; do
   REVIEW_CYCLES=$(jq -r ".[] | select(.id == \"$TASK_ID\") | .reviewCycles // 0" "$REGISTRY" 2>/dev/null)
 
   CODEX_REVIEW=""
+  REVIEW_OUTCOME_CURSOR=""
   REVIEW_RC=0
   run_codex_review "$REPO" "$BRANCH" "$PR_NUM" || REVIEW_RC=$?
   if [ "$REVIEW_RC" -ne 0 ] || review_has_blocking_issues "$CODEX_REVIEW"; then
-    if [ "$REVIEW_RC" -ne 3 ]; then
+    if [ -n "$REVIEW_OUTCOME_CURSOR" ]; then
       # The retained typed outcome is already keyed to this exact worktree.
       # CAS relinquishes delivery only when the observed execution still owns it.
-      state_update "$TASK_ID" '{"status":"running","deliveryPending":true,"changeRequestSource":"delivery-review"}' \
+      REVIEW_HANDOFF=$(jq -cn --argjson cursor "$REVIEW_OUTCOME_CURSOR" \
+        '{status:"running",deliveryPending:true,changeRequestSource:"delivery-review",deliveryReview:$cursor}') || continue
+      state_update "$TASK_ID" "$REVIEW_HANDOFF" \
         "delivery-review-recovery" "$DELIVERY_STATE" || continue
     fi
-    echo "[$TIMESTAMP] REVIEW PENDING: $TASK_ID — exit $REVIEW_RC; retained typed outcome belongs to the bounded bridge" >> "$LOG"
+    echo "[$TIMESTAMP] REVIEW PENDING: $TASK_ID — exit $REVIEW_RC; usable outcomes transfer to the bridge, otherwise delivery retries" >> "$LOG"
     continue
   fi
 

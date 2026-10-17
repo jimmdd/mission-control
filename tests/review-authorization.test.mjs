@@ -79,7 +79,7 @@ with tempfile.TemporaryDirectory() as temp:
  bridge.mc_request=lambda *a:task
  bridge.mc_set_progress=lambda *a,**k:None
  bridge.subprocess.run=lambda *a,**k:types.SimpleNamespace(returncode=0)
- bridge._relaunch_for_change_request=lambda t,text,source:calls.append({'source':source,'text':text}) or True
+ bridge._relaunch_for_change_request=lambda t,text,source,**kwargs:calls.append({'source':source,'text':text}) or True
  review_run.snapshot=lambda *a:state
  def run(action,runid,human=False):
   path.write_text(json.dumps({'head':state['head'],'base':'base','baseRef':'origin/master',

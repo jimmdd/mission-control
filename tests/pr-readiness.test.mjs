@@ -162,11 +162,12 @@ test('monitor reviews existing PR handoffs against the PR target, not the worktr
     git('checkout','-b','feature/handoff'); git('commit','--allow-empty','-m','head');
     const head=git('rev-parse','HEAD');
     git('push','origin','feature/handoff');
+    git('update-ref','-d','refs/remotes/origin/release/test');
     const registry=join(dir,'registry.json'), captured=join(dir,'review-base');
     writeFileSync(registry,JSON.stringify([{id:'task',worktree:checkout,baseBranch:'origin/feature/handoff'}]));
     writeFileSync(join(dir,'pre-review.sh'),`printf '%s' "$2" > ${JSON.stringify(captured)}\necho 'VERDICT: PASS'\n`);
     const source=readFileSync(join(swarm,'check-agents.sh'),'utf8');
-    const fn=source.slice(source.indexOf('run_codex_review() {'),source.indexOf('review_has_blocking_issues() {'));
+    const fn=source.slice(source.indexOf('pin_delivery_base() {'),source.indexOf('review_has_blocking_issues() {'));
     const script=`
 REGISTRY=${JSON.stringify(registry)}
 SWARM_DIR=${JSON.stringify(dir)}
@@ -176,9 +177,14 @@ TASK_ID=task
 READINESS='${JSON.stringify({head,base,baseRefName:'release/test'})}'
 codex(){ :; }
 ${fn}
+git(){ if [ "$3" = fetch ] && [ ! -f ${JSON.stringify(join(dir,'fetch-retried'))} ]; then touch ${JSON.stringify(join(dir,'fetch-retried'))}; return 1; fi; command git "$@"; }
+first=0
+run_codex_review ${JSON.stringify(checkout)} feature/handoff 1 || first=$?
+printf 'FIRST=%s CURSOR=%s\\n' "$first" "$REVIEW_OUTCOME_CURSOR"
 run_codex_review ${JSON.stringify(checkout)} feature/handoff 1
 `;
-    execFileSync('bash',['-c',script],{encoding:'utf8'});
+    const output=execFileSync('bash',['-c',script],{encoding:'utf8'});
+    assert.match(output,/FIRST=1 CURSOR=\n/);
     assert.equal(readFileSync(captured,'utf8'),'refs/remotes/origin/release/test');
   } finally {rmSync(dir,{recursive:true,force:true});}
 });
@@ -191,7 +197,7 @@ test('the actual monitor review wrapper preserves WARN and busy-lease exit codes
   try {
     mkdirSync(join(dir,'logs'));
     const source=readFileSync(join(swarm,'check-agents.sh'),'utf8');
-    const wrapper=source.slice(source.indexOf('run_codex_review() {'),source.indexOf('review_has_blocking_issues() {'));
+    const wrapper=source.slice(source.indexOf('pin_delivery_base() {'),source.indexOf('review_has_blocking_issues() {'));
     writeFileSync(join(dir,'registry.json'),JSON.stringify([{id:'task',worktree:dir}]));
     for (const code of [1,2,3]) {
       writeFileSync(join(dir,'pre-review.sh'),`echo 'VERDICT: WARN'\necho 'REVIEW_REASON: authorization'\nexit ${code}\n`);

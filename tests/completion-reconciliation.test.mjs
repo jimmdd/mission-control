@@ -118,7 +118,8 @@ log_health_check(){ ${call} health "$@"; }
 build_agent_env_exports(){ ${call} launcher "$@"; }
 resolve_launcher_path(){ ${call} launcher "$@"; }
 validate_gsd_artifacts(){ ${call} gsd "$@"; GSD_STATUS=passed; }
-run_codex_review(){ ${call} review "$@"; CODEX_REVIEW=${quote(options.reviewText ?? "PASS")}; return ${options.reviewExit ?? 0}; }
+pin_delivery_base(){ return ${options.pinFailure ? 1 : 0}; }
+run_codex_review(){ REVIEW_OUTCOME_CURSOR=${quote(options.reviewCursor === false ? '' : JSON.stringify({runId:'fixture',head:'head',base:'base',baseRef:'origin/main'}))}; ${call} review "$@"; CODEX_REVIEW=${quote(options.reviewText ?? "PASS")}; return ${options.reviewExit ?? 0}; }
 review_has_blocking_issues(){ return ${options.reviewText?.match(/FAIL|WARN/) ? 0 : 1}; }
 extract_agent_summary(){ AGENT_SUMMARY=fixture; }
 ${helpers}
@@ -481,3 +482,28 @@ test('a fresh task no-PR decision blocks active delivery before registry propaga
   assert.ok(!result.calls.some(([kind]) => ['gh','gate','review','complete','launcher'].includes(kind)));
   assert.equal(result.registry.status,'running');
 });
+
+for (const description of ['Approved local task\nPR: none\nKeep the result local', 'Local changes\nNo PR']) {
+  test(`a fresh description restriction blocks delivery before registry propagation: ${description}`, () => {
+    const result=fixture({mode:'running',registry:{status:'running',deliveryPending:true},
+      task:{status:'in_progress',description},gateStatus:'pass'});
+    assert.ok(!result.calls.some(([kind]) => ['gh','gate','review','complete','launcher'].includes(kind)));
+    assert.equal(result.registry.status,'running');
+  });
+}
+
+test('a failed review preflight without a fresh typed outcome keeps ordinary delivery retryable', () => {
+  const result=fixture({mode:'handoff',gateStatus:'pass',reviewExit:1,reviewCursor:false});
+  assert.equal(result.registry.status,'running');
+  assert.equal(result.registry.deliveryPending,true);
+  assert.notEqual(result.registry.changeRequestSource,'delivery-review');
+  assert.ok(!result.calls.some(([kind]) => ['complete','launcher'].includes(kind)));
+});
+
+for (const gateStatus of ['ci_failed','review_blocked']) {
+  test(`failed base pinning cannot strand a ${gateStatus} handoff with the bridge`, () => {
+    const result=fixture({mode:'handoff',gateStatus,pinFailure:true});
+    assert.notEqual(result.registry.changeRequestSource,'delivery-feedback');
+    assert.equal(result.registry.deliveryPending,true);
+  });
+}

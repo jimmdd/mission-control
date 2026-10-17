@@ -34,6 +34,29 @@ def snapshot(worktree, base):
             'evidenceFingerprint': evidence_fingerprint(worktree)}
 
 
+def consumable_outcome(worktree, base, not_before):
+    """Return a fresh, exact recovery cursor, never a stale or partial verdict."""
+    root = Path(os.environ.get('MC_HOME', str(Path.home() / '.mission-control'))) / 'swarm/pr-review-state'
+    key = hashlib.sha256(str(Path(worktree).resolve()).encode()).hexdigest()[:24]
+    try:
+        outcome = json.loads((root / 'runs' / key / 'latest.json').read_text())
+        started = datetime.datetime.fromisoformat(str(outcome['startedAt']).replace('Z', '+00:00')).timestamp()
+        ended = datetime.datetime.fromisoformat(str(outcome['endedAt']).replace('Z', '+00:00')).timestamp()
+        state = snapshot(worktree, base)
+        actions = {'fix_code', 'complete_local_qa', 'complete_independent_review',
+                   'bounded_readonly_diagnosis', 'resume_review', 'request_specific_decision'}
+        if (not started >= float(not_before) or not ended >= started
+                or not outcome.get('runId') or outcome.get('baseRef') != base
+                or outcome.get('nextAction') not in actions
+                or not isinstance(outcome.get('humanRequired'), bool)
+                or not state['clean'] or any(outcome.get(k) != state[k] for k in ('head', 'base'))
+                or outcome.get('evidenceFingerprint') != state['evidenceFingerprint']):
+            return None
+        return {k: outcome[k] for k in ('runId', 'head', 'base', 'baseRef')}
+    except (OSError, ValueError, KeyError, TypeError, subprocess.SubprocessError):
+        return None
+
+
 def classify(code, output):
     verdicts = re.findall(r'^VERDICT: (PASS|FAIL|WARN)\b', output, re.M)
     reasons = re.findall(r'^REVIEW_REASON: (qa_gap|independent_review|authorization|product_decision|code_findings)\s*$', output, re.M)
@@ -193,6 +216,11 @@ if __name__ == '__main__':
     signal.signal(signal.SIGTERM, cancel)
     signal.signal(signal.SIGHUP, cancel)
     try:
+        if sys.argv[1:2] == ['--consumable-outcome']:
+            cursor = consumable_outcome(*sys.argv[2:])
+            if cursor:
+                print(json.dumps(cursor))
+            sys.exit(0 if cursor else 1)
         sys.exit(execute(*sys.argv[1:]))
     except (OSError, ValueError, subprocess.SubprocessError) as error:
         print(f'Review runner unavailable: {error}', file=sys.stderr)
