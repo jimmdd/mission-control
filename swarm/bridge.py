@@ -8096,7 +8096,7 @@ def _capture_pr_for_task(task: dict):
     The agent runs `gh pr create` in its worktree but nothing pulls the URL back —
     look it up by the task's branch and store it as a 'pr' deliverable."""
     task_id = task["id"]
-    if _pr_is_disabled(task) or _pr_delivery_disabled(_find_agent_registry_entry(task_id) or {}):
+    if _pr_is_disabled(task) or _review_runtime_busy(task_id):
         return  # Capture also enforces PR titles; local verification cannot edit them.
     try:
         delivs = mc_request("GET", f"/api/tasks/{task_id}/deliverables") or []
