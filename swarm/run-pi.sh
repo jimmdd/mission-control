@@ -8,7 +8,15 @@ SWARM_DIR="$MC_HOME/swarm"
 if [ -f "$MC_HOME/.env" ]; then set -a; source "$MC_HOME/.env"; set +a; fi
 CONFIG="$SWARM_DIR/swarm-config.json"
 STATE_TOOL="$SWARM_DIR/swarm-state.py"
-SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+SCRIPT_SRC="${BASH_SOURCE[0]}"
+while [ -L "$SCRIPT_SRC" ]; do
+  LINK_TARGET="$(readlink "$SCRIPT_SRC")"
+  case "$LINK_TARGET" in
+    /*) SCRIPT_SRC="$LINK_TARGET" ;;
+    *) SCRIPT_SRC="$(dirname "$SCRIPT_SRC")/$LINK_TARGET" ;;
+  esac
+done
+SCRIPT_DIR="$(cd "$(dirname "$SCRIPT_SRC")" && pwd)"
 source "$SCRIPT_DIR/mc-api.sh"
 
 CFG_MODEL=${AGENT_MODEL:-$(jq -r '.agents.profiles.pi.model // "google/gemini-2.5-pro"' "$CONFIG" 2>/dev/null || echo "google/gemini-2.5-pro")}

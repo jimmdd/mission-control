@@ -17,7 +17,9 @@ function launchedPrompt(launcher, mode) {
     mkdirSync(join(swarm, 'logs'), { recursive: true });
     mkdirSync(join(swarm, 'prompts'), { recursive: true });
     mkdirSync(bin);
-    for (const name of ['run-claude.sh', 'run-codex.sh', 'run-pi.sh', 'execution_prompt.py', 'mc-api.sh', 'swarm-state.py']) {
+    // Match setup.sh: the renderer is shipped beside the source launchers,
+    // rather than linked into MC_HOME/swarm. Every launcher must resolve it.
+    for (const name of ['run-claude.sh', 'run-codex.sh', 'run-pi.sh', 'mc-api.sh', 'swarm-state.py']) {
       symlinkSync(join(source, name), join(swarm, name));
     }
     writeFileSync(join(swarm, 'swarm-config.json'), '{}');
