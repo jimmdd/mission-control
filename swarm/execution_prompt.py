@@ -18,11 +18,24 @@ protocol, describe the exact blocked action, and STOP. Never guess or bypass tha
 Report local readiness and genuinely unverified external checks when finished.
 '''
 
+NO_PR_SUFFIX = '''
 
-def render(prompt, default_suffix, review_only):
-    return prompt + '\n' + (REVIEW_ONLY_SUFFIX if review_only else default_suffix) + '\n'
+CURRENT EXECUTION MODE: LOCAL WORK / NO-PR MODE.
+Continue permitted engineering and required verification under the original task's
+constraints. Preserve explicit holds and required review-destination authorization;
+this mode grants no new authority to transmit private code. Commit locally when required.
+Do not push, create/edit a PR, mark ready, merge or deploy. Report local readiness and
+the exact remaining boundary. A technical retry is not a new permission question;
+a concrete missing permission or product decision still uses the checkpoint protocol.
+'''
+
+
+def render(prompt, default_suffix, review_only, no_pr=False):
+    suffix = REVIEW_ONLY_SUFFIX if review_only else NO_PR_SUFFIX if no_pr else default_suffix
+    return prompt + '\n' + suffix + '\n'
 
 
 if __name__ == '__main__':
     print(render(Path(sys.argv[1]).read_text(), sys.argv[2],
-                 os.environ.get('MC_REVIEW_ONLY') == '1'), end='')
+                 os.environ.get('MC_REVIEW_ONLY') == '1',
+                 os.environ.get('MC_NO_PR_MODE') == '1'), end='')

@@ -1119,7 +1119,9 @@ with tempfile.TemporaryDirectory() as root:
     bridge.mc_update_task = lambda task_id, body: calls.append(["status", task_id, body])
     bridge.mc_set_progress = lambda task_id, **body: calls.append(["progress", task_id, body])
     bridge.mc_log_activity = lambda *_args, **_kwargs: None
-    bridge.mc_request = lambda *_args, **_kwargs: {"id": "task-646", "status": "review"}
+    bridge.mc_request = lambda method, path, *_args, **_kwargs: (
+        [] if path.endswith("/checkpoints") else {"id": "task-646", "status": "review"}
+    )
     bridge._has_pending_checkpoint = lambda _: False
     bridge._tmux_session_alive = lambda _: False
 

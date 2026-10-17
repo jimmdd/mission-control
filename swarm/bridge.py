@@ -7582,7 +7582,8 @@ def _apply_change_request(task: dict, change_requests_text: str, source: str = "
     if source in ("review-recovery", "auto-monitor"):
         current = mc_request("GET", f"/api/tasks/{task_id}")
         eligible = entry.get("status") in ("completed_by_agent", "ready", "failed")
-        if source == "review-recovery" and _review_only_entry(entry) and entry.get("status") == "running":
+        if (source == "review-recovery" and entry.get("changeRequestSource") == "review-recovery"
+                and entry.get("status") == "running"):
             eligible = True  # Lost local worker; retained outcome and retry budget own recovery.
         if (not current or current.get("status") not in ("in_progress", "testing", "review")
                 or _has_pending_checkpoint(task_id)
@@ -7603,8 +7604,13 @@ def _apply_change_request(task: dict, change_requests_text: str, source: str = "
                         "Change request received but agent worktree missing. Manual intervention needed.")
         return False
 
+    review_only = _review_only_entry(entry)
+    agent_env = entry.get("agentEnv") if isinstance(entry.get("agentEnv"), dict) else {}
+    no_pr = (entry.get("noPrMode") is True or str(agent_env.get("MC_NO_PR_MODE", "")) == "1"
+             or os.environ.get("MC_NO_PR_MODE") == "1" or _pr_is_disabled(task))
     prompt_title = "Change Request from Mission Control"
-    prompt_file = SWARM_DIR / "prompts" / f"{reg_id}-change-request.md"
+    prompt_kind = "review-recovery" if source == "review-recovery" else "change-request"
+    prompt_file = SWARM_DIR / "prompts" / f"{reg_id}-{prompt_kind}.md"
     prompt_file.parent.mkdir(parents=True, exist_ok=True)
     prompt = f"""# {prompt_title}
 
@@ -7644,45 +7650,47 @@ required checks pass. Do not merge or deploy based on this checkpoint alone.
 """
     elif source == "review-recovery":
         original = SWARM_DIR / "prompts" / f"{reg_id}.md"
-        context = (prompt_file.read_text() if prompt_file.exists() else
-                   original.read_text() if original.exists() else str(task.get("description") or ""))
+        context = original.read_text() if original.exists() else str(task.get("description") or "")
+        # Recovery owns a separate prompt. Keep the latest human follow-up intact
+        # and do not recursively append a previous recovery's execution mode.
+        followup = SWARM_DIR / "prompts" / f"{reg_id}-change-request.md"
+        if followup.exists():
+            human_context = followup.read_text()
+            if context not in human_context:
+                context += "\n\n" + human_context
+            else:
+                context = human_context
         prompt = context + f"""
 
-## Automatic local review recovery — current instruction, NO-PR MODE
+## Automatic review recovery — original task scope unchanged
 {change_requests_text}
 
 Complete the missing permitted local verification and independent reports in this same
 worktree. Preserve prior user decisions, explicit holds, source, commits and ignored QA
 evidence. Do not re-plan or repeat still-applicable passing checks. Resolve the recorded
 technical gap before starting one new review; wait for an existing review lease instead
-of duplicating it. A runner timeout is not a code finding. No security/configuration
-changes, shared restarts, real-environment tests, push, PR creation or publication are
-authorized by this automatic recovery. After the local gate, report exact readiness and
-remaining external checks. Ask a human only for a concrete missing permission or product
-decision; do not ask for permission merely to complete missing local proof.
+of duplicating it. A runner timeout is not a code finding. Recovery grants no new
+authority for code transmission, publication, security/configuration changes, shared
+restarts, real-environment access, ready promotion, merge or deployment. Preserve the
+original task's review-only and no-PR restrictions and every required test/review gate.
+After completing the technical gap, continue the interrupted task within its existing
+authority. If that task already authorizes draft delivery, complete that delivery only
+after its required gates pass; a review verdict is never publication permission.
+Report readiness and genuinely remaining checks. Ask a human only for a concrete
+missing permission or product decision, not merely to complete missing local proof.
 """
     else:
         prompt += EVIDENCE_POLICY + _design_prompt_section(task) + _video_prompt_section(task)
         prompt += _supercut_prompt_section(task) + _attachment_prompt_section(task)
     prompt += "\n## Review rerun scope (current instruction)\n" + review_authorization.instructions(
         task, resolved_decisions(task_id), entry)
-    if source != "review-recovery" and _review_only_entry(entry):
+    if review_only:
         from execution_prompt import REVIEW_ONLY_SUFFIX
         prompt += REVIEW_ONLY_SUFFIX
+    elif no_pr:
+        from execution_prompt import NO_PR_SUFFIX
+        prompt += NO_PR_SUFFIX
     prompt_file.write_text(prompt)
-
-    if source == "review-recovery":
-        # The shell monitor and profile failover must resume this same restricted
-        # prompt, rather than reviving the original publication workflow.
-        entry["reviewOnly"] = True
-        entry["agentEnv"] = {**(entry.get("agentEnv") or {}),
-                             "MC_REVIEW_ONLY": "1", "PROMPT_OVERRIDE": str(prompt_file)}
-        registry_file = SWARM_DIR / "active-tasks.json"
-        entries = json.loads(registry_file.read_text())
-        for saved_entry in entries:
-            if saved_entry.get("id") == reg_id:
-                saved_entry.update(reviewOnly=True, agentEnv=entry["agentEnv"])
-        atomic_write_json(registry_file, entries)
 
     if source != "review-recovery":
         try:
@@ -7699,8 +7707,10 @@ decision; do not ask for permission merely to complete missing local proof.
     # the reaper false-flags it "stalled". Same reason spawn-agent.sh forwards it.
     _relaunch_mc_id = entry.get("mcTaskId") or task_id
     env_exports += f"export MC_TASK_ID={shlex.quote(str(_relaunch_mc_id))}; "
-    if source == "review-recovery":
+    if review_only:
         env_exports += "export MC_REVIEW_ONLY=1; "
+    if no_pr:
+        env_exports += "export MC_NO_PR_MODE=1; "
 
     try:
         launched = subprocess.run(
@@ -7722,19 +7732,26 @@ decision; do not ask for permission merely to complete missing local proof.
         entries = json.loads(registry_file.read_text())
         for e in entries:
             if e.get("id") == reg_id:
+                # Failover must resume this successful launch, including the latest
+                # human follow-up. Merge fresh state rather than cached authority.
+                saved_env = e.get("agentEnv") if isinstance(e.get("agentEnv"), dict) else {}
+                e["agentEnv"] = {**saved_env, "PROMPT_OVERRIDE": str(prompt_file)}
+                if no_pr:
+                    e["agentEnv"]["MC_NO_PR_MODE"] = "1"
                 e["status"] = "running"
                 e["deliveryPending"] = False
                 e["changeRequestAt"] = change_request_at
                 e["changeRequestSource"] = source
                 e["runStartedAt"] = int(datetime.now(timezone.utc).timestamp() * 1000)
                 e.pop("completionSyncedAt", None)
+                e.pop("completionOriginSource", None)
                 # Clear the stale heartbeat from the prior run — otherwise the reaper
                 # measures heartbeat age across the relaunch and falsely flags the new
                 # agent as "stalled/blocked" during its startup gap (a fresh spawn has
                 # no lastHeartbeatAt and is never flagged; match that).
                 e.pop("lastHeartbeatAt", None)
                 break
-        registry_file.write_text(json.dumps(entries, indent=2))
+        atomic_write_json(registry_file, entries)
     except Exception:
         pass
 
@@ -7775,7 +7792,8 @@ def process_local_review_recovery():
                 task_id = task["id"]
                 entry = _find_agent_registry_entry(task_id) or {}
                 eligible = entry.get("status") in ("completed_by_agent", "ready", "failed")
-                if _review_only_entry(entry) and entry.get("status") == "running":
+                if (entry.get("changeRequestSource") == "review-recovery"
+                        and entry.get("status") == "running"):
                     eligible = True
                 if (not eligible
                         or _tmux_session_alive(entry.get("tmuxSession", ""))
@@ -7796,7 +7814,7 @@ def process_local_review_recovery():
                 budget = entry.get("reviewRecovery") or {}
                 attempts = int(budget.get("attempts", 0)) if budget.get("head") == state["head"] and budget.get("base") == state["base"] else 0
                 lost_owned_attempt = (
-                    _review_only_entry(entry) and entry.get("changeRequestSource") == "review-recovery"
+                    entry.get("changeRequestSource") == "review-recovery"
                     and (entry.get("status") == "running" or
                          (entry.get("status") == "failed" and entry.get("lastError") == "agent_session_lost"))
                     and budget.get("lastRunId") == outcome.get("runId") and attempts > 0)

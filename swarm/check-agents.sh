@@ -48,8 +48,13 @@ state_update() {
   local task_id="$1"
   local patch_json="$2"
   local reason="${3:-check-agents}"
-  python3 "$STATE_TOOL" update --task-id "$task_id" --patch-json "$patch_json" --reason "$reason" >/dev/null 2>&1 || \
+  local expected_json="${4:-}"
+  local args=(update --task-id "$task_id" --patch-json "$patch_json" --reason "$reason")
+  [ -n "$expected_json" ] && args+=(--expected-json "$expected_json")
+  if ! python3 "$STATE_TOOL" "${args[@]}" >/dev/null 2>&1; then
     echo "[$TIMESTAMP] WARN: state update failed for $task_id ($reason)" >> "$LOG"
+    return 1
+  fi
 }
 
 maybe_snapshot_state() {
@@ -147,7 +152,7 @@ prune_state_artifacts
 
 build_agent_env_exports() {
   local task_id="$1"
-  local profile launcher model provider thinking effort fallback env_json entry key value
+  local profile launcher model provider thinking effort fallback env_json entry key value no_pr_mode
   profile=$(jq -r ".[] | select(.id == \"$task_id\") | .agentProfile // .agent // \"codex\"" "$REGISTRY" 2>/dev/null)
   launcher=$(jq -r ".[] | select(.id == \"$task_id\") | .launcher // (if (.agent // \"\") == \"codex\" then \"codex\" else \"claude\" end)" "$REGISTRY" 2>/dev/null)
   model=$(jq -r ".[] | select(.id == \"$task_id\") | .agentModel // \"\"" "$REGISTRY" 2>/dev/null)
@@ -156,6 +161,7 @@ build_agent_env_exports() {
   effort=$(jq -r ".[] | select(.id == \"$task_id\") | .agentEffort // \"\"" "$REGISTRY" 2>/dev/null)
   fallback=$(jq -r ".[] | select(.id == \"$task_id\") | .costControls.fallbackModel // \"\"" "$REGISTRY" 2>/dev/null)
   env_json=$(jq -c ".[] | select(.id == \"$task_id\") | .agentEnv // {}" "$REGISTRY" 2>/dev/null)
+  no_pr_mode=$(jq -r ".[] | select(.id == \"$task_id\") | (.noPrMode == true or .agentEnv.MC_NO_PR_MODE == \"1\")" "$REGISTRY" 2>/dev/null)
 
   exports=""
   [ -n "$profile" ] && exports+="export AGENT_PROFILE='$profile'; "
@@ -170,6 +176,7 @@ build_agent_env_exports() {
     value=$(echo "$entry" | jq -r '.value')
     exports+="export ${key}='${value//\'/\'\\\'\'}'; "
   done < <(echo "$env_json" | jq -c 'to_entries[]?')
+  [ "$no_pr_mode" = "true" ] && exports+="export MC_NO_PR_MODE=1; "
 
   printf '%s' "$launcher|$exports"
 }
@@ -207,6 +214,7 @@ check_pending_checkpoint() {
 # verifying this task's tmux session is absent.
 pause_delivery() {
   local task_id="$1" mc_task_id="$2" session="$3" error="$4" reason="$5" payload live_session=false sibling siblings current_task activities hold_message
+  local expected_state="${6:-}"
   if [ -n "$mc_task_id" ]; then
     payload=$(jq -n --arg reason "$reason" '{state:"waiting",blocked_reason:$reason}')
     if ! mc_curl PUT "/api/tasks/$mc_task_id/progress" -fsS --max-time 10 \
@@ -256,7 +264,7 @@ pause_delivery() {
     fi
   fi
   payload=$(jq -n --arg error "$error" '{status:"paused",deliveryPending:false,completionSyncedAt:null,lastError:$error}')
-  state_update "$task_id" "$payload" "delivery-blocked"
+  state_update "$task_id" "$payload" "delivery-blocked" "$expected_state" || return 1
   echo "[$TIMESTAMP] DELIVERY BLOCKED: $task_id — $reason" >> "$LOG"
 }
 
@@ -276,13 +284,42 @@ lookup_task_pr() {
   TASK_PR_STATE=$(printf '%s' "$pr_json" | jq -r '.state // empty')
 }
 
+claim_completion_action() {
+  local task_id="$1" expected_state="$2" patch="$3"
+  if ! state_update "$task_id" "$patch" "completion-claim" "$expected_state"; then
+    echo "[$TIMESTAMP] RECONCILE WAIT: $task_id — completed execution changed before delivery handoff" >> "$LOG"
+    return 1
+  fi
+}
+
 reconcile_completed_agents_to_mc() {
   local completed_ids
-  completed_ids=$(jq -r '.[] | select(.status == "completed_by_agent") | .id' "$REGISTRY" 2>/dev/null)
+  completed_ids=$(jq -r '.[] | select(.status == "completed_by_agent" or
+    (.status == "running" and .deliveryPending == true and .changeRequestSource == "local-completion")) | .id' "$REGISTRY" 2>/dev/null)
   [ -z "$completed_ids" ] && return
 
   while read -r task_id; do
     [ -z "$task_id" ] && continue
+    # Capture the completed execution before any API/PR lookup. A later run,
+    # Hold or authority change must win over this monitor's stale observation.
+    local completed_state completion_patch claimed_state completion_source local_patch local_state ready_patch
+    completed_state=$(jq -c --arg id "$task_id" '.[] | select(.id == $id and
+      (.status == "completed_by_agent" or (.status == "running" and .deliveryPending == true and .changeRequestSource == "local-completion"))) |
+      {status,launchAttemptId,runStartedAt,changeRequestAt,changeRequestSource,completionOriginSource,deliveryPending,completionRetryCount,reviewOnly,noPrMode,
+       "agentEnv.MC_REVIEW_ONLY":.agentEnv.MC_REVIEW_ONLY,
+       "agentEnv.MC_NO_PR_MODE":.agentEnv.MC_NO_PR_MODE}' "$REGISTRY")
+    [ -n "$completed_state" ] || continue
+    completion_source=$(printf '%s' "$completed_state" | jq -r '.completionOriginSource // .changeRequestSource // empty')
+    completion_patch=$(jq -cn --arg source "$completion_source" \
+      '{status:"running",deliveryPending:true,completionSyncedAt:null,completionOriginSource:null} +
+       (if $source == "review-recovery" then {changeRequestSource:"delivery"}
+        elif $source != "" then {changeRequestSource:$source} else {} end)')
+    claimed_state=$(printf '%s' "$completed_state" | jq -c --argjson patch "$completion_patch" '. + $patch | del(.completionSyncedAt)')
+    local_patch=$(jq -cn --arg source "$completion_source" \
+      '{status:"running",deliveryPending:true,changeRequestSource:"local-completion",completionOriginSource:$source}')
+    local_state=$(printf '%s' "$completed_state" | jq -c --argjson patch "$local_patch" '. + $patch')
+    ready_patch=$(jq -cn --arg source "$completion_source" --arg at "$TIMESTAMP" \
+      '{status:"ready",deliveryPending:false,changeRequestSource:$source,completionOriginSource:null,completionSyncedAt:$at}')
     local mc_task_id
     mc_task_id=$(jq -r ".[] | select(.id == \"$task_id\") | .mcTaskId // empty" "$REGISTRY" 2>/dev/null)
     [ -z "$mc_task_id" ] && continue
@@ -308,7 +345,8 @@ reconcile_completed_agents_to_mc() {
     session=$(jq -r ".[] | select(.id == \"$task_id\") | .tmuxSession // empty" "$REGISTRY" 2>/dev/null)
     check_pending_checkpoint "$mc_task_id"; checkpoint_status=$?
     if [ "$checkpoint_status" -eq 0 ]; then
-      pause_delivery "$task_id" "$mc_task_id" "$session" "pending_human_checkpoint" "$CHECKPOINT_REASON"
+      claim_completion_action "$task_id" "$completed_state" "$completion_patch" || continue
+      pause_delivery "$task_id" "$mc_task_id" "$session" "pending_human_checkpoint" "$CHECKPOINT_REASON" "$claimed_state"
       continue
     elif [ "$checkpoint_status" -eq 2 ]; then
       echo "[$TIMESTAMP] RECONCILE WAIT: $task_id — unable to verify pending checkpoints" >> "$LOG"
@@ -322,14 +360,15 @@ reconcile_completed_agents_to_mc() {
       continue
     fi
 
-    if [ "$task_type" = "investigation" ] && [[ "$mc_status" =~ ^(in_progress|assigned|planning|inbox)$ ]]; then
+    if [ "$task_type" = "investigation" ] && [[ "$mc_status" =~ ^(in_progress|assigned|planning|inbox|testing|review)$ ]]; then
       if [ -n "$synced_at" ]; then
         echo "[$TIMESTAMP] RECONCILE: $task_id — stale completionSyncedAt detected while MC is active ($mc_status), forcing resync" >> "$LOG"
       fi
+      claim_completion_action "$task_id" "$completed_state" "$local_patch" || continue
       if mc_complete_task "$mc_task_id" "Investigation complete" "review"; then
+        state_update "$task_id" "$ready_patch" "completion-reconcile" "$local_state" || continue
         mc_post_activity "$mc_task_id" "updated" "Monitor reconciled investigation completion from agent status"
         echo "[$TIMESTAMP] RECONCILE: $task_id — synced completed_by_agent to MC review" >> "$LOG"
-        state_update "$task_id" "{\"status\": \"ready\", \"completionSyncedAt\": \"$TIMESTAMP\"}" "completion-reconcile"
       else
         echo "[$TIMESTAMP] WARN: $task_id — failed to sync completed_by_agent to MC (will retry)" >> "$LOG"
       fi
@@ -352,7 +391,7 @@ reconcile_completed_agents_to_mc() {
       local repo branch no_pr_mode pr_url pr_num pr_state completion_action completion_retries
       repo=$(jq -r ".[] | select(.id == \"$task_id\") | .repo // empty" "$REGISTRY" 2>/dev/null)
       branch=$(jq -r ".[] | select(.id == \"$task_id\") | .branch // empty" "$REGISTRY" 2>/dev/null)
-      no_pr_mode=$(jq -r ".[] | select(.id == \"$task_id\") | .noPrMode // false" "$REGISTRY" 2>/dev/null)
+      no_pr_mode=$(jq -r ".[] | select(.id == \"$task_id\") | (.noPrMode == true or .agentEnv.MC_NO_PR_MODE == \"1\")" "$REGISTRY" 2>/dev/null)
       pr_url=""
       pr_num=""
       pr_state=""
@@ -369,10 +408,12 @@ reconcile_completed_agents_to_mc() {
       completion_action=$(python3 "$COMPLETION_POLICY" "${policy_args[@]}" 2>/dev/null || echo wait)
       case "$completion_action" in
         closed)
-          pause_delivery "$task_id" "$mc_task_id" "$session" "pr_closed_without_replacement" "Required PR $pr_url was closed without merging; preserved work needs a replacement PR handoff"
+          claim_completion_action "$task_id" "$completed_state" "$completion_patch" || continue
+          pause_delivery "$task_id" "$mc_task_id" "$session" "pr_closed_without_replacement" "Required PR $pr_url was closed without merging; preserved work needs a replacement PR handoff" "$claimed_state"
           continue ;;
         merged)
-          pause_delivery "$task_id" "$mc_task_id" "$session" "merged_pr_delivery_unreconciled" "PR $pr_url was merged, but task delivery is not reconciled; verify outstanding acceptance criteria before resuming"
+          claim_completion_action "$task_id" "$completed_state" "$completion_patch" || continue
+          pause_delivery "$task_id" "$mc_task_id" "$session" "merged_pr_delivery_unreconciled" "PR $pr_url was merged, but task delivery is not reconciled; verify outstanding acceptance criteria before resuming" "$claimed_state"
           continue ;;
         wait|checkpoint)
           echo "[$TIMESTAMP] RECONCILE WAIT: $task_id — delivery evidence is unverified" >> "$LOG"
@@ -381,30 +422,32 @@ reconcile_completed_agents_to_mc() {
       if [ "$completion_action" = "resume" ]; then
         completion_retries=$(jq -r ".[] | select(.id == \"$task_id\") | .completionRetryCount // 0" "$REGISTRY" 2>/dev/null)
         if [ "$completion_retries" -ge 3 ]; then
-          pause_delivery "$task_id" "$mc_task_id" "$session" "completed_without_pr_retries_exhausted" "Agent repeatedly exited without the required PR; partial work remains preserved for manual redispatch"
+          claim_completion_action "$task_id" "$completed_state" "$completion_patch" || continue
+          pause_delivery "$task_id" "$mc_task_id" "$session" "completed_without_pr_retries_exhausted" "Agent repeatedly exited without the required PR; partial work remains preserved for manual redispatch" "$claimed_state"
           echo "[$TIMESTAMP] RECONCILE: $task_id — completion rejected (no PR); completion retries exhausted" >> "$LOG"
           continue
         fi
         completion_retries=$((completion_retries + 1))
-        state_update "$task_id" "{\"status\": \"running\", \"lastError\": \"completed_without_pr\", \"completionSyncedAt\": null, \"completionRetryCount\": $completion_retries}" "completion-missing-pr"
+        state_update "$task_id" "{\"status\": \"running\", \"deliveryPending\":false, \"lastError\": \"completed_without_pr\", \"completionSyncedAt\": null, \"completionRetryCount\": $completion_retries}" "completion-missing-pr" "$completed_state" || continue
         mc_post_activity "$mc_task_id" "updated" "Agent exited without the required PR; resuming from the preserved worktree (completion retry $completion_retries/3)"
         echo "[$TIMESTAMP] RECONCILE: $task_id — completion rejected (no PR); queued preserved worktree for retry $completion_retries/3" >> "$LOG"
         continue
       fi
 
-      if [ -n "$pr_url" ]; then
-        mc_add_deliverable "$mc_task_id" "Pull Request #${pr_num:-unknown}" "$pr_url"
-      fi
       if [ -n "$pr_url" ] && [ "$no_pr_mode" != "true" ]; then
         # A completed process has only handed off a PR. The shared CI/review
         # gate below owns readiness, even when its tmux session has exited.
-        state_update "$task_id" '{"status":"running","deliveryPending":true,"completionSyncedAt":null}' "completion-awaiting-gates"
+        # Release recovery execution ownership with that handoff; otherwise the
+        # running-loop deferral and bounded bridge would keep owning delivery.
+        claim_completion_action "$task_id" "$completed_state" "$completion_patch" || continue
+        mc_add_deliverable "$mc_task_id" "Pull Request #${pr_num:-unknown}" "$pr_url"
         continue
       fi
+      claim_completion_action "$task_id" "$completed_state" "$local_patch" || continue
       if mc_complete_task "$mc_task_id" "Agent completed with required deliverable; reconciled to review" "review" "$pr_url" "$no_pr_mode"; then
+        state_update "$task_id" "$ready_patch" "completion-reconcile-impl" "$local_state" || continue
         mc_post_activity "$mc_task_id" "updated" "Monitor reconciled completed agent to review (tmux session ended)"
         echo "[$TIMESTAMP] RECONCILE: $task_id — implementation completed_by_agent → review (deliverable verified)" >> "$LOG"
-        state_update "$task_id" "{\"status\": \"ready\", \"completionSyncedAt\": \"$TIMESTAMP\"}" "completion-reconcile-impl"
       else
         echo "[$TIMESTAMP] WARN: $task_id — failed to sync implementation completion to MC (will retry)" >> "$LOG"
       fi
@@ -950,9 +993,11 @@ echo "$RUNNING_IDS" | while read -r TASK_ID; do
   fi
 
   REVIEW_ONLY=$(jq -r ".[] | select(.id == \"$TASK_ID\") | (.reviewOnly == true or .agentEnv.MC_REVIEW_ONLY == \"1\")" "$REGISTRY" 2>/dev/null)
-  if [ "$REVIEW_ONLY" = "true" ]; then
+  REVIEW_RECOVERY=$(jq -r ".[] | select(.id == \"$TASK_ID\") | .changeRequestSource == \"review-recovery\"" "$REGISTRY" 2>/dev/null)
+  LOCAL_COMPLETION=$(jq -r ".[] | select(.id == \"$TASK_ID\") | .changeRequestSource == \"local-completion\"" "$REGISTRY" 2>/dev/null)
+  if [ "$REVIEW_ONLY" = "true" ] || [ "$REVIEW_RECOVERY" = "true" ] || [ "$LOCAL_COMPLETION" = "true" ]; then
     # Only the bridge's locked, fresh-state and bounded recovery may relaunch
-    # this worker. This monitor must not race Hold or replace its restricted prompt.
+    # this worker. Ownership is independent of its original execution authority.
     echo "[$TIMESTAMP] LOCAL REVIEW: $TASK_ID — deferring respawn and PR/CI automation to bounded bridge recovery" >> "$LOG"
     continue
   fi

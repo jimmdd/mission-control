@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
-import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { test } from 'node:test';
@@ -12,6 +12,8 @@ const helpers = source.slice(source.indexOf('check_pending_checkpoint() {'), sou
 const runningLoop = source.slice(source.indexOf('RUNNING_IDS='));
 const limitRetry = source.slice(source.indexOf('retry_rate_limited_agents() {'), source.indexOf('\nretry_rate_limited_agents\n'));
 const nonRunning = source.slice(source.indexOf('reconcile_non_running_sessions() {'), source.indexOf('prune_state_artifacts() {'));
+const stateUpdate = source.slice(source.indexOf('state_update() {'), source.indexOf('maybe_snapshot_state() {'))
+  .replace('state_update() {', 'guarded_state_update() {');
 const quote = (value) => `'${String(value).replaceAll("'", "'\\''")}'`;
 const pr = (state, number = 1) => ({ state, number, url: `https://github.com/acme/backend/pull/${number}` });
 
@@ -20,7 +22,8 @@ const pr = (state, number = 1) => ({ state, number, url: `https://github.com/acm
 function fixture(options = {}) {
   const dir = mkdtempSync(join(tmpdir(), 'mc-completion-'));
   try {
-    const registry = join(dir, 'registry.json'), scenario = join(dir, 'scenario.json');
+    mkdirSync(join(dir, 'swarm'));
+    const registry = join(dir, 'swarm', 'active-tasks.json'), scenario = join(dir, 'scenario.json');
     const calls = join(dir, 'calls.jsonl'), api = join(dir, 'api.py');
     const task = { id: 'task', mcTaskId: 'mc', status: 'completed_by_agent', repo: dir,
       worktree: dir, branch: 'feature/preserved', tmuxSession: 'fixture-agent', ...options.registry };
@@ -38,15 +41,15 @@ kind,args=sys.argv[4],sys.argv[5:]
 config=json.loads(scenario.read_text())
 with calls.open('a') as f: f.write(json.dumps([kind,*args])+'\\n')
 if kind=='state':
-    rows=json.loads(registry.read_text())
-    for row in rows:
-        if row['id']==args[0]: row.update(json.loads(args[1]))
-    registry.write_text(json.dumps(rows))
+    pass  # The real shell state_update and locked state helper apply the patch.
 elif kind=='api':
     method,path=args[:2]
     key='checkpoints' if path.endswith('/checkpoints') else 'activities' if path.endswith('/activities') else 'task'
     if method=='GET':
         if config.get(key+'Error'): sys.exit(1)
+        if key=='checkpoints' and config.get('concurrentCheckpointPatch'):
+            rows=json.loads(registry.read_text());rows[0].update(config.pop('concurrentCheckpointPatch'))
+            registry.write_text(json.dumps(rows));scenario.write_text(json.dumps(config))
         value=config.get(key)
         print(value if isinstance(value,str) else json.dumps(value))
     else:
@@ -61,26 +64,39 @@ elif kind=='gh':
     if config.get('ghError'): sys.exit(1)
     assert args[:2]==['pr','list'], args
     assert '--state' in args and args[args.index('--state')+1]=='all', args
+    if config.get('concurrentEntryPatch'):
+        rows=json.loads(registry.read_text())
+        rows[0].update(config['concurrentEntryPatch'])
+        registry.write_text(json.dumps(rows))
     value=config['prs']
     print(value if isinstance(value,str) else json.dumps(value))
 elif kind=='tmux':
     if args[0]!='has-session': sys.exit(2)
     sys.exit(0 if config.get('liveSession') or args[-1] in config.get('liveSessions',[]) else 1)
 elif kind=='gate':
-    print('{"status":"pending"}')
+    print(json.dumps({'status':config.get('gateStatus','pending')}))
+elif kind=='complete':
+    if config.get('concurrentCallbackPatch'):
+        rows=json.loads(registry.read_text());rows[0].update(config.pop('concurrentCallbackPatch'))
+        registry.write_text(json.dumps(rows));scenario.write_text(json.dumps(config))
+    if config.get('completeFailures',0)>0:
+        config['completeFailures']-=1;scenario.write_text(json.dumps(config));sys.exit(1)
 `);
     const call = `python3 ${quote(api)} ${quote(registry)} ${quote(scenario)} ${quote(calls)}`;
     const gate = join(dir, 'gate.py');
     writeFileSync(gate, `import subprocess\nsubprocess.run(['python3',${JSON.stringify(api)},${JSON.stringify(registry)},${JSON.stringify(scenario)},${JSON.stringify(calls)},'gate'],check=True)\n`);
     const setup = `
 REGISTRY=${quote(registry)}
+export MC_HOME=${quote(dir)}
+STATE_TOOL=${quote(join(swarm, 'swarm-state.py'))}
 SWARM_DIR=${quote(dir)}
 LOG=${quote(join(dir, 'log'))}
 TIMESTAMP=fixture
 COMPLETION_POLICY=${quote(join(swarm, 'completion_policy.py'))}
 READINESS_GATE=${quote(gate)}
 AGENT_LIMIT_RETRY_WINDOW_SECONDS=43200
-state_update(){ ${call} state "$@"; }
+${stateUpdate}
+state_update(){ ${call} state "$@"; guarded_state_update "$@"; }
 mc_curl(){ ${call} api "$@"; }
 gh(){ ${call} gh "$@"; }
 tmux(){ ${call} tmux "$@"; }
@@ -90,11 +106,16 @@ mc_post_activity(){ ${call} activity "$@"; }
 log_health_check(){ ${call} health "$@"; }
 build_agent_env_exports(){ ${call} launcher "$@"; }
 resolve_launcher_path(){ ${call} launcher "$@"; }
+validate_gsd_artifacts(){ ${call} gsd "$@"; GSD_STATUS=passed; }
+run_codex_review(){ ${call} review "$@"; CODEX_REVIEW=PASS; }
+review_has_blocking_issues(){ return 1; }
+extract_agent_summary(){ AGENT_SUMMARY=fixture; }
 ${helpers}
 `;
     const entry = options.mode === 'running' ? runningLoop : options.mode === 'non_running'
       ? `${nonRunning}\nreconcile_non_running_sessions` : options.mode === 'rate_limited'
-      ? `${limitRetry}\nretry_rate_limited_agents` : `reconcile_completed_agents_to_mc${options.repeat ? '\nreconcile_completed_agents_to_mc' : ''}`;
+      ? `${limitRetry}\nretry_rate_limited_agents` : options.mode === 'handoff'
+      ? `reconcile_completed_agents_to_mc\n${runningLoop}` : `reconcile_completed_agents_to_mc${options.repeat ? '\nreconcile_completed_agents_to_mc' : ''}`;
     execFileSync('bash', ['-c', `${setup}\n${entry}`], {encoding:'utf8', timeout:15_000});
     return { registry: JSON.parse(readFileSync(registry, 'utf8'))[0], config: JSON.parse(readFileSync(scenario, 'utf8')),
       calls: readFileSync(calls, 'utf8').trim().split('\n').filter(Boolean).map(JSON.parse),
@@ -130,7 +151,7 @@ test('an unmerged closed PR pauses delivery, preserves work, and is idempotent',
   assert.equal(result.config.task.status, 'on_hold');
   assert.equal(result.config.progress.state, 'waiting');
   assert.match(result.config.progress.blocked_reason, /replacement PR handoff/);
-  assert.equal(result.calls.filter(([kind]) => kind === 'state').length, 1);
+  assert.equal(result.calls.filter(([kind]) => kind === 'state').length, 2, 'claim and guarded pause are separate atomic transitions');
   assert.equal(result.config.activities.length, 1);
   assert.equal(result.config.activities[0].activity_type, 'updated');
   assert.match(result.config.activities[0].message, /parked delivery on hold/);
@@ -144,6 +165,114 @@ test('an open replacement wins over a historical closed or merged PR', () => {
   assert.ok(result.calls.some(([kind,,,url]) => kind === 'deliverable' && url === pr('OPEN',3).url));
   assert.ok(!result.calls.some(([kind]) => kind === 'complete'));
   assert.equal(result.config.task.status, 'in_progress');
+});
+
+for (const gateStatus of ['pending','pass']) {
+  test(`completed recovery releases execution ownership and uses ordinary readiness: ${gateStatus}`, () => {
+    const result = fixture({mode:'handoff', gateStatus, registry:{changeRequestSource:'review-recovery'}});
+    assert.equal(result.registry.changeRequestSource, 'delivery');
+    assert.equal(result.registry.status, gateStatus === 'pass' ? 'ready' : 'running');
+    assert.equal(result.registry.deliveryPending, gateStatus !== 'pass');
+    assert.equal(result.calls.filter(([kind]) => kind === 'gate').length, gateStatus === 'pass' ? 2 : 1);
+    assert.equal(result.calls.filter(([kind]) => kind === 'complete').length, gateStatus === 'pass' ? 1 : 0);
+    assert.equal(result.calls.filter(([kind]) => kind === 'gsd').length, gateStatus === 'pass' ? 1 : 0);
+    assert.equal(result.calls.filter(([kind]) => kind === 'review').length, gateStatus === 'pass' ? 1 : 0);
+    assert.ok(!result.calls.some(([kind]) => kind === 'launcher'));
+    assert.ok(!result.calls.some(([kind, action]) => kind === 'tmux' && action !== 'has-session'));
+    assert.equal(result.registry.reviewOnly, undefined);
+    assert.equal(result.registry.noPrMode, undefined);
+  });
+}
+
+test('env-only no-PR completion stays local even when the branch already has a PR', () => {
+  const result = fixture({registry:{noPrMode:false, changeRequestSource:'review-recovery', agentEnv:{MC_NO_PR_MODE:'1'}}});
+  assert.equal(result.registry.status, 'ready');
+  assert.ok(!result.calls.some(([kind]) => ['gh','deliverable','gate','launcher'].includes(kind)));
+  const completion = result.calls.find(([kind]) => kind === 'complete');
+  assert.ok(completion);
+  assert.equal(completion.at(-1), 'true');
+  assert.equal(completion.at(-2), '');
+});
+
+for (const concurrentEntryPatch of [
+  {status:'running', changeRequestSource:'review-recovery', runStartedAt:2, deliveryPending:false},
+  {status:'completed_by_agent', changeRequestSource:'review-recovery', runStartedAt:2},
+  {status:'paused', heldAt:'new-hold'},
+  {reviewOnly:true, noPrMode:true, agentEnv:{MC_REVIEW_ONLY:'1'}},
+  {agentEnv:{MC_NO_PR_MODE:'1'}},
+]) {
+  test(`a newer execution or authority boundary defeats stale recovery completion: ${JSON.stringify(concurrentEntryPatch)}`, () => {
+    const result = fixture({mode:'handoff', gateStatus:'pass',
+      registry:{changeRequestSource:'review-recovery',runStartedAt:1}, concurrentEntryPatch});
+    for (const [key,value] of Object.entries(concurrentEntryPatch)) {
+      assert.deepEqual(result.registry[key], value);
+    }
+    assert.notEqual(result.registry.changeRequestSource, 'delivery');
+    assert.notEqual(result.registry.deliveryPending, true);
+    assert.ok(!result.calls.some(([kind]) => ['gate','complete','launcher','deliverable','activity'].includes(kind)));
+    assert.match(result.log, /completed execution changed before delivery handoff/);
+  });
+}
+
+for (const prs of [[pr('CLOSED')],[pr('MERGED')],[]]) {
+  for (const completionRetryCount of [0,3]) {
+    test(`a newer recovery defeats stale ${prs[0]?.state ?? 'missing'} PR completion at retry ${completionRetryCount}`, () => {
+      const result = fixture({prs, registry:{changeRequestSource:'review-recovery',runStartedAt:1,completionRetryCount},
+        concurrentEntryPatch:{status:'running',changeRequestSource:'review-recovery',runStartedAt:2}});
+      assert.equal(result.registry.status, 'running');
+      assert.equal(result.registry.runStartedAt, 2);
+      assert.equal(result.registry.completionRetryCount, completionRetryCount);
+      assert.ok(!result.calls.some(([kind]) => ['complete','deliverable','activity','launcher'].includes(kind)));
+      assert.ok(result.calls.filter(([kind]) => kind === 'api').every(([,method]) => method === 'GET'));
+      assert.equal(result.config.task.status, 'in_progress');
+    });
+  }
+}
+
+for (const scope of [
+  {registry:{noPrMode:true}},
+  {registry:{agentEnv:{MC_NO_PR_MODE:'1'}}},
+  {task:{status:'in_progress',task_type:'investigation'}},
+]) {
+  for (const concurrentCheckpointPatch of [
+    {status:'running',changeRequestSource:'review-recovery',runStartedAt:2},
+    {status:'paused',heldAt:'new-hold'},
+    {noPrMode:false,agentEnv:{MC_NO_PR_MODE:'0'}},
+  ]) {
+    test(`local completion rejects a newer execution or scope: ${JSON.stringify({scope,concurrentCheckpointPatch})}`, () => {
+      const registry={changeRequestSource:'review-recovery',runStartedAt:1,...scope.registry};
+      // A no-op flag patch is not a competing decision for investigation tasks.
+      if (scope.task && concurrentCheckpointPatch.noPrMode === false) registry.noPrMode=true;
+      const result=fixture({...scope,registry,concurrentCheckpointPatch});
+      for (const [key,value] of Object.entries(concurrentCheckpointPatch)) assert.deepEqual(result.registry[key],value);
+      assert.notEqual(result.registry.status,'ready');
+      assert.ok(!result.calls.some(([kind]) => ['complete','deliverable','activity','launcher'].includes(kind)));
+      assert.ok(result.calls.filter(([kind]) => kind === 'api').every(([,method]) => method === 'GET'));
+    });
+  }
+}
+
+test('failed local completion remains resumable without agent respawn and preserves human follow-up ownership', () => {
+  const result=fixture({mode:'handoff',completeFailures:1,registry:{noPrMode:true,changeRequestSource:'dashboard'}});
+  assert.equal(result.registry.status,'running');
+  assert.equal(result.registry.changeRequestSource,'local-completion');
+  assert.equal(result.registry.completionOriginSource,'dashboard');
+  assert.equal(result.registry.deliveryPending,true);
+  assert.ok(!result.calls.some(([kind]) => ['gate','launcher'].includes(kind)));
+  const resumed=fixture({repeat:true,completeFailures:1,registry:{noPrMode:true,changeRequestSource:'dashboard'}});
+  assert.equal(resumed.calls.filter(([kind]) => kind === 'complete').length,2);
+  assert.equal(resumed.registry.status,'ready');
+  assert.equal(resumed.registry.changeRequestSource,'dashboard');
+  assert.equal(resumed.registry.deliveryPending,false);
+});
+
+test('a newer owner during local completion cannot be overwritten by the final ready transition', () => {
+  const concurrentCallbackPatch={status:'paused',heldAt:'new-hold'};
+  const result=fixture({registry:{noPrMode:true,changeRequestSource:'review-recovery'},concurrentCallbackPatch});
+  assert.equal(result.calls.filter(([kind]) => kind === 'complete').length,1);
+  assert.equal(result.registry.status,'paused');
+  assert.equal(result.registry.heldAt,'new-hold');
+  assert.ok(!result.calls.some(([kind]) => kind === 'activity'));
 });
 
 test('a stale completion sync marker cannot hide a closed PR on an active ticket', () => {
@@ -254,9 +383,10 @@ test('rate-limit retry cannot relaunch an agent with an unanswered checkpoint', 
 
 test('failed blocker bookkeeping stays retryable without promoting completion', () => {
   for (const writeError of ['PUT','POST','PATCH']) {
-    const result = fixture({prs:[pr('CLOSED')],writeError,repeat:true});
-    assert.equal(result.registry.status, 'completed_by_agent');
-    assert.ok(!result.calls.some(([kind]) => kind === 'state'));
+    const result = fixture({mode:'handoff',prs:[pr('CLOSED')],writeError});
+    assert.equal(result.registry.status, 'running');
+    assert.equal(result.registry.deliveryPending, true, 'the monitor retains delivery ownership for a later retry');
+    assert.equal(result.calls.filter(([kind]) => kind === 'state').length,1);
     if (writeError === 'PATCH') {
       assert.equal(result.config.activities.length, 1, 'retry must reuse the same local hold marker');
     }
@@ -266,9 +396,10 @@ test('failed blocker bookkeeping stays retryable without promoting completion', 
 
 test('an unreadable local hold marker list cannot silently advance delivery bookkeeping', () => {
   for (const scenario of [{activitiesError:true},{activities:{}}]) {
-    const result = fixture({prs:[pr('CLOSED')],...scenario});
-    assert.equal(result.registry.status, 'completed_by_agent');
-    assert.ok(!result.calls.some(([kind]) => kind === 'state'));
+    const result = fixture({mode:'handoff',prs:[pr('CLOSED')],...scenario});
+    assert.equal(result.registry.status, 'running');
+    assert.equal(result.registry.deliveryPending, true);
+    assert.equal(result.calls.filter(([kind]) => kind === 'state').length,1);
     assert.ok(!result.calls.some(([kind,method]) => kind === 'api' && ['PATCH','POST'].includes(method)));
     assertNoCompletionOrLaunch(result);
   }

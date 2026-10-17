@@ -121,6 +121,10 @@ def cmd_update(args: argparse.Namespace) -> int:
     events = Path(args.events)
     patch = json.loads(args.patch_json)
     task_id = args.task_id
+    expected = json.loads(args.expected_json) if getattr(args, "expected_json", None) else None
+    if expected is not None and not isinstance(expected, dict):
+        print("expected_json must be an object", file=sys.stderr)
+        return 2
 
     fd = _with_lock(lock)
     try:
@@ -134,6 +138,13 @@ def cmd_update(args: argparse.Namespace) -> int:
         if getattr(args, "attempt_id", None) and target.get("launchAttemptId") != args.attempt_id:
             print("launch attempt has changed", file=sys.stderr)
             return 1
+        for key, value in (expected or {}).items():
+            current = target
+            for part in key.split("."):
+                current = current.get(part) if isinstance(current, dict) else None
+            if current != value:
+                print("task state has changed", file=sys.stderr)
+                return 1
         target.update(patch)
         _atomic_write_json(registry, tasks)
         _append_event(
@@ -265,6 +276,7 @@ def build_parser() -> argparse.ArgumentParser:
     update.add_argument("--patch-json", required=True)
     update.add_argument("--reason", default="")
     update.add_argument("--attempt-id", default="")
+    update.add_argument("--expected-json", default="", help="Expected registry field values, including dotted paths")
     update.set_defaults(func=cmd_update)
 
     remove = sub.add_parser("remove")
