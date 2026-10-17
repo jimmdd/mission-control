@@ -833,11 +833,6 @@ run_codex_review() {
   local pr_num="$3"
   local review_log="$SWARM_DIR/logs/codex-review-${pr_num}.log"
 
-  if ! command -v codex &> /dev/null; then
-    echo "Codex CLI not found, skipping review" >> "$LOG"
-    return 1
-  fi
-
   echo "[$TIMESTAMP] Running Codex review on PR #$pr_num..." >> "$LOG"
 
   local base_name base_branch
@@ -857,14 +852,9 @@ run_codex_review() {
   review_output=$(bash "$SCRIPT_DIR/pre-review.sh" "$review_dir" "$base_branch" 2>&1) || review_rc=$?
   echo "$review_output" > "$review_log"
   CODEX_REVIEW="$review_output"
-  if [ "$review_rc" -eq 2 ]; then
-    echo "[$TIMESTAMP] Codex review unavailable for PR #$pr_num" >> "$LOG"
-    return 1
-  fi
-  if [ "$review_rc" -ne 0 ]; then
-    CODEX_REVIEW+=$'\nVERDICT: FAIL — review gate did not pass'
-  fi
-  return 0
+  # Keep typed WARN/lease/unavailable exits intact. The bounded bridge owns
+  # their next action; they are never synthetic code findings.
+  return "$review_rc"
 }
 
 review_has_blocking_issues() {
@@ -980,8 +970,9 @@ echo "$RUNNING_IDS" | while read -r TASK_ID; do
 
   REVIEW_ONLY=$(jq -r ".[] | select(.id == \"$TASK_ID\") | (.reviewOnly == true or .agentEnv.MC_REVIEW_ONLY == \"1\")" "$REGISTRY" 2>/dev/null)
   REVIEW_RECOVERY=$(jq -r ".[] | select(.id == \"$TASK_ID\") | .changeRequestSource == \"review-recovery\"" "$REGISTRY" 2>/dev/null)
+  DELIVERY_RECOVERY=$(jq -r ".[] | select(.id == \"$TASK_ID\") | (.changeRequestSource == \"delivery-review\" or .changeRequestSource == \"delivery-feedback\")" "$REGISTRY" 2>/dev/null)
   LOCAL_COMPLETION=$(jq -r ".[] | select(.id == \"$TASK_ID\") | .changeRequestSource == \"local-completion\"" "$REGISTRY" 2>/dev/null)
-  if [ "$REVIEW_ONLY" = "true" ] || [ "$REVIEW_RECOVERY" = "true" ] || [ "$LOCAL_COMPLETION" = "true" ]; then
+  if [ "$REVIEW_ONLY" = "true" ] || [ "$REVIEW_RECOVERY" = "true" ] || [ "$LOCAL_COMPLETION" = "true" ] || [ "$DELIVERY_RECOVERY" = "true" ]; then
     # Only the bridge's locked, fresh-state and bounded recovery may relaunch
     # this worker. Ownership is independent of its original execution authority.
     echo "[$TIMESTAMP] LOCAL REVIEW: $TASK_ID — deferring respawn and PR/CI automation to bounded bridge recovery" >> "$LOG"
@@ -1032,7 +1023,9 @@ echo "$RUNNING_IDS" | while read -r TASK_ID; do
   fi
 
   NO_PR_MODE=$(jq -r ".[] | select(.id == \"$TASK_ID\") | (.noPrMode == true or .agentEnv.MC_NO_PR_MODE == \"1\")" "$REGISTRY")
-  if [ "$NO_PR_MODE" = "true" ]; then
+  TASK_NO_PR=$(printf '%s' "${MC_TASK_JSON:-null}" | jq -r '
+    (.triage_state // {}) | (if type == "string" then fromjson else . end) | .no_pr == true' 2>/dev/null) || continue
+  if [ "$NO_PR_MODE" = "true" ] || [ "$TASK_NO_PR" = "true" ]; then
     echo "[$TIMESTAMP] LOCAL WORK: $TASK_ID — no-PR scope defers PR/CI delivery automation" >> "$LOG"
     continue
   fi
@@ -1092,41 +1085,15 @@ echo "$RUNNING_IDS" | while read -r TASK_ID; do
     echo "[$TIMESTAMP] DELIVERY WAIT: $TASK_ID — $READINESS" >> "$LOG"
     continue
   fi
-  if [ "$GATE_STATUS" = "review_blocked" ]; then
-    REVIEW_CYCLES=$(jq -r ".[] | select(.id == \"$TASK_ID\") | .reviewCycles // 0" "$REGISTRY")
-    if [ "$REVIEW_CYCLES" -lt "$MAX_REVIEW_CYCLES" ]; then
-      relaunch_agent_with_review "$TASK_ID" "$WORKTREE" "Read $PR_URL review feedback, fix all actionable findings, resolve addressed threads, rerun local checks and pre-review, then push and await CI." "$((REVIEW_CYCLES + 1))"
-    else
-      state_update "$TASK_ID" '{"status":"failed","lastError":"unresolved_pr_reviews"}' "review-gate-blocked"
-      [ -n "$MC_TASK_ID" ] && mc_post_activity "$MC_TASK_ID" "needs_human" "PR review findings remain unresolved; delivery is blocked, not complete"
-    fi
-    continue
-  fi
-
-  if [ "$FAILED_CHECKS" -gt 0 ]; then
-    CI_FIX_CYCLES=$(jq -r ".[] | select(.id == \"$TASK_ID\") | .ciFixCycles // 0" "$REGISTRY" 2>/dev/null)
-    echo "[$TIMESTAMP] CI FAIL: $TASK_ID — PR #$PR_NUM has $FAILED_CHECKS failing checks (fix cycle $CI_FIX_CYCLES/$MAX_CI_FIX_CYCLES)" >> "$LOG"
-
-    if [ "$CFG_CI_FIX_ENABLED" != "true" ]; then
-      echo "[$TIMESTAMP] CI-FIX: $TASK_ID — auto-fix disabled in config, skipping" >> "$LOG"
-      [ -n "$MC_TASK_ID" ] && mc_post_activity "$MC_TASK_ID" "updated" "PR #$PR_NUM has $FAILED_CHECKS failing CI checks (auto-fix disabled)"
-      continue
-    fi
-
-    if [ "$CI_FIX_CYCLES" -lt "$MAX_CI_FIX_CYCLES" ]; then
-      NEXT_FIX_CYCLE=$((CI_FIX_CYCLES + 1))
-
-      if extract_ci_failures "$REPO" "$PR_NUM"; then
-        echo "[$TIMESTAMP] CI-FIX: $TASK_ID — extracting failures and relaunching agent (cycle $NEXT_FIX_CYCLE/$MAX_CI_FIX_CYCLES)" >> "$LOG"
-        [ -n "$MC_TASK_ID" ] && mc_post_activity "$MC_TASK_ID" "updated" "CI failing — auto-fixing (cycle $NEXT_FIX_CYCLE/$MAX_CI_FIX_CYCLES)"
-        relaunch_agent_for_ci_fix "$TASK_ID" "$WORKTREE" "$CI_FAILURE_DETAILS" "$NEXT_FIX_CYCLE"
-      else
-        echo "[$TIMESTAMP] CI-FIX: $TASK_ID — could not extract CI failure details, waiting" >> "$LOG"
-        [ -n "$MC_TASK_ID" ] && mc_post_activity "$MC_TASK_ID" "updated" "PR #$PR_NUM has $FAILED_CHECKS failing CI checks — could not extract details"
-      fi
-    else
-      echo "[$TIMESTAMP] CI-FIX: $TASK_ID — exhausted $MAX_CI_FIX_CYCLES CI fix cycles, needs manual intervention" >> "$LOG"
-      [ -n "$MC_TASK_ID" ] && mc_post_activity "$MC_TASK_ID" "updated" "CI still failing after $MAX_CI_FIX_CYCLES auto-fix cycles — manual intervention needed"
+  if [ "$GATE_STATUS" = "review_blocked" ] || [ "$FAILED_CHECKS" -gt 0 ]; then
+    if [ "$GATE_STATUS" = "review_blocked" ] || [ "$CFG_CI_FIX_ENABLED" = "true" ]; then
+      FEEDBACK=$(printf '%s' "$READINESS" | jq -ce --arg kind "$GATE_STATUS" '
+        select((.head | type == "string" and length > 0) and (.base | type == "string" and length > 0) and
+               (.baseRefName | type == "string" and length > 0)) |
+        {status:"running",deliveryPending:true,changeRequestSource:"delivery-feedback",
+         deliveryFeedback:{head,base,baseRef:("refs/remotes/origin/" + .baseRefName),kind:$kind}}') || continue
+      state_update "$TASK_ID" "$FEEDBACK" "delivery-feedback" "$DELIVERY_STATE" || continue
+      echo "[$TIMESTAMP] DELIVERY FEEDBACK: $TASK_ID — $GATE_STATUS queued for the locked bridge owner" >> "$LOG"
     fi
     continue
   fi
@@ -1151,29 +1118,16 @@ echo "$RUNNING_IDS" | while read -r TASK_ID; do
   REVIEW_CYCLES=$(jq -r ".[] | select(.id == \"$TASK_ID\") | .reviewCycles // 0" "$REGISTRY" 2>/dev/null)
 
   CODEX_REVIEW=""
-  if run_codex_review "$REPO" "$BRANCH" "$PR_NUM"; then
-    echo "[$TIMESTAMP] REVIEWED: $TASK_ID — Codex review complete for PR #$PR_NUM (cycle $REVIEW_CYCLES)" >> "$LOG"
-    if [ -n "$MC_TASK_ID" ]; then
-      review_summary=$(echo "$CODEX_REVIEW" | head -c 500)
-      mc_post_activity "$MC_TASK_ID" "updated" "Codex review cycle $REVIEW_CYCLES ($CODEX_EFFORT): $review_summary"
+  REVIEW_RC=0
+  run_codex_review "$REPO" "$BRANCH" "$PR_NUM" || REVIEW_RC=$?
+  if [ "$REVIEW_RC" -ne 0 ] || review_has_blocking_issues "$CODEX_REVIEW"; then
+    if [ "$REVIEW_RC" -ne 3 ]; then
+      # The retained typed outcome is already keyed to this exact worktree.
+      # CAS relinquishes delivery only when the observed execution still owns it.
+      state_update "$TASK_ID" '{"status":"running","deliveryPending":true,"changeRequestSource":"delivery-review"}' \
+        "delivery-review-recovery" "$DELIVERY_STATE" || continue
     fi
-
-    if review_has_blocking_issues "$CODEX_REVIEW" && [ "$REVIEW_CYCLES" -lt "$MAX_REVIEW_CYCLES" ]; then
-      NEXT_CYCLE=$((REVIEW_CYCLES + 1))
-      echo "[$TIMESTAMP] BLOCKING ISSUES: $TASK_ID — sending back to agent (cycle $NEXT_CYCLE/$MAX_REVIEW_CYCLES)" >> "$LOG"
-      [ -n "$MC_TASK_ID" ] && mc_post_activity "$MC_TASK_ID" "updated" "Review found blocking issues — relaunching agent for iteration $NEXT_CYCLE/$MAX_REVIEW_CYCLES"
-      relaunch_agent_with_review "$TASK_ID" "$WORKTREE" "$CODEX_REVIEW" "$NEXT_CYCLE"
-      continue
-    fi
-
-    if review_has_blocking_issues "$CODEX_REVIEW"; then
-      echo "[$TIMESTAMP] MAX REVIEW CYCLES: $TASK_ID — still has issues after $MAX_REVIEW_CYCLES cycles, delivery remains blocked" >> "$LOG"
-      [ -n "$MC_TASK_ID" ] && mc_post_activity "$MC_TASK_ID" "needs_human" "Review still has issues after $MAX_REVIEW_CYCLES cycles — delivery blocked; manual review needed"
-      state_update "$TASK_ID" '{"status":"failed","lastError":"review_gate_failed"}' "review-gate-failed"
-      continue
-    fi
-  else
-    echo "[$TIMESTAMP] REVIEW UNAVAILABLE: $TASK_ID — keeping delivery pending" >> "$LOG"
+    echo "[$TIMESTAMP] REVIEW PENDING: $TASK_ID — exit $REVIEW_RC; retained typed outcome belongs to the bounded bridge" >> "$LOG"
     continue
   fi
 

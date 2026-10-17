@@ -182,3 +182,37 @@ run_codex_review ${JSON.stringify(checkout)} feature/handoff 1
     assert.equal(readFileSync(captured,'utf8'),'refs/remotes/origin/release/test');
   } finally {rmSync(dir,{recursive:true,force:true});}
 });
+
+test('the actual monitor review wrapper preserves WARN and busy-lease exit codes', async () => {
+  const { mkdtempSync, mkdirSync, readFileSync, writeFileSync, rmSync } = await import('node:fs');
+  const { tmpdir } = await import('node:os');
+  const { join } = await import('node:path');
+  const dir=mkdtempSync(join(tmpdir(),'mc-review-wrapper-'));
+  try {
+    mkdirSync(join(dir,'logs'));
+    const source=readFileSync(join(swarm,'check-agents.sh'),'utf8');
+    const wrapper=source.slice(source.indexOf('run_codex_review() {'),source.indexOf('review_has_blocking_issues() {'));
+    writeFileSync(join(dir,'registry.json'),JSON.stringify([{id:'task',worktree:dir}]));
+    for (const code of [1,2,3]) {
+      writeFileSync(join(dir,'pre-review.sh'),`echo 'VERDICT: WARN'\necho 'REVIEW_REASON: authorization'\nexit ${code}\n`);
+      const output=execFileSync('bash',['-c',`
+SWARM_DIR=${JSON.stringify(dir)}
+SCRIPT_DIR=${JSON.stringify(dir)}
+REGISTRY=${JSON.stringify(join(dir,'registry.json'))}
+TASK_ID=task
+LOG=${JSON.stringify(join(dir,'log'))}
+TIMESTAMP=fixture
+READINESS='{"head":"head","base":"base","baseRefName":"main"}'
+codex(){ :; }
+git(){ if [ "$4" = HEAD ]; then echo head; elif [ "$3" = rev-parse ]; then echo base; else return 0; fi; }
+${wrapper}
+rc=0
+run_codex_review fixture feature 1 || rc=$?
+printf 'EXIT=%s\\n%s' "$rc" "$CODEX_REVIEW"
+`],{encoding:'utf8'});
+      assert.match(output,new RegExp(`EXIT=${code}`));
+      assert.match(output,/REVIEW_REASON: authorization/);
+      assert.doesNotMatch(output,/VERDICT: FAIL/);
+    }
+  } finally {rmSync(dir,{recursive:true,force:true});}
+});

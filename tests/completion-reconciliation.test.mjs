@@ -118,8 +118,8 @@ log_health_check(){ ${call} health "$@"; }
 build_agent_env_exports(){ ${call} launcher "$@"; }
 resolve_launcher_path(){ ${call} launcher "$@"; }
 validate_gsd_artifacts(){ ${call} gsd "$@"; GSD_STATUS=passed; }
-run_codex_review(){ ${call} review "$@"; CODEX_REVIEW=PASS; }
-review_has_blocking_issues(){ return 1; }
+run_codex_review(){ ${call} review "$@"; CODEX_REVIEW=${quote(options.reviewText ?? "PASS")}; return ${options.reviewExit ?? 0}; }
+review_has_blocking_issues(){ return ${options.reviewText?.match(/FAIL|WARN/) ? 0 : 1}; }
 extract_agent_summary(){ AGENT_SUMMARY=fixture; }
 ${helpers}
 `;
@@ -452,3 +452,32 @@ for (const stage of ['concurrentReviewPatch','concurrentCallbackPatch']) {
     else assert.equal(result.calls.filter(([kind]) => kind==='complete').length,1);
   });
 }
+
+for (const review of [
+  {reviewExit:1,reviewText:'VERDICT: FAIL'},
+  {reviewExit:1,reviewText:'VERDICT: WARN\nREVIEW_REASON: authorization'},
+  {reviewExit:3,reviewText:'Review already running'},
+]) {
+  test(`non-PASS delivery never launches an unguarded repair: ${JSON.stringify(review)}`, () => {
+    const result=fixture({mode:'handoff',gateStatus:'pass',...review});
+    assert.ok(!result.calls.some(([kind]) => ['complete','launcher'].includes(kind)));
+    assert.ok(!result.calls.some(([kind,action]) => kind==='tmux' && action!=='has-session'));
+    assert.equal(result.registry.deliveryPending,true);
+    assert.equal(result.registry.status,'running');
+    if (review.reviewExit===3) assert.notEqual(result.registry.changeRequestSource,'delivery-review');
+    else assert.equal(result.registry.changeRequestSource,'delivery-review');
+  });
+}
+
+test('a FAIL arriving after a new human launch cannot queue or replace its owner', () => {
+  const newer={status:'running',runStartedAt:2,changeRequestSource:'dashboard',deliveryPending:false};
+  const result=fixture({mode:'handoff',gateStatus:'pass',reviewExit:1,reviewText:'VERDICT: FAIL',concurrentReviewPatch:newer});
+  for (const [key,value] of Object.entries(newer)) assert.deepEqual(result.registry[key],value);
+  assert.ok(!result.calls.some(([kind]) => ['complete','launcher'].includes(kind)));
+});
+
+test('a fresh task no-PR decision blocks active delivery before registry propagation', () => {
+  const result=fixture({mode:'running',registry:{status:'running',deliveryPending:true},task:{status:'in_progress',triage_state:{no_pr:true}},gateStatus:'pass'});
+  assert.ok(!result.calls.some(([kind]) => ['gh','gate','review','complete','launcher'].includes(kind)));
+  assert.equal(result.registry.status,'running');
+});

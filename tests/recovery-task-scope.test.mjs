@@ -443,3 +443,34 @@ assert not bridge._relaunch_for_change_request(task,'Push a PR fix',source='auto
     assert.ok(!result.calls.some(([kind]) => kind==='command'));
   });
 }
+
+test('fresh task restrictions also stop bridge title writes and automatic PR repairs', () => {
+  const result=scenario({},`
+task['triage_state']['no_pr']=True
+bridge._ensure_pr_title=lambda *a: (_ for _ in ()).throw(AssertionError('title write'))
+bridge._capture_pr_for_task(task)
+assert not bridge._auto_review_monitor(task)`);
+  assert.equal(result.workers.length,0);
+  assert.ok(!result.calls.some(([kind]) => kind==='command'));
+});
+
+for (const kind of ['ci_failed','review_blocked']) {
+  test(`delivery feedback resumes through the bounded bridge owner: ${kind}`, () => {
+    const result=recoveryOutcome({entry:{status:'running',changeRequestSource:'delivery-feedback',deliveryPending:true,
+      deliveryFeedback:{head:'head947',base:'base947',baseRef:'origin/master',kind}}});
+    assert.equal(result.launches.length,1);
+    assert.equal(result.launches[0].source,'auto-monitor');
+    assert.match(result.launches[0].prompt,/original task authority/);
+    assert.equal(result.saved.deliveryFeedback.attempts,1);
+    assert.ok(result.api.every(([method]) => method==='GET'));
+  });
+}
+
+test('delivery review recovery honors typed authorization stops and bounded technical gaps', () => {
+  const entry={status:'running',changeRequestSource:'delivery-review',deliveryPending:true};
+  const human=recoveryOutcome({entry,outcome:{humanRequired:true,nextAction:'request_specific_decision'}});
+  const local=recoveryOutcome({entry,outcome:{nextAction:'complete_local_qa'}});
+  assert.equal(human.launches.length,0);
+  assert.equal(local.launches.length,1);
+  assert.equal(local.launches[0].source,'review-recovery');
+});

@@ -7588,13 +7588,19 @@ def _apply_change_request(task: dict, change_requests_text: str, source: str = "
         if (source == "review-recovery" and entry.get("changeRequestSource") == "review-recovery"
                 and entry.get("status") == "running"):
             eligible = True  # Lost local worker; retained outcome and retry budget own recovery.
+        if entry.get("status") == "running" and entry.get("changeRequestSource") in (
+                "delivery-review", "delivery-feedback"):
+            eligible = True  # The monitor queued work; the shared lock owns launch.
         if (not current or current.get("status") not in ("in_progress", "testing", "review")
                 or _has_pending_checkpoint(task_id)
                 or not eligible
                 or _tmux_session_alive(entry.get("tmuxSession", ""))):
             return False
-        if source == "auto-monitor" and _pr_delivery_disabled(entry):
+        if source == "auto-monitor" and (_pr_delivery_disabled(entry) or _pr_is_disabled(current)):
             return False
+        if source == "auto-monitor" and (entry.get("status") == "completed_by_agent"
+                or entry.get("changeRequestSource") in ("review-recovery", "local-completion", "delivery-review")):
+            return False  # Completion/typed review must finish its owned handoff first.
         # The guarded read owns current scope, including revocations and NO-PR
         # decisions made after the caller inspected the retained review.
         task = current
@@ -7754,6 +7760,10 @@ missing permission or product decision, not merely to complete missing local pro
                 e["runStartedAt"] = int(datetime.now(timezone.utc).timestamp() * 1000)
                 e.pop("completionSyncedAt", None)
                 e.pop("completionOriginSource", None)
+                feedback = e.get("deliveryFeedback")
+                if isinstance(feedback, dict):
+                    e["deliveryRecovery"] = {key: feedback.get(key) for key in ("head", "base", "attempts")}
+                e.pop("deliveryFeedback", None)
                 # Clear the stale heartbeat from the prior run — otherwise the reaper
                 # measures heartbeat age across the relaunch and falsely flags the new
                 # agent as "stalled/blocked" during its startup gap (a fresh spawn has
@@ -7801,6 +7811,8 @@ def process_local_review_recovery():
                 task_id = task["id"]
                 entry = _find_agent_registry_entry(task_id) or {}
                 eligible = entry.get("status") in ("completed_by_agent", "ready", "failed")
+                if entry.get("changeRequestSource") in ("delivery-review", "delivery-feedback") and entry.get("status") == "running":
+                    eligible = True
                 if (entry.get("changeRequestSource") == "review-recovery"
                         and entry.get("status") == "running"):
                     eligible = True
@@ -7810,6 +7822,39 @@ def process_local_review_recovery():
                     continue
                 worktree = entry.get("worktree")
                 if not worktree:
+                    continue
+                feedback = entry.get("deliveryFeedback")
+                if entry.get("changeRequestSource") == "delivery-feedback":
+                    if not isinstance(feedback, dict) or feedback.get("kind") not in ("ci_failed", "review_blocked"):
+                        continue
+                    try:
+                        state = snapshot(worktree, feedback["baseRef"])
+                    except (OSError, ValueError, KeyError, subprocess.SubprocessError):
+                        continue
+                    if not state["clean"] or any(state[key] != feedback.get(key) for key in ("head", "base")):
+                        continue
+                    attempts = int(feedback.get("attempts", 0))
+                    previous = entry.get("deliveryRecovery") or {}
+                    if all(previous.get(key) == state[key] for key in ("head", "base")):
+                        attempts = max(attempts, int(previous.get("attempts", 0)))
+                    if attempts >= 2:
+                        mc_set_progress(task_id, state="blocked", phase="review",
+                            blocked_reason="Bounded delivery recovery exhausted; inspect retained CI/review failures without skipping gates.")
+                        continue
+                    current = mc_request("GET", f"/api/tasks/{task_id}")
+                    if not current or _pr_is_disabled(current) or _has_pending_checkpoint(task_id):
+                        continue
+                    saved = subprocess.run([sys.executable, str(SWARM_DIR / "swarm-state.py"), "update",
+                        "--task-id", entry["id"], "--patch-json", json.dumps({"deliveryFeedback": {**feedback, "attempts": attempts + 1}}),
+                        "--expected-json", json.dumps(entry), "--reason", "delivery-feedback-attempt"],
+                        capture_output=True, text=True, timeout=30)
+                    if saved.returncode != 0:
+                        continue
+                    _relaunch_for_change_request(current,
+                        f"Delivery at head {state['head']} / base {state['base']} is blocked by {feedback['kind']}. "
+                        "Inspect the existing PR, fix its actionable CI/review failures, run required local checks and reviews, "
+                        "then update that same draft only within the original task authority. Do not waive any permission or release gate.",
+                        source="auto-monitor")
                     continue
                 key = hashlib.sha256(str(Path(worktree).resolve()).encode()).hexdigest()[:24]
                 outcome_path = SWARM_DIR / "pr-review-state/runs" / key / "latest.json"
@@ -8051,7 +8096,7 @@ def _capture_pr_for_task(task: dict):
     The agent runs `gh pr create` in its worktree but nothing pulls the URL back —
     look it up by the task's branch and store it as a 'pr' deliverable."""
     task_id = task["id"]
-    if _pr_delivery_disabled(_find_agent_registry_entry(task_id) or {}):
+    if _pr_is_disabled(task) or _pr_delivery_disabled(_find_agent_registry_entry(task_id) or {}):
         return  # Capture also enforces PR titles; local verification cannot edit them.
     try:
         delivs = mc_request("GET", f"/api/tasks/{task_id}/deliverables") or []
@@ -8404,6 +8449,8 @@ def _auto_review_monitor(task: dict) -> bool:
         return False
     if task.get("task_type", "implementation") != "implementation":
         return False
+    if _pr_is_disabled(task):
+        return False
     task_id = task["id"]
     if _review_runtime_busy(task_id):
         return False
@@ -8520,7 +8567,7 @@ def process_review_tasks():
             title = task["title"]
             task_type = task.get("task_type", "implementation")
 
-            if _pr_delivery_disabled(_find_agent_registry_entry(task_id) or {}):
+            if _pr_is_disabled(task) or _pr_delivery_disabled(_find_agent_registry_entry(task_id) or {}):
                 continue  # No PR capture/title edits or delivery automation in this mode.
             if _has_pending_checkpoint(task_id):
                 logging.info(f"  {task_id[:8]} has a pending human checkpoint — delivery automation paused")
