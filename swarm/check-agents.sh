@@ -90,6 +90,18 @@ reconcile_non_running_sessions() {
     [ -z "$session" ] && continue
 
     if tmux has-session -t "$session" 2>/dev/null; then
+      local mc_task_id checkpoint_status
+      mc_task_id=$(jq -r --arg id "$task_id" '.[] | select(.id == $id) | .mcTaskId // empty' "$REGISTRY" 2>/dev/null)
+      if [ -n "$mc_task_id" ] && [[ ! "$status" =~ ^(done|merged|killed)$ ]]; then
+        check_pending_checkpoint "$mc_task_id"; checkpoint_status=$?
+        if [ "$checkpoint_status" -eq 0 ]; then
+          pause_delivery "$task_id" "$mc_task_id" "$session" "pending_human_checkpoint" "$CHECKPOINT_REASON"
+          continue
+        elif [ "$checkpoint_status" -eq 2 ]; then
+          echo "[$TIMESTAMP] RECONCILE WAIT: $task_id — unable to verify checkpoints for live session" >> "$LOG"
+          continue
+        fi
+      fi
       local now_ms
       now_ms=$(($(date +%s) * 1000))
       local age_ms=$((now_ms - last_attempt))
@@ -103,8 +115,6 @@ reconcile_non_running_sessions() {
     fi
   done <<< "$ids"
 }
-
-reconcile_non_running_sessions
 
 prune_state_artifacts() {
   local events_file="$SWARM_DIR/events.jsonl"
@@ -175,6 +185,97 @@ resolve_launcher_path() {
   fi
 }
 
+# Returns 0 for a pending question, 1 for none, and 2 when it cannot be verified.
+# API errors must never look like permission to complete or relaunch an agent.
+check_pending_checkpoint() {
+  local mc_task_id="$1" checkpoints
+  CHECKPOINT_REASON=""
+  if ! checkpoints=$(mc_curl GET "/api/tasks/$mc_task_id/checkpoints" -fsS --max-time 10 2>/dev/null) || \
+     ! printf '%s' "$checkpoints" | jq -e 'type == "array" and all(.[]; type == "object" and (.status == "pending" or .status == "approved" or .status == "rejected" or .status == "answered" or .status == "cancelled") and (.status != "pending" or (.prompt | type == "string" and length > 0)))' >/dev/null 2>&1; then
+    return 2
+  fi
+  CHECKPOINT_REASON=$(printf '%s' "$checkpoints" | jq -r '[.[] | select(.status == "pending")][0].prompt // empty')
+  if printf '%s' "$checkpoints" | jq -e 'any(.[]; .status == "pending")' >/dev/null; then
+    [ -n "$CHECKPOINT_REASON" ] || CHECKPOINT_REASON="Waiting for an unanswered human checkpoint"
+    return 0
+  fi
+  return 1
+}
+
+# Block delivery locally without raising a new checkpoint/comment. A live agent
+# is left intact: PATCH on_hold invokes runtime transitions, so only use it after
+# verifying this task's tmux session is absent.
+pause_delivery() {
+  local task_id="$1" mc_task_id="$2" session="$3" error="$4" reason="$5" payload live_session=false sibling siblings current_task activities hold_message
+  if [ -n "$mc_task_id" ]; then
+    payload=$(jq -n --arg reason "$reason" '{state:"waiting",blocked_reason:$reason}')
+    if ! mc_curl PUT "/api/tasks/$mc_task_id/progress" -fsS --max-time 10 \
+        -H "Content-Type: application/json" -d "$payload" >/dev/null 2>&1; then
+      echo "[$TIMESTAMP] WARN: $task_id — unable to record delivery blocker; will retry" >> "$LOG"
+      return 1
+    fi
+    if [ -n "$session" ] && tmux has-session -t "$session" 2>/dev/null; then
+      live_session=true
+    fi
+    if ! siblings=$(jq -r --arg id "$mc_task_id" 'if type != "array" then error("invalid registry") else .[] | select(.mcTaskId == $id) | .tmuxSession // empty end' "$REGISTRY" 2>/dev/null); then
+      return 1
+    fi
+    while IFS= read -r sibling; do
+      [ -z "$sibling" ] && continue
+      if tmux has-session -t "$sibling" 2>/dev/null; then
+        live_session=true
+      fi
+    done <<< "$siblings"
+    if [ "$live_session" = "false" ]; then
+      if ! current_task=$(mc_curl GET "/api/tasks/$mc_task_id" -fsS --max-time 10 2>/dev/null) || \
+         ! printf '%s' "$current_task" | jq -e 'type == "object" and (.status | type == "string")' >/dev/null 2>&1; then
+        return 1
+      fi
+      if [ "$(printf '%s' "$current_task" | jq -r '.status')" != "on_hold" ]; then
+        # Linear sync recognizes this local hold marker. An ordinary updated
+        # activity has no outbound comment side effect, unlike needs_human.
+        # Record it before PATCH so sync cannot immediately undo the hold.
+        hold_message="Monitor parked delivery on hold: $reason"
+        if ! activities=$(mc_curl GET "/api/tasks/$mc_task_id/activities" -fsS --max-time 10 2>/dev/null) || \
+           ! printf '%s' "$activities" | jq -e 'type == "array"' >/dev/null 2>&1; then
+          return 1
+        fi
+        if ! printf '%s' "$activities" | jq -e --arg message "$hold_message" 'any(.[]; .activity_type == "updated" and .message == $message)' >/dev/null; then
+          payload=$(jq -n --arg message "$hold_message" '{activity_type:"updated",message:$message}')
+          if ! mc_curl POST "/api/tasks/$mc_task_id/activities" -fsS --max-time 10 \
+              -H "Content-Type: application/json" -d "$payload" >/dev/null 2>&1; then
+            return 1
+          fi
+        fi
+      fi
+      if ! mc_curl PATCH "/api/tasks/$mc_task_id" -fsS --max-time 10 \
+          -H "Content-Type: application/json" -d '{"status":"on_hold"}' >/dev/null 2>&1; then
+        echo "[$TIMESTAMP] WARN: $task_id — unable to hold delivery; will retry" >> "$LOG"
+        return 1
+      fi
+    fi
+  fi
+  payload=$(jq -n --arg error "$error" '{status:"paused",deliveryPending:false,completionSyncedAt:null,lastError:$error}')
+  state_update "$task_id" "$payload" "delivery-blocked"
+  echo "[$TIMESTAMP] DELIVERY BLOCKED: $task_id — $reason" >> "$LOG"
+}
+
+# Prefer an open replacement over a historical closed/merged PR. Unknown or
+# malformed GitHub responses are not an empty result and must fail closed.
+lookup_task_pr() {
+  local repo="$1" branch="$2" pr_json
+  TASK_PR_URL=""; TASK_PR_NUM=""; TASK_PR_STATE=""
+  [ -n "$repo" ] && [ -n "$branch" ] && [ -d "$repo" ] || return 1
+  if ! pr_json=$(cd "$repo" && gh pr list --head "$branch" --state all --json number,url,state --limit 100 2>/dev/null) || \
+     ! printf '%s' "$pr_json" | jq -e 'type == "array" and all(.[]; type == "object" and (.number | type == "number") and (.url | type == "string" and length > 0) and (.state == "OPEN" or .state == "CLOSED" or .state == "MERGED"))' >/dev/null 2>&1; then
+    return 1
+  fi
+  pr_json=$(printf '%s' "$pr_json" | jq -c '([.[] | select(.state == "OPEN")] + [.[] | select(.state == "MERGED")] + [.[] | select(.state == "CLOSED")])[0] // {}')
+  TASK_PR_URL=$(printf '%s' "$pr_json" | jq -r '.url // empty')
+  TASK_PR_NUM=$(printf '%s' "$pr_json" | jq -r '.number // empty')
+  TASK_PR_STATE=$(printf '%s' "$pr_json" | jq -r '.state // empty')
+}
+
 reconcile_completed_agents_to_mc() {
   local completed_ids
   completed_ids=$(jq -r '.[] | select(.status == "completed_by_agent") | .id' "$REGISTRY" 2>/dev/null)
@@ -190,12 +291,29 @@ reconcile_completed_agents_to_mc() {
     synced_at=$(jq -r ".[] | select(.id == \"$task_id\") | .completionSyncedAt // empty" "$REGISTRY" 2>/dev/null)
 
     local task_json
-    task_json=$(mc_curl GET "/api/tasks/$mc_task_id" -s 2>/dev/null)
-    [ -z "$task_json" ] && continue
+    if ! task_json=$(mc_curl GET "/api/tasks/$mc_task_id" -fsS --max-time 10 2>/dev/null) || \
+       ! printf '%s' "$task_json" | jq -e 'type == "object" and (.status | type == "string")' >/dev/null 2>&1; then
+      echo "[$TIMESTAMP] RECONCILE WAIT: $task_id — unable to verify MC task" >> "$LOG"
+      continue
+    fi
 
     local task_type mc_status
     task_type=$(echo "$task_json" | jq -r '.task_type // "implementation"' 2>/dev/null)
     mc_status=$(echo "$task_json" | jq -r '.status // "unknown"' 2>/dev/null)
+
+    if [[ "$mc_status" =~ ^(done|merged|closed)$ ]]; then
+      continue
+    fi
+    local session checkpoint_status
+    session=$(jq -r ".[] | select(.id == \"$task_id\") | .tmuxSession // empty" "$REGISTRY" 2>/dev/null)
+    check_pending_checkpoint "$mc_task_id"; checkpoint_status=$?
+    if [ "$checkpoint_status" -eq 0 ]; then
+      pause_delivery "$task_id" "$mc_task_id" "$session" "pending_human_checkpoint" "$CHECKPOINT_REASON"
+      continue
+    elif [ "$checkpoint_status" -eq 2 ]; then
+      echo "[$TIMESTAMP] RECONCILE WAIT: $task_id — unable to verify pending checkpoints" >> "$LOG"
+      continue
+    fi
 
     local review_only
     review_only=$(jq -r ".[] | select(.id == \"$task_id\") | (.reviewOnly == true or .agentEnv.MC_REVIEW_ONLY == \"1\")" "$REGISTRY" 2>/dev/null)
@@ -218,15 +336,6 @@ reconcile_completed_agents_to_mc() {
       continue
     fi
 
-    if [ -n "$synced_at" ]; then
-      continue
-    fi
-
-    if [[ "$mc_status" =~ ^(done|merged)$ ]]; then
-      state_update "$task_id" "{\"status\": \"ready\", \"completionSyncedAt\": \"$TIMESTAMP\"}" "completion-already-synced"
-      continue
-    fi
-
     # Process completion is only a claim. Implementations become reviewable when a
     # PR exists (or the task was explicitly dispatched in no-PR mode). If the agent
     # exited successfully without that deliverable, put it back on the normal dead-
@@ -235,33 +344,44 @@ reconcile_completed_agents_to_mc() {
     # the implementation agent produced a PR (MET-644). The PR is the completion
     # evidence, so planning must be reconcilable here too.
     if [[ "$mc_status" =~ ^(in_progress|assigned|planning|testing|review)$ ]]; then
-      local session
-      session=$(jq -r ".[] | select(.id == \"$task_id\") | .tmuxSession // empty" "$REGISTRY" 2>/dev/null)
       if [ -n "$session" ] && tmux has-session -t "$session" 2>/dev/null; then
         echo "[$TIMESTAMP] RECONCILE: $task_id — completed_by_agent but tmux $session still live; observing" >> "$LOG"
         continue
       fi
 
-      local repo branch no_pr_mode pr_json pr_url pr_num completion_action completion_retries
+      local repo branch no_pr_mode pr_url pr_num pr_state completion_action completion_retries
       repo=$(jq -r ".[] | select(.id == \"$task_id\") | .repo // empty" "$REGISTRY" 2>/dev/null)
       branch=$(jq -r ".[] | select(.id == \"$task_id\") | .branch // empty" "$REGISTRY" 2>/dev/null)
       no_pr_mode=$(jq -r ".[] | select(.id == \"$task_id\") | .noPrMode // false" "$REGISTRY" 2>/dev/null)
       pr_url=""
       pr_num=""
-      if [ -n "$repo" ] && [ -n "$branch" ] && [ -d "$repo" ]; then
-        pr_json=$(cd "$repo" && gh pr list --head "$branch" --state all --json number,url --limit 1 2>/dev/null || true)
-        pr_url=$(printf '%s' "$pr_json" | jq -r '.[0].url // empty' 2>/dev/null)
-        pr_num=$(printf '%s' "$pr_json" | jq -r '.[0].number // empty' 2>/dev/null)
+      pr_state=""
+      if [ "$no_pr_mode" != "true" ]; then
+        if ! lookup_task_pr "$repo" "$branch"; then
+          echo "[$TIMESTAMP] RECONCILE WAIT: $task_id — unable to verify GitHub PRs" >> "$LOG"
+          continue
+        fi
+        pr_url="$TASK_PR_URL"; pr_num="$TASK_PR_NUM"; pr_state="$TASK_PR_STATE"
       fi
 
-      policy_args=(--task-type "$task_type" --pr-url "$pr_url")
+      policy_args=(--task-type "$task_type" --pr-url "$pr_url" --pr-state "$pr_state")
       [ "$no_pr_mode" = "true" ] && policy_args+=(--no-pr)
-      completion_action=$(python3 "$COMPLETION_POLICY" "${policy_args[@]}" 2>/dev/null || echo resume)
+      completion_action=$(python3 "$COMPLETION_POLICY" "${policy_args[@]}" 2>/dev/null || echo wait)
+      case "$completion_action" in
+        closed)
+          pause_delivery "$task_id" "$mc_task_id" "$session" "pr_closed_without_replacement" "Required PR $pr_url was closed without merging; preserved work needs a replacement PR handoff"
+          continue ;;
+        merged)
+          pause_delivery "$task_id" "$mc_task_id" "$session" "merged_pr_delivery_unreconciled" "PR $pr_url was merged, but task delivery is not reconciled; verify outstanding acceptance criteria before resuming"
+          continue ;;
+        wait|checkpoint)
+          echo "[$TIMESTAMP] RECONCILE WAIT: $task_id — delivery evidence is unverified" >> "$LOG"
+          continue ;;
+      esac
       if [ "$completion_action" = "resume" ]; then
         completion_retries=$(jq -r ".[] | select(.id == \"$task_id\") | .completionRetryCount // 0" "$REGISTRY" 2>/dev/null)
         if [ "$completion_retries" -ge 3 ]; then
-          state_update "$task_id" '{"status": "failed", "lastError": "completed_without_pr_retries_exhausted"}' "completion-missing-pr-exhausted"
-          mc_post_activity "$mc_task_id" "needs_human" "Agent repeatedly exited without the required PR; partial work remains preserved for manual redispatch"
+          pause_delivery "$task_id" "$mc_task_id" "$session" "completed_without_pr_retries_exhausted" "Agent repeatedly exited without the required PR; partial work remains preserved for manual redispatch"
           echo "[$TIMESTAMP] RECONCILE: $task_id — completion rejected (no PR); completion retries exhausted" >> "$LOG"
           continue
         fi
@@ -330,6 +450,8 @@ mc_complete_task() {
     > /dev/null 2>&1
 }
 
+reconcile_non_running_sessions
+
 retry_rate_limited_agents() {
   local ids now_ms retry_window_ms
   ids=$(jq -r '.[] | select(.status == "rate_limited") | .id' "$REGISTRY" 2>/dev/null)
@@ -339,11 +461,22 @@ retry_rate_limited_agents() {
 
   while read -r task_id; do
     [ -z "$task_id" ] && continue
-    local next_retry deadline mc_task_id worktree repo session launcher_info launcher env_exports launcher_path
+    local next_retry deadline mc_task_id worktree repo session launcher_info launcher env_exports launcher_path checkpoint_status
     next_retry=$(jq -r --arg id "$task_id" '.[] | select(.id == $id) | .nextRateLimitRetryAt // 0' "$REGISTRY")
     deadline=$(jq -r --arg id "$task_id" --argjson window "$retry_window_ms" \
       '.[] | select(.id == $id) | (.rateLimitDeadlineAt // ((.rateLimitFirstAt // 0) + $window))' "$REGISTRY")
     mc_task_id=$(jq -r --arg id "$task_id" '.[] | select(.id == $id) | .mcTaskId // empty' "$REGISTRY")
+    session=$(jq -r --arg id "$task_id" '.[] | select(.id == $id) | .tmuxSession // empty' "$REGISTRY")
+    if [ -n "$mc_task_id" ]; then
+      check_pending_checkpoint "$mc_task_id"; checkpoint_status=$?
+      if [ "$checkpoint_status" -eq 0 ]; then
+        pause_delivery "$task_id" "$mc_task_id" "$session" "pending_human_checkpoint" "$CHECKPOINT_REASON"
+        continue
+      elif [ "$checkpoint_status" -eq 2 ]; then
+        echo "[$TIMESTAMP] RATE-LIMIT WAIT: $task_id — unable to verify pending checkpoints" >> "$LOG"
+        continue
+      fi
+    fi
 
     if [ "$deadline" -gt 0 ] 2>/dev/null && [ "$now_ms" -ge "$deadline" ] 2>/dev/null; then
       state_update "$task_id" "{\"status\":\"failed\",\"lastError\":\"session_limit_retry_window_exhausted\",\"failedAt\":$now_ms,\"nextRateLimitRetryAt\":null}" "rate-limit-window-exhausted"
@@ -782,7 +915,24 @@ echo "$RUNNING_IDS" | while read -r TASK_ID; do
   MC_TASK_ID=$(jq -r ".[] | select(.id == \"$TASK_ID\") | .mcTaskId // empty" "$REGISTRY")
 
   if [ -n "$MC_TASK_ID" ]; then
-    MC_LIFECYCLE_STATUS=$(mc_curl GET "/api/tasks/$MC_TASK_ID" -s 2>/dev/null | jq -r '.status // "unknown"' 2>/dev/null)
+    if ! MC_TASK_JSON=$(mc_curl GET "/api/tasks/$MC_TASK_ID" -fsS --max-time 10 2>/dev/null) || \
+       ! printf '%s' "$MC_TASK_JSON" | jq -e 'type == "object" and (.status | type == "string")' >/dev/null 2>&1; then
+      echo "[$TIMESTAMP] DELIVERY WAIT: $TASK_ID — unable to verify MC task" >> "$LOG"
+      continue
+    fi
+    MC_LIFECYCLE_STATUS=$(printf '%s' "$MC_TASK_JSON" | jq -r '.status')
+    if [[ "$MC_LIFECYCLE_STATUS" =~ ^(done|closed|merged)$ ]]; then
+      echo "[$TIMESTAMP] TERMINAL: $TASK_ID — ticket lifecycle owns completed work" >> "$LOG"
+      continue
+    fi
+    check_pending_checkpoint "$MC_TASK_ID"; CHECKPOINT_STATUS=$?
+    if [ "$CHECKPOINT_STATUS" -eq 0 ]; then
+      pause_delivery "$TASK_ID" "$MC_TASK_ID" "$SESSION" "pending_human_checkpoint" "$CHECKPOINT_REASON"
+      continue
+    elif [ "$CHECKPOINT_STATUS" -eq 2 ]; then
+      echo "[$TIMESTAMP] DELIVERY WAIT: $TASK_ID — unable to verify pending checkpoints" >> "$LOG"
+      continue
+    fi
     if [ "$MC_LIFECYCLE_STATUS" = "on_hold" ]; then
       state_update "$TASK_ID" '{"status":"paused","lastError":null}' "board-hold-reconcile"
       tmux kill-session -t "=$SESSION" 2>/dev/null || true
@@ -850,17 +1000,15 @@ echo "$RUNNING_IDS" | while read -r TASK_ID; do
     continue
   fi
 
-  PR_NUM=$(cd "$REPO" && gh pr list --head "$BRANCH" --json number -q '.[0].number' 2>/dev/null)
-
   # Check if this is an investigation task (no PR expected)
   TASK_TYPE=""
   if [ -n "$MC_TASK_ID" ]; then
-    TASK_TYPE=$(mc_curl GET "/api/tasks/$MC_TASK_ID" -s 2>/dev/null | jq -r '.task_type // "implementation"' 2>/dev/null)
+    TASK_TYPE=$(printf '%s' "$MC_TASK_JSON" | jq -r '.task_type // "implementation"')
   fi
 
   if [ "$TASK_TYPE" = "investigation" ]; then
     # Investigation tasks don't produce PRs — check if agent completed via webhook
-    MC_STATUS=$(mc_curl GET "/api/tasks/$MC_TASK_ID" -s 2>/dev/null | jq -r '.status // "unknown"' 2>/dev/null)
+    MC_STATUS="$MC_LIFECYCLE_STATUS"
     if [ "$MC_STATUS" = "done" ] || [ "$MC_STATUS" = "review" ]; then
       echo "[$TIMESTAMP] INVESTIGATION DONE: $TASK_ID — agent reported findings" >> "$LOG"
       state_update "$TASK_ID" '{"status": "ready"}' "investigation-ready"
@@ -870,12 +1018,34 @@ echo "$RUNNING_IDS" | while read -r TASK_ID; do
     continue
   fi
 
+  if ! lookup_task_pr "$REPO" "$BRANCH"; then
+    echo "[$TIMESTAMP] DELIVERY WAIT: $TASK_ID — unable to verify GitHub PRs" >> "$LOG"
+    continue
+  fi
+  PR_NUM="$TASK_PR_NUM"
+  PR_URL="$TASK_PR_URL"
+  if [ "$TASK_PR_STATE" = "CLOSED" ] || [ "$TASK_PR_STATE" = "MERGED" ]; then
+    # Never preempt a live implementation just because an older PR is closed.
+    # Completed handoffs must instead retain the work and surface the blocker.
+    if [ "$DELIVERY_PENDING" = "true" ]; then
+      if [ "$TASK_PR_STATE" = "CLOSED" ]; then
+        pause_delivery "$TASK_ID" "$MC_TASK_ID" "$SESSION" "pr_closed_without_replacement" "Required PR $PR_URL was closed without merging; preserved work needs a replacement PR handoff"
+      else
+        pause_delivery "$TASK_ID" "$MC_TASK_ID" "$SESSION" "merged_pr_delivery_unreconciled" "PR $PR_URL was merged, but task delivery is not reconciled; verify outstanding acceptance criteria before resuming"
+      fi
+    fi
+    continue
+  fi
+
   if [ -z "$PR_NUM" ]; then
+    if [ "$DELIVERY_PENDING" = "true" ]; then
+      pause_delivery "$TASK_ID" "$MC_TASK_ID" "$SESSION" "delivery_pr_missing" "Required PR for the completed agent handoff is missing; preserved work needs delivery reconciliation"
+      continue
+    fi
     echo "[$TIMESTAMP] RUNNING: $TASK_ID — no PR yet" >> "$LOG"
     continue
   fi
 
-  PR_URL=$(cd "$REPO" && gh pr view "$PR_NUM" --json url -q '.url' 2>/dev/null)
   READINESS=$(python3 "$READINESS_GATE" check "$PR_URL")
   GATE_STATUS=$(printf '%s' "$READINESS" | jq -r '.status // "unknown"')
   FAILED_CHECKS=0

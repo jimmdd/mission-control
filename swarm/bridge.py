@@ -8137,13 +8137,10 @@ def _task_still_tracks_terminal_pr(task_id: str) -> bool:
 
 
 def _check_pr_status_for_task(task: dict) -> bool:
-    """Close the loop on a review task by its captured PR.
-
-    A PR merged or closed outside Mission Control is terminal for the ticket. Use
-    the canonical completion endpoint so checkpoint cleanup, delegation roll-up,
-    and completion events stay identical to a human closing the ticket in the UI.
-    """
+    """Reconcile a merged delivery; a closed unmerged PR leaves work outstanding."""
     task_id = task["id"]
+    if _has_pending_checkpoint(task_id):
+        return True  # A terminal PR must not erase an unanswered human decision.
     try:
         delivs = mc_request("GET", f"/api/tasks/{task_id}/deliverables") or []
     except Exception:
@@ -8158,6 +8155,7 @@ def _check_pr_status_for_task(task: dict) -> bool:
             return False
         mc_request("POST", f"/api/tasks/{task_id}/done", {
             "reason": f"Linked PR merged: {pr_url}",
+            "automated": True,
         })
         logging.info(f"  {task_id[:8]} PR merged — marked done")
         return True
@@ -8167,10 +8165,14 @@ def _check_pr_status_for_task(task: dict) -> bool:
         if _gh_pr_closed_for_reset(pr_url):
             logging.info(f"  {task_id[:8]} PR was closed by Mission Control reset — leaving ticket active")
             return False
-        mc_request("POST", f"/api/tasks/{task_id}/done", {
-            "reason": f"Linked PR was closed outside Mission Control: {pr_url}",
-        })
-        logging.info(f"  {task_id[:8]} PR closed outside Mission Control — marked done")
+        reason = f"Linked PR closed without merging: {pr_url}. Integration remains incomplete; a new handoff or explicit cancellation is required."
+        live = any(entry.get("mcTaskId") == task_id and _tmux_session_alive(entry.get("tmuxSession", ""))
+                   for entry in _load_active_tasks())
+        if not live and task.get("status") != "on_hold":
+            mc_update_task(task_id, {"status": "on_hold"})
+            mc_log_activity(task_id, "updated", f"Mission Control parked unfinished delivery: {reason}")
+        mc_set_progress(task_id, state="blocked", phase="delivery", blocked_reason=reason)
+        logging.info(f"  {task_id[:8]} PR closed without merging — delivery blocked")
         return True
     return False
 
@@ -8178,7 +8180,12 @@ def _check_pr_status_for_task(task: dict) -> bool:
 def _has_pending_checkpoint(task_id: str) -> bool:
     """A human checkpoint is a hard automation boundary until it is resolved."""
     try:
-        checkpoints = mc_request("GET", f"/api/tasks/{task_id}/checkpoints") or []
+        checkpoints = mc_request("GET", f"/api/tasks/{task_id}/checkpoints")
+        valid_statuses = {"pending", "approved", "rejected", "answered", "cancelled"}
+        if not isinstance(checkpoints, list) or any(
+                not isinstance(checkpoint, dict) or checkpoint.get("status") not in valid_statuses
+                for checkpoint in checkpoints):
+            return True
     except Exception as e:
         # If the approval state cannot be read, fail closed: relaunching an agent
         # through a potentially binding checkpoint is more harmful than waiting.
@@ -8483,7 +8490,14 @@ def process_review_tasks():
 
             if _review_only_entry(_find_agent_registry_entry(task_id) or {}):
                 continue  # No PR capture/title edits or delivery automation in this mode.
-            _capture_pr_for_task(task)
+            if _has_pending_checkpoint(task_id):
+                logging.info(f"  {task_id[:8]} has a pending human checkpoint — delivery automation paused")
+                continue
+
+            # Held work may track historical assets or await a human decision.
+            # Capturing/enforcing a PR title is an external write, not liveness.
+            if task.get("status") != "on_hold":
+                _capture_pr_for_task(task)
             if _check_pr_status_for_task(task):
                 continue  # PR is terminal -> task done; nothing more to do
 

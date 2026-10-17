@@ -1299,12 +1299,14 @@ with tempfile.TemporaryDirectory() as root:
   assert.match(result.calls[3][3], /\/unhold/);
 });
 
-test("merged and externally closed PRs complete tickets through the canonical endpoint", () => {
+test("merged PRs complete tickets while closed unmerged PRs preserve unfinished delivery", () => {
   const result = python(`
 import bridge
 
 calls = []
 def request(method, path, body=None):
+    if method == "GET" and path.endswith("/checkpoints"):
+        return []
     if method == "GET" and path.endswith("/deliverables"):
         return [{"deliverable_type": "pr", "path": "https://github.com/acme/backend/pull/709"}]
     if method == "GET" and path == "/api/tasks/task-709":
@@ -1312,6 +1314,7 @@ def request(method, path, body=None):
     calls.append([method, path, body])
 bridge.mc_request = request
 bridge._gh_pr_closed_for_reset = lambda _url: False
+bridge._load_active_tasks = lambda: []
 task = {"id": "task-709", "status": "review"}
 
 outcomes = []
@@ -1323,13 +1326,11 @@ print(json.dumps({"outcomes": outcomes, "calls": calls}))
 `, null);
 
   assert.deepEqual(result.outcomes, [true, true, false]);
-  assert.equal(result.calls.length, 2);
-  assert.deepEqual(result.calls.map(call => call.slice(0, 2)), [
-    ["POST", "/api/tasks/task-709/done"],
-    ["POST", "/api/tasks/task-709/done"],
-  ]);
+  assert.equal(result.calls.filter(call => call[1].endsWith("/done")).length, 1);
+  assert.deepEqual(result.calls[0].slice(0, 2), ["POST", "/api/tasks/task-709/done"]);
   assert.match(result.calls[0][2].reason, /merged/i);
-  assert.match(result.calls[1][2].reason, /closed outside Mission Control/i);
+  assert.ok(result.calls.some(call => call[0] === "PATCH" && call[2].status === "on_hold"));
+  assert.ok(result.calls.some(call => call[1].endsWith("/progress") && call[2].state === "blocked"));
 });
 
 test("a PR closed by Mission Control reset never completes the ticket", () => {
@@ -1338,6 +1339,8 @@ import bridge
 
 calls = []
 def request(method, path, body=None):
+    if method == "GET" and path.endswith("/checkpoints"):
+        return []
     if method == "GET" and path.endswith("/deliverables"):
         return [{"deliverable_type": "pr", "path": "https://github.com/acme/backend/pull/709"}]
     if method == "GET" and path == "/api/tasks/task-709":
@@ -1405,7 +1408,53 @@ bridge.process_review_tasks()
 print(json.dumps(events))
 `, null);
 
-  assert.deepEqual(result, [["capture", "active"], ["capture", "held"]]);
+  assert.deepEqual(result, []);
+});
+
+test("pending or malformed checkpoints prevent terminal PR completion", () => {
+  const result = python(`
+import bridge
+results=[]
+calls=[]
+for checkpoints in ([{"status":"pending"}], None, {}, [None], [{}], [{"status":None}], [{"status":"unknown"}], []):
+    def request(method,path,body=None):
+        if path.endswith('/checkpoints'):return checkpoints
+        if path.endswith('/deliverables'):return [{'deliverable_type':'pr','path':'https://github.com/acme/app/pull/1'}]
+        if method=='GET':return {'id':'task','status':'review'}
+        calls.append([method,path,body])
+    bridge.mc_request=request
+    bridge._gh_pr_state=lambda _: 'MERGED'
+    results.append(bridge._check_pr_status_for_task({'id':'task','status':'review'}))
+print(json.dumps({'results':results,'calls':calls}))
+`, null);
+  assert.deepEqual(result.results, [true, true, true, true, true, true, true, true]);
+  assert.equal(result.calls.length, 1);
+  assert.equal(result.calls[0][1], "/api/tasks/task/done");
+  assert.equal(result.calls[0][2].automated, true);
+});
+
+test("a closed historical PR cannot terminate an active sibling agent", () => {
+  const result = python(`
+import bridge
+calls=[]
+def request(method,path,body=None):
+    if path.endswith('/checkpoints'):return []
+    if path.endswith('/deliverables'):return [{'deliverable_type':'pr','path':'https://github.com/acme/app/pull/1'}]
+    if method=='GET':return {'id':'task','status':'testing'}
+    calls.append([method,path,body])
+bridge.mc_request=request
+bridge._gh_pr_state=lambda _: 'CLOSED'
+bridge._gh_pr_closed_for_reset=lambda _: False
+bridge._load_active_tasks=lambda: [{'mcTaskId':'task','tmuxSession':'live-sibling'}]
+bridge._tmux_session_alive=lambda _:True
+handled=bridge._check_pr_status_for_task({'id':'task','status':'testing'})
+print(json.dumps({'handled':handled,'calls':calls}))
+`, null);
+  assert.equal(result.handled, true);
+  assert.equal(result.calls.length, 1);
+  assert.equal(result.calls[0][0], "PUT");
+  assert.equal(result.calls[0][1], "/api/tasks/task/progress");
+  assert.equal(result.calls[0][2].state, "blocked");
 });
 
 test("the completion reconciler resumes implementations that have no deliverable", () => {

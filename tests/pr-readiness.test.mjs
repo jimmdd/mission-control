@@ -61,6 +61,7 @@ test('monitor keeps exited agents pending and cannot fall through a failed gate'
     const registry=join(dir,'registry.json'), output=join(dir,'calls');
     writeFileSync(registry,JSON.stringify([{id:'task',status:'running',deliveryPending:true,tmuxSession:'dead',branch:'feature/test',repo:dir,worktree:dir,mcTaskId:'mc',reviewCycles:3}]));
     const source=readFileSync(join(swarm,'check-agents.sh'),'utf8');
+    const deliveryHelpers=source.slice(source.indexOf('check_pending_checkpoint() {'),source.indexOf('reconcile_completed_agents_to_mc() {'));
     const loop=source.slice(source.indexOf('RUNNING_IDS='));
     for(const scenario of ['pending','ci_failed','unknown','review_blocked','review_unavailable','review_failed','completion_rejected','pass']) {
       writeFileSync(output,'');
@@ -75,7 +76,7 @@ MAX_CI_FIX_CYCLES=2
 CFG_CI_FIX_ENABLED=false
 SCENARIO=${scenario}
 state_update(){ echo "$*" >> ${JSON.stringify(output)}; }
-mc_curl(){ echo '{"status":"testing","task_type":"implementation"}'; }
+mc_curl(){ if [[ "$2" == */checkpoints ]]; then echo '[]'; else echo '{"status":"testing","task_type":"implementation"}'; fi; }
 mc_post_activity(){ :; }
 mc_add_deliverable(){ :; }
 mc_complete_task(){ [ "$SCENARIO" != completion_rejected ]; }
@@ -85,13 +86,14 @@ validate_gsd_artifacts(){ GSD_STATUS=passed; return 0; }
 run_codex_review(){ CODEX_REVIEW="$SCENARIO"; [ "$SCENARIO" != review_unavailable ]; }
 review_has_blocking_issues(){ [ "$SCENARIO" = review_failed ]; }
 tmux(){ echo unexpected-tmux >> ${JSON.stringify(output)}; return 1; }
-gh(){ if [ "$2" = list ]; then echo 1; else echo https://github.com/acme/app/pull/1; fi; }
+gh(){ if [ "$2" = list ]; then echo '[{"number":1,"url":"https://github.com/acme/app/pull/1","state":"OPEN"}]'; else echo https://github.com/acme/app/pull/1; fi; }
 python3(){
  case "$SCENARIO" in
  pending|ci_failed|unknown|review_blocked) printf '{"status":"%s"}' "$SCENARIO";;
  *) echo '{"status":"pass"}';;
  esac
 }
+${deliveryHelpers}
 ${loop}`;
       execFileSync('bash',['-c',script],{encoding:'utf8'});
       const calls=readFileSync(output,'utf8');

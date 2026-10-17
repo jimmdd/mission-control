@@ -1294,6 +1294,15 @@ async function handleApiRequest(
                 }
               }
 
+              if (typeof body.status === "string" &&
+                  ["inbox", "pending_dispatch", "planning", "assigned", "in_progress", "testing", "review"].includes(body.status)) {
+                const pending = db.listCheckpoints(taskId).find(checkpoint => checkpoint.status === "pending");
+                if (pending) {
+                  sendJson(res, 409, { error: "Resolve the pending checkpoint before resuming work", checkpoint_id: pending.id });
+                  return;
+                }
+              }
+
               if (needsRuntimeCheck && oldTask?.status !== "on_hold") {
                 await runtimeTransition(taskId, "hold");
               }
@@ -1405,6 +1414,11 @@ async function handleApiRequest(
 
               const body = await parseBody(req);
               const reason = isRecord(body) && typeof body.reason === "string" ? body.reason.trim() : "";
+
+              if (isRecord(body) && body.automated === true && db.countPendingCheckpoints(taskId) > 0) {
+                sendJson(res, 409, { error: "Automated completion cannot resolve an unanswered checkpoint" });
+                return;
+              }
 
               const updated = db.updateTask(taskId, { status: "done" } as unknown as UpdateTaskInput);
               if (!updated) {
@@ -1976,7 +1990,17 @@ async function handleApiRequest(
                   });
                   return;
                 }
-                const progress = db.upsertProgress(taskId, sanitizeProgressInput(body));
+                const input = sanitizeProgressInput(body);
+                const pending = db.listCheckpoints(taskId).find(checkpoint => checkpoint.status === "pending");
+                if (pending) {
+                  if (input.state && !["waiting", "blocked"].includes(input.state)) {
+                    sendJson(res, 409, { error: "Progress cannot clear an unanswered checkpoint", checkpoint_id: pending.id });
+                    return;
+                  }
+                  input.state = input.state === "blocked" ? "blocked" : "waiting";
+                  input.blocked_reason = input.blocked_reason?.trim() || pending.prompt.slice(0, 2000);
+                }
+                const progress = db.upsertProgress(taskId, input);
                 events.emit("progress", {
                   taskId,
                   state: progress.state,
@@ -2329,6 +2353,11 @@ async function handleApiRequest(
               sendJson(res, 404, { error: "Task not found" });
               return;
             }
+            const pending = db.listCheckpoints(task.id).find(checkpoint => checkpoint.status === "pending");
+            if (pending) {
+              sendJson(res, 409, { error: "Agent completion cannot resolve an unanswered checkpoint", checkpoint_id: pending.id });
+              return;
+            }
             if (task.status === "on_hold") {
               sendJson(res, 409, { error: "Task is on hold; completion callback ignored" });
               return;
@@ -2396,6 +2425,11 @@ async function handleApiRequest(
               }
               if (current.status === "done") {
                 sendJson(res, 200, { success: true, task_id: task.id, new_status: "done" });
+                return;
+              }
+              const pendingAfterVerification = db.listCheckpoints(task.id).find(checkpoint => checkpoint.status === "pending");
+              if (pendingAfterVerification) {
+                sendJson(res, 409, { error: "A checkpoint was raised during PR verification", checkpoint_id: pendingAfterVerification.id });
                 return;
               }
               if (readiness.status !== "pass") {
@@ -2473,6 +2507,12 @@ async function handleApiRequest(
 
             if (!activeTask) {
               sendJson(res, 404, { error: "No active task found for this session" });
+              return;
+            }
+
+            const pending = db.listCheckpoints(activeTask.id).find(checkpoint => checkpoint.status === "pending");
+            if (pending) {
+              sendJson(res, 409, { error: "Agent completion cannot resolve an unanswered checkpoint", checkpoint_id: pending.id });
               return;
             }
 
