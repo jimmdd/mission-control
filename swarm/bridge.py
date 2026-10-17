@@ -1513,8 +1513,7 @@ TRIAGE_FAIL = {"ready": False, "repos": [], "questions": [], "reasoning": "Triag
 BACKEND_MONOREPO_FACT = (
     "GitProjects/backend is MetaDAO's primary monorepo, not a backend-only service. "
     "apps/frontend has been removed; the old UI is retired and receives no new work. "
-    "apps/ui is the current MetaDAO frontend and the default for UI/UX work, "
-    "and the Rust API is apps/api. apps/new-ui and apps/new-api are historical names. "
+    "apps/new-ui is the current MetaDAO frontend and the default for UI/UX work, "
     "including metadao.fi. Permissionless work goes to apps/backable. Futardio and "
     "Accelerate/Accelerated are former names of Backable; do not route new work to "
     "apps/accelerated. A specific current app explicitly chosen by the user overrides "
@@ -7557,18 +7556,22 @@ def _resume_checkpoint_work(task: dict) -> bool:
     return True
 
 
-def _relaunch_for_change_request(task: dict, change_requests_text: str, source: str = "dashboard") -> bool:
+def _relaunch_for_change_request(task: dict, change_requests_text: str, source: str = "dashboard",
+                               *, require_review_authorization: bool = False) -> bool:
     if source not in ("review-recovery", "auto-monitor"):
-        return _apply_change_request(task, change_requests_text, source)
+        return _apply_change_request(task, change_requests_text, source,
+                                     require_review_authorization=require_review_authorization)
     # Hold transitions use this same registry lock before stopping runtimes.
     # If Hold wins first, the fresh paused state rejects launch. If launch wins,
     # Hold waits, then pauses/stops that exact session. Recovery never unholds it.
     with (SWARM_DIR / "active-tasks.lock").open("a+") as lock:
         fcntl.flock(lock.fileno(), fcntl.LOCK_EX)
-        return _apply_change_request(task, change_requests_text, source)
+        return _apply_change_request(task, change_requests_text, source,
+                                     require_review_authorization=require_review_authorization)
 
 
-def _apply_change_request(task: dict, change_requests_text: str, source: str = "dashboard") -> bool:
+def _apply_change_request(task: dict, change_requests_text: str, source: str = "dashboard",
+                          *, require_review_authorization: bool = False) -> bool:
     """Re-launch an agent with change request feedback from Mission Control."""
     task_id = task["id"]
 
@@ -7590,8 +7593,14 @@ def _apply_change_request(task: dict, change_requests_text: str, source: str = "
                 or not eligible
                 or _tmux_session_alive(entry.get("tmuxSession", ""))):
             return False
-        if source == "auto-monitor" and _review_only_entry(entry):
+        if source == "auto-monitor" and _pr_delivery_disabled(entry):
             return False
+        # The guarded read owns current scope, including revocations and NO-PR
+        # decisions made after the caller inspected the retained review.
+        task = current
+    if require_review_authorization and not review_authorization.authorized(
+            task, resolved_decisions(task_id), entry):
+        return False
 
     worktree = entry.get("worktree", "")
     session = entry.get("tmuxSession", "")
@@ -7850,7 +7859,8 @@ def process_local_review_recovery():
                                f"requires {outcome['nextAction']}. Read its log at {outcome.get('log', '')}. "
                                "Complete this technical work automatically within the existing local authority; "
                                "preserve the prior verdict until its cause is addressed. This is not publication approval.")
-                if _relaunch_for_change_request(current, instruction, source="review-recovery"):
+                if _relaunch_for_change_request(current, instruction, source="review-recovery",
+                        require_review_authorization=outcome.get("nextAction") == "fix_code"):
                     patch["reviewRecovery"]["lastRunId"] = outcome["runId"]
                     subprocess.run([sys.executable, str(SWARM_DIR / "swarm-state.py"), "update",
                         "--task-id", entry["id"], "--patch-json", json.dumps(patch),
@@ -8041,7 +8051,7 @@ def _capture_pr_for_task(task: dict):
     The agent runs `gh pr create` in its worktree but nothing pulls the URL back —
     look it up by the task's branch and store it as a 'pr' deliverable."""
     task_id = task["id"]
-    if _review_only_entry(_find_agent_registry_entry(task_id) or {}):
+    if _pr_delivery_disabled(_find_agent_registry_entry(task_id) or {}):
         return  # Capture also enforces PR titles; local verification cannot edit them.
     try:
         delivs = mc_request("GET", f"/api/tasks/{task_id}/deliverables") or []
@@ -8184,11 +8194,8 @@ def _check_pr_status_for_task(task: dict) -> bool:
             logging.info(f"  {task_id[:8]} PR was closed by Mission Control reset — leaving ticket active")
             return False
         reason = f"Linked PR closed without merging: {pr_url}. Integration remains incomplete; a new handoff or explicit cancellation is required."
-        live = any(entry.get("mcTaskId") == task_id and _tmux_session_alive(entry.get("tmuxSession", ""))
-                   for entry in _load_active_tasks())
-        if not live and task.get("status") != "on_hold":
-            mc_update_task(task_id, {"status": "on_hold"})
-            mc_log_activity(task_id, "updated", f"Mission Control parked unfinished delivery: {reason}")
+        # Generic Hold stops the current runtime. A newer launch can win after
+        # an unlocked liveness probe, so automatic delivery only records a blocker.
         mc_set_progress(task_id, state="blocked", phase="delivery", blocked_reason=reason)
         logging.info(f"  {task_id[:8]} PR closed without merging — delivery blocked")
         return True
@@ -8379,8 +8386,15 @@ def _review_only_entry(entry: dict) -> bool:
 
 def _review_runtime_busy(task_id: str) -> bool:
     entry = _find_agent_registry_entry(task_id) or {}
-    return (_review_only_entry(entry) or entry.get("status") == "running"
+    return (_pr_delivery_disabled(entry) or entry.get("status") in ("running", "completed_by_agent")
+            or entry.get("changeRequestSource") in ("review-recovery", "local-completion")
             or bool(entry.get("tmuxSession") and _tmux_session_alive(entry["tmuxSession"])))
+
+
+def _pr_delivery_disabled(entry: dict) -> bool:
+    env = entry.get("agentEnv") if isinstance(entry.get("agentEnv"), dict) else {}
+    return (_review_only_entry(entry) or entry.get("noPrMode") is True
+            or str(env.get("MC_NO_PR_MODE", "")) == "1")
 
 
 def _auto_review_monitor(task: dict) -> bool:
@@ -8506,7 +8520,7 @@ def process_review_tasks():
             title = task["title"]
             task_type = task.get("task_type", "implementation")
 
-            if _review_only_entry(_find_agent_registry_entry(task_id) or {}):
+            if _pr_delivery_disabled(_find_agent_registry_entry(task_id) or {}):
                 continue  # No PR capture/title edits or delivery automation in this mode.
             if _has_pending_checkpoint(task_id):
                 logging.info(f"  {task_id[:8]} has a pending human checkpoint — delivery automation paused")

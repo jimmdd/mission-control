@@ -1331,7 +1331,7 @@ print(json.dumps({"outcomes": outcomes, "calls": calls}))
   assert.equal(result.calls.filter(call => call[1].endsWith("/done")).length, 1);
   assert.deepEqual(result.calls[0].slice(0, 2), ["POST", "/api/tasks/task-709/done"]);
   assert.match(result.calls[0][2].reason, /merged/i);
-  assert.ok(result.calls.some(call => call[0] === "PATCH" && call[2].status === "on_hold"));
+  assert.ok(!result.calls.some(call => call[0] === "PATCH"));
   assert.ok(result.calls.some(call => call[1].endsWith("/progress") && call[2].state === "blocked"));
 });
 

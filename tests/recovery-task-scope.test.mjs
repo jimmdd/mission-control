@@ -7,7 +7,7 @@ import { test } from 'node:test';
 const swarm = fileURLToPath(new URL('../swarm', import.meta.url));
 const monitor = readFileSync(new URL('../swarm/check-agents.sh', import.meta.url), 'utf8');
 const monitorEnv = monitor.slice(monitor.indexOf('build_agent_env_exports() {'), monitor.indexOf('check_pending_checkpoint() {'));
-const monitorCheckpoints = monitor.slice(monitor.indexOf('check_pending_checkpoint() {'), monitor.indexOf('# Block delivery locally'));
+const monitorCheckpoints = monitor.slice(monitor.indexOf('check_pending_checkpoint() {'), monitor.indexOf('pause_delivery() {'));
 const monitorLoop = monitor.slice(monitor.indexOf('RUNNING_IDS='));
 const monitorController = String.raw`
 import json,subprocess,sys
@@ -67,7 +67,7 @@ with tempfile.TemporaryDirectory(prefix='mc-recovery-scope-') as temp:
         calls.append(['api',method,path])
         if method!='GET':raise AssertionError('unexpected real write')
         if path.endswith('/checkpoints'):return checkpoints
-        if path=='/api/tasks/task947':return task
+        if path=='/api/tasks/task947':return {**task,**config.get('freshTaskPatch',{})}
         raise AssertionError(path)
     bridge.mc_request=request
     bridge.mc_log_activity=lambda *a,**k:calls.append(['activity',a])
@@ -329,7 +329,7 @@ with tempfile.TemporaryDirectory(prefix='mc-recovery-outcome-') as temp:
     bridge.mc_request=request
     bridge.mc_set_progress=lambda *a,**kw:progress.append(kw)
     bridge.mc_log_activity=lambda *a,**kw:None
-    bridge._relaunch_for_change_request=lambda task,prompt,source: launches.append({'source':source,'prompt':prompt}) or True
+    bridge._relaunch_for_change_request=lambda task,prompt,source,**kwargs: launches.append({'source':source,'prompt':prompt}) or True
     def run(args,**kwargs):
         assert 'swarm-state.py' in str(args[1]),args
         patch=json.loads(args[args.index('--patch-json')+1]);patches.append(patch)
@@ -410,3 +410,36 @@ test('bounded technical retry exhaustion retains the failure without asking appr
   assert.match(result.progress[0].blocked_reason, /No approval to skip checks is requested/);
   assert.ok(result.api.every(([method]) => method === 'GET'));
 });
+
+test('the guarded fresh task carries a newly added no-PR restriction into the worker', () => {
+  const freshTaskPatch={triage_state:{no_pr:true}};
+  const result=scenario({freshTaskPatch},retry);
+  assert.equal(result.workers.length,1);
+  assert.equal(result.workers[0].noPr,true);
+  assert.match(result.workers[0].rendered,/LOCAL WORK \/ NO-PR MODE/);
+});
+
+test('a review grant revoked in the guarded task read defeats stale fix-code authority', () => {
+  const result=scenario({freshTaskPatch:{triage_state:{}}},`
+import review_authorization
+record=review_authorization.scope(task,entry)[1]
+record.update(version=1,status='active',autonomousReruns=True,approvalCheckpointId='grant')
+task['triage_state']['review_authorization']=record
+checkpoints.append({'id':'grant','task_id':'task947','status':'approved','response':'Approved exact scope'})
+assert review_authorization.authorized(task,checkpoints,entry)
+assert not bridge._relaunch_for_change_request(task,'Fix the retained code finding',source='review-recovery',require_review_authorization=True)`);
+  assert.equal(result.workers.length,0);
+  assert.equal(result.saved.status,'completed_by_agent');
+});
+
+for (const entry of [{noPrMode:true},{agentEnv:{MC_NO_PR_MODE:'1'}}]) {
+  test(`the bridge leaves no-PR delivery and titles untouched: ${JSON.stringify(entry)}`, () => {
+    const result=scenario({entry:{status:'ready',...entry}},`
+bridge._ensure_pr_title=lambda *a: (_ for _ in ()).throw(AssertionError('NO-PR title write'))
+bridge._capture_pr_for_task(task)
+assert not bridge._auto_review_monitor(task)
+assert not bridge._relaunch_for_change_request(task,'Push a PR fix',source='auto-monitor')`);
+    assert.equal(result.workers.length,0);
+    assert.ok(!result.calls.some(([kind]) => kind==='command'));
+  });
+}

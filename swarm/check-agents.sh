@@ -209,56 +209,38 @@ check_pending_checkpoint() {
   return 1
 }
 
-# Block delivery locally without raising a new checkpoint/comment. A live agent
-# is left intact: PATCH on_hold invokes runtime transitions, so only use it after
-# verifying this task's tmux session is absent.
+# Record a delivery blocker without invoking generic Hold: that API stops the
+# current runtime, which may have changed since this monitor's liveness probe.
+# Only the captured registry entry may be paused; a newer execution wins its CAS.
 pause_delivery() {
-  local task_id="$1" mc_task_id="$2" session="$3" error="$4" reason="$5" payload live_session=false sibling siblings current_task activities hold_message
+  local task_id="$1" mc_task_id="$2" session="$3" error="$4" reason="$5" payload current_task activities message
   local expected_state="${6:-}"
+  if [ -z "$expected_state" ]; then
+    expected_state=$(jq -c --arg id "$task_id" '.[] | select(.id == $id)' "$REGISTRY")
+    [ -n "$expected_state" ] || return 1
+  fi
   if [ -n "$mc_task_id" ]; then
+    if ! current_task=$(mc_curl GET "/api/tasks/$mc_task_id" -fsS --max-time 10 2>/dev/null) || \
+       ! printf '%s' "$current_task" | jq -e 'type == "object" and (.status | type == "string")' >/dev/null 2>&1; then
+      return 1
+    fi
+    case "$(printf '%s' "$current_task" | jq -r '.status')" in
+      done|closed|merged) return 1 ;;
+    esac
     payload=$(jq -n --arg reason "$reason" '{state:"waiting",blocked_reason:$reason}')
     if ! mc_curl PUT "/api/tasks/$mc_task_id/progress" -fsS --max-time 10 \
         -H "Content-Type: application/json" -d "$payload" >/dev/null 2>&1; then
-      echo "[$TIMESTAMP] WARN: $task_id — unable to record delivery blocker; will retry" >> "$LOG"
       return 1
     fi
-    if [ -n "$session" ] && tmux has-session -t "$session" 2>/dev/null; then
-      live_session=true
-    fi
-    if ! siblings=$(jq -r --arg id "$mc_task_id" 'if type != "array" then error("invalid registry") else .[] | select(.mcTaskId == $id) | .tmuxSession // empty end' "$REGISTRY" 2>/dev/null); then
+    message="Monitor blocked delivery: $reason"
+    if ! activities=$(mc_curl GET "/api/tasks/$mc_task_id/activities" -fsS --max-time 10 2>/dev/null) || \
+       ! printf '%s' "$activities" | jq -e 'type == "array"' >/dev/null 2>&1; then
       return 1
     fi
-    while IFS= read -r sibling; do
-      [ -z "$sibling" ] && continue
-      if tmux has-session -t "$sibling" 2>/dev/null; then
-        live_session=true
-      fi
-    done <<< "$siblings"
-    if [ "$live_session" = "false" ]; then
-      if ! current_task=$(mc_curl GET "/api/tasks/$mc_task_id" -fsS --max-time 10 2>/dev/null) || \
-         ! printf '%s' "$current_task" | jq -e 'type == "object" and (.status | type == "string")' >/dev/null 2>&1; then
-        return 1
-      fi
-      if [ "$(printf '%s' "$current_task" | jq -r '.status')" != "on_hold" ]; then
-        # Linear sync recognizes this local hold marker. An ordinary updated
-        # activity has no outbound comment side effect, unlike needs_human.
-        # Record it before PATCH so sync cannot immediately undo the hold.
-        hold_message="Monitor parked delivery on hold: $reason"
-        if ! activities=$(mc_curl GET "/api/tasks/$mc_task_id/activities" -fsS --max-time 10 2>/dev/null) || \
-           ! printf '%s' "$activities" | jq -e 'type == "array"' >/dev/null 2>&1; then
-          return 1
-        fi
-        if ! printf '%s' "$activities" | jq -e --arg message "$hold_message" 'any(.[]; .activity_type == "updated" and .message == $message)' >/dev/null; then
-          payload=$(jq -n --arg message "$hold_message" '{activity_type:"updated",message:$message}')
-          if ! mc_curl POST "/api/tasks/$mc_task_id/activities" -fsS --max-time 10 \
-              -H "Content-Type: application/json" -d "$payload" >/dev/null 2>&1; then
-            return 1
-          fi
-        fi
-      fi
-      if ! mc_curl PATCH "/api/tasks/$mc_task_id" -fsS --max-time 10 \
-          -H "Content-Type: application/json" -d '{"status":"on_hold"}' >/dev/null 2>&1; then
-        echo "[$TIMESTAMP] WARN: $task_id — unable to hold delivery; will retry" >> "$LOG"
+    if ! printf '%s' "$activities" | jq -e --arg message "$message" 'any(.[]; .activity_type == "updated" and .message == $message)' >/dev/null; then
+      payload=$(jq -n --arg message "$message" '{activity_type:"updated",message:$message}')
+      if ! mc_curl POST "/api/tasks/$mc_task_id/activities" -fsS --max-time 10 \
+          -H "Content-Type: application/json" -d "$payload" >/dev/null 2>&1; then
         return 1
       fi
     fi
@@ -951,6 +933,10 @@ if [ -z "$RUNNING_IDS" ]; then
 fi
 
 echo "$RUNNING_IDS" | while read -r TASK_ID; do
+  DELIVERY_STATE=$(jq -c --arg id "$TASK_ID" '.[] | select(.id == $id and .status == "running") |
+    {status,launchAttemptId,runStartedAt,changeRequestAt,changeRequestSource,completionOriginSource,deliveryPending,reviewOnly,noPrMode,
+     "agentEnv.MC_REVIEW_ONLY":.agentEnv.MC_REVIEW_ONLY,"agentEnv.MC_NO_PR_MODE":.agentEnv.MC_NO_PR_MODE}' "$REGISTRY")
+  [ -n "$DELIVERY_STATE" ] || continue
   SESSION=$(jq -r ".[] | select(.id == \"$TASK_ID\") | .tmuxSession" "$REGISTRY")
   BRANCH=$(jq -r ".[] | select(.id == \"$TASK_ID\") | .branch" "$REGISTRY")
   REPO=$(jq -r ".[] | select(.id == \"$TASK_ID\") | .repo" "$REGISTRY")
@@ -970,7 +956,7 @@ echo "$RUNNING_IDS" | while read -r TASK_ID; do
     fi
     check_pending_checkpoint "$MC_TASK_ID"; CHECKPOINT_STATUS=$?
     if [ "$CHECKPOINT_STATUS" -eq 0 ]; then
-      pause_delivery "$TASK_ID" "$MC_TASK_ID" "$SESSION" "pending_human_checkpoint" "$CHECKPOINT_REASON"
+      pause_delivery "$TASK_ID" "$MC_TASK_ID" "$SESSION" "pending_human_checkpoint" "$CHECKPOINT_REASON" "$DELIVERY_STATE"
       continue
     elif [ "$CHECKPOINT_STATUS" -eq 2 ]; then
       echo "[$TIMESTAMP] DELIVERY WAIT: $TASK_ID — unable to verify pending checkpoints" >> "$LOG"
@@ -1045,6 +1031,12 @@ echo "$RUNNING_IDS" | while read -r TASK_ID; do
     continue
   fi
 
+  NO_PR_MODE=$(jq -r ".[] | select(.id == \"$TASK_ID\") | (.noPrMode == true or .agentEnv.MC_NO_PR_MODE == \"1\")" "$REGISTRY")
+  if [ "$NO_PR_MODE" = "true" ]; then
+    echo "[$TIMESTAMP] LOCAL WORK: $TASK_ID — no-PR scope defers PR/CI delivery automation" >> "$LOG"
+    continue
+  fi
+
   # Check if this is an investigation task (no PR expected)
   TASK_TYPE=""
   if [ -n "$MC_TASK_ID" ]; then
@@ -1074,9 +1066,9 @@ echo "$RUNNING_IDS" | while read -r TASK_ID; do
     # Completed handoffs must instead retain the work and surface the blocker.
     if [ "$DELIVERY_PENDING" = "true" ]; then
       if [ "$TASK_PR_STATE" = "CLOSED" ]; then
-        pause_delivery "$TASK_ID" "$MC_TASK_ID" "$SESSION" "pr_closed_without_replacement" "Required PR $PR_URL was closed without merging; preserved work needs a replacement PR handoff"
+        pause_delivery "$TASK_ID" "$MC_TASK_ID" "$SESSION" "pr_closed_without_replacement" "Required PR $PR_URL was closed without merging; preserved work needs a replacement PR handoff" "$DELIVERY_STATE"
       else
-        pause_delivery "$TASK_ID" "$MC_TASK_ID" "$SESSION" "merged_pr_delivery_unreconciled" "PR $PR_URL was merged, but task delivery is not reconciled; verify outstanding acceptance criteria before resuming"
+        pause_delivery "$TASK_ID" "$MC_TASK_ID" "$SESSION" "merged_pr_delivery_unreconciled" "PR $PR_URL was merged, but task delivery is not reconciled; verify outstanding acceptance criteria before resuming" "$DELIVERY_STATE"
       fi
     fi
     continue
@@ -1084,7 +1076,7 @@ echo "$RUNNING_IDS" | while read -r TASK_ID; do
 
   if [ -z "$PR_NUM" ]; then
     if [ "$DELIVERY_PENDING" = "true" ]; then
-      pause_delivery "$TASK_ID" "$MC_TASK_ID" "$SESSION" "delivery_pr_missing" "Required PR for the completed agent handoff is missing; preserved work needs delivery reconciliation"
+      pause_delivery "$TASK_ID" "$MC_TASK_ID" "$SESSION" "delivery_pr_missing" "Required PR for the completed agent handoff is missing; preserved work needs delivery reconciliation" "$DELIVERY_STATE"
       continue
     fi
     echo "[$TIMESTAMP] RUNNING: $TASK_ID — no PR yet" >> "$LOG"
@@ -1189,6 +1181,9 @@ echo "$RUNNING_IDS" | while read -r TASK_ID; do
   READINESS=$(python3 "$READINESS_GATE" check "$PR_URL")
   [ "$(printf '%s' "$READINESS" | jq -r '.status')" = "pass" ] || continue
 
+  # A green Git head cannot authorize overwriting a newer human execution.
+  state_update "$TASK_ID" '{}' "delivery-ready-claim" "$DELIVERY_STATE" || continue
+
   AGENT_SUMMARY=""
   extract_agent_summary "$TASK_ID" "$WORKTREE"
 
@@ -1206,7 +1201,7 @@ echo "$RUNNING_IDS" | while read -r TASK_ID; do
     mc_add_deliverable "$MC_TASK_ID" "Pull Request #$PR_NUM" "$PR_URL"
     mc_complete_task "$MC_TASK_ID" "$summary_text" "review" "$PR_URL" || continue
   fi
-  state_update "$TASK_ID" "{\"status\":\"ready\",\"pr\":$PR_NUM,\"deliveryPending\":false,\"completionSyncedAt\":\"$TIMESTAMP\"}" "ready-with-pr"
+  state_update "$TASK_ID" "{\"status\":\"ready\",\"pr\":$PR_NUM,\"deliveryPending\":false,\"completionSyncedAt\":\"$TIMESTAMP\"}" "ready-with-pr" "$DELIVERY_STATE" || continue
 
   # Distill knowledge from task artifacts into Context Fabrica
   if [ -f "$SWARM_DIR/knowledge-distill.py" ]; then

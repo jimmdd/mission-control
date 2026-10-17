@@ -43,7 +43,7 @@ with tempfile.TemporaryDirectory() as tmp:
  ids=['qa','lanes','infra','lost-review','held','running','pending','auth','stale','repeated','exhausted','held-race']
  tasks=[{'id':n,'status':'review'} for n in ids if n!='held']
  entries={n:{'id':n,'worktree':str(root/n),'status':'running' if n=='running' else 'completed_by_agent','tmuxSession':n} for n in ids}
- entries['lost-review'].update(status='running',reviewOnly=True)
+ entries['lost-review'].update(status='running',reviewOnly=True,changeRequestSource='review-recovery')
  actions={'qa':'complete_local_qa','lanes':'complete_independent_review','infra':'bounded_readonly_diagnosis','lost-review':'resume_review','auth':'request_specific_decision'}
  for n in ids:
   key=hashlib.sha256(str((root/n).resolve()).encode()).hexdigest()[:24];p=root/'pr-review-state/runs'/key/'latest.json';p.parent.mkdir(parents=True)
@@ -57,9 +57,9 @@ with tempfile.TemporaryDirectory() as tmp:
  bridge._escalation_floor=lambda _:0
  review_run.snapshot=lambda *a:{'head':'head','base':'base','clean':True}
  bridge.subprocess.run=lambda *a,**k:SimpleNamespace(returncode=0)
- bridge.mc_request=lambda method,path:{'id':path.split('/')[-1],'status':'on_hold' if path.endswith('held-race') else 'review'}
+ bridge.mc_request=lambda method,path:[] if path.endswith('/checkpoints') else {'id':path.split('/')[-1],'status':'on_hold' if path.endswith('held-race') else 'review'}
  resumed=[];blocked=[]
- bridge._relaunch_for_change_request=lambda task,text,source:resumed.append([task['id'],source,text]) or True
+ bridge._relaunch_for_change_request=lambda task,text,source,**kwargs:resumed.append([task['id'],source,text]) or True
  bridge.mc_set_progress=lambda tid,**k:blocked.append([tid,k])
  bridge.mc_log_activity=lambda *a,**k:None
  bridge.process_local_review_recovery()
@@ -80,18 +80,22 @@ with tempfile.TemporaryDirectory() as tmp:
  entry={'id':'MET-939','mcTaskId':'task','status':'completed_by_agent','worktree':str(work),'tmuxSession':'task-session','agent':'claude'}
  (root/'active-tasks.json').write_text(json.dumps([entry]));(root/'prompts/MET-939-change-request.md').write_text('User decision: do not publish. Preserve reviewed card assets.')
  bridge._has_pending_checkpoint=lambda _:False;bridge._tmux_session_alive=lambda _:False
- bridge.mc_request=lambda *a:{'id':'task','status':'review'}
+ bridge.mc_request=lambda method,path,*a:[] if path.endswith('/checkpoints') else {'id':'task','status':'review'}
  calls=[];progress=[]
  bridge.subprocess.run=lambda args,**k:calls.append(args) or SimpleNamespace(returncode=0,stdout='',stderr='')
  bridge.mc_update_task=lambda *a:None;bridge.mc_log_activity=lambda *a,**k:None;bridge.mc_set_progress=lambda *a,**k:progress.append(k)
  ok=bridge._relaunch_for_change_request({'id':'task'},'Complete current-head QA',source='review-recovery')
- prompt=(root/'prompts/MET-939-change-request.md').read_text()
+ prompt=(root/'prompts/MET-939-review-recovery.md').read_text()
+ human=(root/'prompts/MET-939-change-request.md').read_text()
  bridge._tmux_session_alive=lambda _:True
  blocked=bridge._relaunch_for_change_request({'id':'task'},'again',source='review-recovery')
- print(json.dumps({'ok':ok,'blocked':blocked,'prompt':prompt,'calls':calls,'progress':progress}))
+ print(json.dumps({'ok':ok,'blocked':blocked,'prompt':prompt,'human':human,'calls':calls,'progress':progress}))
 `);
  assert.equal(r.ok,true);assert.equal(r.blocked,false);
- assert.match(r.prompt,/User decision: do not publish/);assert.match(r.prompt,/NO-PR MODE/);
+ assert.match(r.prompt,/User decision: do not publish/);
+ assert.equal(r.human,'User decision: do not publish. Preserve reviewed card assets.');
+ assert.match(r.prompt,/original task scope unchanged/);
+ assert.doesNotMatch(r.prompt,/CURRENT EXECUTION MODE: LOCAL VERIFICATION ONLY/);
  assert.ok(!r.calls.some(x=>x.includes('kill-session')));
  assert.equal(r.progress[0].phase,'review');assert.match(r.progress[0].step_label,/recoverable local review gaps/);
 });
@@ -105,7 +109,7 @@ with tempfile.TemporaryDirectory() as tmp:
  entry={'id':'MET-939','mcTaskId':'task','status':'completed_by_agent','worktree':str(work),'tmuxSession':'task-session','agent':'claude'}
  registry=root/'active-tasks.json';registry.write_text(json.dumps([entry]));(root/'prompts/MET-939-change-request.md').write_text('Review only; do not publish.')
  bridge._has_pending_checkpoint=lambda _:False;bridge._tmux_session_alive=lambda _:False
- bridge.mc_request=lambda *a:{'id':'task','status':'review'}
+ bridge.mc_request=lambda method,path,*a:[] if path.endswith('/checkpoints') else {'id':'task','status':'review'}
  attempted=threading.Event();threads=[];promoted=[]
  def hold():
   with (root/'active-tasks.lock').open('a+') as lock:
@@ -140,7 +144,7 @@ with tempfile.TemporaryDirectory() as tmp:
  def save(args,**kw):
   if '--patch-json' in args:entry.update(json.loads(args[args.index('--patch-json')+1]))
   return SimpleNamespace(returncode=0)
- bridge.subprocess.run=save;bridge.mc_request=lambda *a:task
+ bridge.subprocess.run=save;bridge.mc_request=lambda method,path,*a: [] if path.endswith('/checkpoints') else task
  launches=[]
  def launch(*a,**k):launches.append('attempt');return len(launches)>1
  bridge._relaunch_for_change_request=launch;bridge.mc_log_activity=lambda *a,**k:None;bridge.mc_set_progress=lambda *a,**k:None
@@ -177,7 +181,7 @@ with tempfile.TemporaryDirectory() as tmp:
   elif 'pr' in args:commands.append(args)
   return SimpleNamespace(returncode=0,stdout=json.dumps({'title':'Missing ticket prefix'}),stderr='')
  bridge.subprocess.run=run
- bridge.mc_request=lambda method,path:([{'deliverable_type':'pr','path':'https://github.com/acme/app/pull/1'}] if path.endswith('/deliverables') else task)
+ bridge.mc_request=lambda method,path:([] if path.endswith('/checkpoints') else [{'deliverable_type':'pr','path':'https://github.com/acme/app/pull/1'}] if path.endswith('/deliverables') else task)
  bridge.mc_set_progress=lambda *a,**k:None;bridge.mc_log_activity=lambda *a,**k:None
  bridge._check_pr_status_for_task=lambda _:False
  bridge._collect_dashboard_feedback=lambda _:feedback.append('consumed') or 'push fix'
@@ -194,9 +198,9 @@ with tempfile.TemporaryDirectory() as tmp:
  assert.equal(r.commands.length,1);assert.equal(r.commands[0][1],'new-session');
  assert.deepEqual(r.feedback,[]);assert.deepEqual(r.metadata,[]);assert.equal(r.monitorExists,false);
  assert.equal(r.monitored,false);assert.equal(r.overwritten,false);
- assert.equal(r.entry.reviewOnly,true);assert.equal(r.entry.agentEnv.MC_REVIEW_ONLY,'1');
+ assert.equal(r.entry.reviewOnly,undefined);assert.equal(r.entry.agentEnv.MC_REVIEW_ONLY,undefined);
  assert.equal(r.entry.agentEnv.MC_MAX_FAILOVER_DEPTH,'0');
- assert.match(r.entry.agentEnv.PROMPT_OVERRIDE,/MET-939-change-request\.md$/);
+ assert.match(r.entry.agentEnv.PROMPT_OVERRIDE,/MET-939-review-recovery\.md$/);
 });
 
 test('a lost owned recovery continues once before a new gate, while ordinary handback and the cap remain deduplicated',()=>{
@@ -214,7 +218,7 @@ for loss in ['running','reaped']:
   ended=datetime.now(timezone.utc)-timedelta(minutes=1)
   p.write_text(json.dumps({'runId':'review1','head':'head','base':'base','baseRef':'origin/master','endedAt':ended.isoformat(),'nextAction':'complete_local_qa','log':'review.log'}))
   bridge.fetch_tasks_by_status=lambda status:[task] if status=='review' else []
-  bridge._has_pending_checkpoint=lambda _:False;bridge.mc_request=lambda *a:task
+  bridge._has_pending_checkpoint=lambda _:False;bridge.mc_request=lambda method,path,*a: [] if path.endswith('/checkpoints') else task
   live=[];launches=[];blocked=[]
   bridge._tmux_session_alive=lambda _:bool(live)
   review_run.snapshot=lambda *a:{'head':'head','base':'base','clean':True}
@@ -243,6 +247,7 @@ test('the shell monitor defers local-only respawn to the locked owner, including
   const source=readFileSync(join(swarm,'check-agents.sh'),'utf8');
   const builder=source.slice(source.indexOf('build_agent_env_exports() {'),source.indexOf('resolve_launcher_path() {'));
   const reconcile=source.slice(source.indexOf('reconcile_completed_agents_to_mc() {'),source.indexOf('mc_post_activity() {'));
+  const deliveryHelpers=source.slice(source.indexOf('check_pending_checkpoint() {'),source.indexOf('reconcile_completed_agents_to_mc() {'));
   const loop=source.slice(source.indexOf('RUNNING_IDS='));
   for(const scenario of ['completed','live','dead','hold-race']) {
    writeFileSync(calls,'');
@@ -256,7 +261,7 @@ SWARM_DIR=${JSON.stringify(root)}
 TIMESTAMP=fixture
 SCENARIO=${scenario}
 state_update(){ echo "state:$*" >> ${JSON.stringify(calls)}; }
-mc_curl(){ echo '{"status":"review","task_type":"implementation"}'; }
+mc_curl(){ if [[ "$2" == */checkpoints ]]; then echo '[]'; else echo '{"status":"review","task_type":"implementation"}'; fi; }
 mc_post_activity(){ :; }
 mc_complete_task(){ echo unexpected-completion >> ${JSON.stringify(calls)}; }
 log_health_check(){
@@ -272,6 +277,7 @@ tmux(){
  else echo "tmux:$*" >> ${JSON.stringify(calls)}; fi
 }
 ${builder}
+${deliveryHelpers}
 ${reconcile}
 reconcile_completed_agents_to_mc
 ${loop}`;

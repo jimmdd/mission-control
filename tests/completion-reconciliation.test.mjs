@@ -50,6 +50,13 @@ elif kind=='api':
         if key=='checkpoints' and config.get('concurrentCheckpointPatch'):
             rows=json.loads(registry.read_text());rows[0].update(config.pop('concurrentCheckpointPatch'))
             registry.write_text(json.dumps(rows));scenario.write_text(json.dumps(config))
+        if key=='activities' and config.get('lateBookkeepingPatch'):
+            rows=json.loads(registry.read_text());rows[0].update(config.pop('lateBookkeepingPatch'))
+            registry.write_text(json.dumps(rows));scenario.write_text(json.dumps(config))
+        if key=='task' and config.get('taskReadPatch'):
+            config['taskReads']=config.get('taskReads',0)+1
+            if config['taskReads']>=config.get('taskReadPatchAt',2):config['task'].update(config.pop('taskReadPatch'))
+            scenario.write_text(json.dumps(config))
         value=config.get(key)
         print(value if isinstance(value,str) else json.dumps(value))
     else:
@@ -75,6 +82,10 @@ elif kind=='tmux':
     sys.exit(0 if config.get('liveSession') or args[-1] in config.get('liveSessions',[]) else 1)
 elif kind=='gate':
     print(json.dumps({'status':config.get('gateStatus','pending')}))
+elif kind=='review':
+    if config.get('concurrentReviewPatch'):
+        rows=json.loads(registry.read_text());rows[0].update(config.pop('concurrentReviewPatch'))
+        registry.write_text(json.dumps(rows));scenario.write_text(json.dumps(config))
 elif kind=='complete':
     if config.get('concurrentCallbackPatch'):
         rows=json.loads(registry.read_text());rows[0].update(config.pop('concurrentCallbackPatch'))
@@ -148,13 +159,13 @@ test('an unmerged closed PR pauses delivery, preserves work, and is idempotent',
   assert.equal(result.registry.lastError, 'pr_closed_without_replacement');
   assert.equal(result.registry.deliveryPending, false);
   assert.equal(result.registry.branch, 'feature/preserved');
-  assert.equal(result.config.task.status, 'on_hold');
+  assert.equal(result.config.task.status, 'in_progress', 'automatic blockers never invoke runtime-stopping Hold');
   assert.equal(result.config.progress.state, 'waiting');
   assert.match(result.config.progress.blocked_reason, /replacement PR handoff/);
   assert.equal(result.calls.filter(([kind]) => kind === 'state').length, 2, 'claim and guarded pause are separate atomic transitions');
   assert.equal(result.config.activities.length, 1);
   assert.equal(result.config.activities[0].activity_type, 'updated');
-  assert.match(result.config.activities[0].message, /parked delivery on hold/);
+  assert.match(result.config.activities[0].message, /blocked delivery/);
   assertNoCompletionOrLaunch(result);
 });
 
@@ -280,7 +291,7 @@ test('a stale completion sync marker cannot hide a closed PR on an active ticket
   assert.equal(result.registry.status, 'paused');
   assert.equal(result.registry.lastError, 'pr_closed_without_replacement');
   assert.equal(result.registry.completionSyncedAt, null);
-  assert.equal(result.config.task.status, 'on_hold');
+  assert.equal(result.config.task.status, 'in_progress', 'automatic blockers never invoke runtime-stopping Hold');
   assertNoCompletionOrLaunch(result);
 });
 
@@ -321,7 +332,7 @@ test('existing delivery-pending entries surface closed, missing, and merged PR b
     const result = fixture({mode:'running', registry:{status:'running',deliveryPending:true}, prs});
     assert.equal(result.registry.status, 'paused');
     assert.equal(result.registry.lastError, error);
-    assert.equal(result.config.task.status, 'on_hold');
+    assert.equal(result.config.task.status, 'in_progress', 'automatic blockers never invoke runtime-stopping Hold');
     assertNoCompletionOrLaunch(result);
   }
 });
@@ -382,14 +393,11 @@ test('rate-limit retry cannot relaunch an agent with an unanswered checkpoint', 
 });
 
 test('failed blocker bookkeeping stays retryable without promoting completion', () => {
-  for (const writeError of ['PUT','POST','PATCH']) {
+  for (const writeError of ['PUT','POST']) {
     const result = fixture({mode:'handoff',prs:[pr('CLOSED')],writeError});
     assert.equal(result.registry.status, 'running');
     assert.equal(result.registry.deliveryPending, true, 'the monitor retains delivery ownership for a later retry');
     assert.equal(result.calls.filter(([kind]) => kind === 'state').length,1);
-    if (writeError === 'PATCH') {
-      assert.equal(result.config.activities.length, 1, 'retry must reuse the same local hold marker');
-    }
     assertNoCompletionOrLaunch(result);
   }
 });
@@ -404,3 +412,43 @@ test('an unreadable local hold marker list cannot silently advance delivery book
     assertNoCompletionOrLaunch(result);
   }
 });
+
+for (const lateBookkeepingPatch of [
+  {status:'running', runStartedAt:2, changeRequestSource:'dashboard'},
+  {status:'paused', heldAt:'new-human-hold'},
+]) {
+  test(`late delivery bookkeeping cannot hold or overwrite a new owner: ${JSON.stringify(lateBookkeepingPatch)}`, () => {
+    const result=fixture({prs:[pr('CLOSED')],registry:{runStartedAt:1},lateBookkeepingPatch});
+    for (const [key,value] of Object.entries(lateBookkeepingPatch)) assert.deepEqual(result.registry[key],value);
+    assert.ok(!result.calls.some(([kind,method]) => kind==='api' && method==='PATCH'));
+    assert.ok(!result.calls.some(([kind,action]) => kind==='tmux' && action!=='has-session'));
+  });
+}
+
+for (const status of ['done','closed']) {
+  test(`blocker bookkeeping does not reopen a terminal task: ${status}`, () => {
+    const result=fixture({prs:[pr('CLOSED')],taskReadPatch:{status}});
+    assert.equal(result.config.task.status,status);
+    assert.ok(!result.calls.some(([kind,method]) => kind==='api' && method!=='GET'));
+    assertNoCompletionOrLaunch(result);
+  });
+}
+
+for (const registry of [{noPrMode:true},{agentEnv:{MC_NO_PR_MODE:'1'}}]) {
+  test(`live no-PR work never enters PR delivery automation: ${JSON.stringify(registry)}`, () => {
+    const result=fixture({mode:'running',registry:{status:'running',...registry},liveSession:true,prs:[pr('OPEN')]});
+    assert.equal(result.registry.status,'running');
+    assert.ok(!result.calls.some(([kind]) => ['gh','gate','complete','launcher','deliverable'].includes(kind)));
+  });
+}
+
+for (const stage of ['concurrentReviewPatch','concurrentCallbackPatch']) {
+  test(`a newer human execution survives PR readiness during ${stage}`, () => {
+    const newer={status:'running',runStartedAt:2,changeRequestAt:'new-human',changeRequestSource:'dashboard',deliveryPending:false};
+    const result=fixture({mode:'handoff',registry:{runStartedAt:1},gateStatus:'pass',[stage]:newer});
+    for (const [key,value] of Object.entries(newer)) assert.deepEqual(result.registry[key],value);
+    assert.ok(result.calls.some(([kind]) => kind==='review'));
+    if (stage==='concurrentReviewPatch') assert.ok(!result.calls.some(([kind]) => kind==='complete'));
+    else assert.equal(result.calls.filter(([kind]) => kind==='complete').length,1);
+  });
+}

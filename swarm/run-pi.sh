@@ -34,7 +34,7 @@ if [ ! -f "$PROMPT_FILE" ]; then
   exit 1
 fi
 
-PROMPT=$(cat "$PROMPT_FILE")
+PROMPT=$(python3 "$SCRIPT_DIR/execution_prompt.py" "$PROMPT_FILE" "")
 
 update_registry() {
   local field="$1"
