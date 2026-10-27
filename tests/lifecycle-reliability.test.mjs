@@ -1111,6 +1111,10 @@ with tempfile.TemporaryDirectory() as root:
         "launcher": "claude", "agentProfile": "claude",
     }]
     (bridge.SWARM_DIR / "active-tasks.json").write_text(json.dumps(registry))
+    # Automatic recovery reads fresh state and must not launch over a live session.
+    bridge.mc_request = lambda method, path, body=None: (
+        [] if path.endswith("/checkpoints") else {"status": "review"})
+    bridge._tmux_session_alive = lambda _: False
     bridge._design_prompt_section = lambda _: ""
     bridge._video_prompt_section = lambda _: ""
     bridge._supercut_prompt_section = lambda _: ""
