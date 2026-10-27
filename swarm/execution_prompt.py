@@ -4,6 +4,17 @@ import os
 from pathlib import Path
 import sys
 
+TESTING_GUIDANCE = """
+TEST QUALITY — USER PREFERENCE (applies to all coding work):
+Each test must protect distinct functional behavior or catch a real regression; never add
+tests for counts or optics. Inspect and reuse existing coverage and fixtures first.
+For a small fix, add only the minimal missing regression and focused checks; verify it
+fails before the fix and passes after where practical. Do not repeat the same parsing
+matrix at database, HTTP and UI layers when those layers' behavior is unchanged.
+Clean up redundant tests when in scope, preserving every unique behavior and safety
+check; do not delete unique coverage just to shorten a file.
+"""
+
 REVIEW_ONLY_SUFFIX = '''
 
 CURRENT EXECUTION MODE: LOCAL VERIFICATION ONLY / NO-PR MODE.
@@ -32,7 +43,7 @@ a concrete missing permission or product decision still uses the checkpoint prot
 
 def render(prompt, default_suffix, review_only, no_pr=False):
     suffix = REVIEW_ONLY_SUFFIX if review_only else NO_PR_SUFFIX if no_pr else default_suffix
-    return prompt + '\n' + suffix + '\n'
+    return prompt + '\n' + TESTING_GUIDANCE + '\n' + suffix + '\n'
 
 
 if __name__ == '__main__':
