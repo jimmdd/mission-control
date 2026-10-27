@@ -20,6 +20,7 @@ export function operationalHealth(db: MissionControlDB, home: string, options: {
   };
   const reasons: string[] = [];
   const database = db.runtimeHealth();
+  const pendingCheckpointCounts = db.getPendingCheckpointCounts();
   if (!database.schemaReady) reasons.push("database_schema_outdated");
   const sync = receipt(join(home, "sync", "linear-state.json"));
   const syncAge = age(sync?.last_sync);
@@ -63,9 +64,16 @@ export function operationalHealth(db: MissionControlDB, home: string, options: {
     if (["failed", "blocked", "auth_blocked"].includes(entry.status)) failedWorkers++;
   }
   if (failedWorkers) reasons.push("agent_execution_blocked");
-  let unacknowledged = 0, stalled = 0;
+  let running = 0, awaitingDelivery = 0, unacknowledged = 0, stalled = 0;
   for (const entry of relevant) {
+    // The execution has finished; delivery/review may still need work or a
+    // human decision, but there is no agent left to send heartbeats.
+    if (entry.deliveryPending === true) {
+      awaitingDelivery++;
+      continue;
+    }
     if (entry.status !== "running") continue;
+    running++;
     if (entry.launchState === "starting" && !entry.launchAcknowledgedAt && (age(entry.startedAt) ?? Infinity) > 90) unacknowledged++;
     if ((age(entry.lastHeartbeatAt ?? entry.startedAt) ?? Infinity) > 300) stalled++;
   }
@@ -78,6 +86,10 @@ export function operationalHealth(db: MissionControlDB, home: string, options: {
     linear: { enabled: linearEnabled, lastSuccessAt: sync?.last_sync ?? null, ageSeconds: syncAge, failedIssues: Object.keys(sync?.failed_issues ?? {}).length },
     bridge: { enabled: bridgeEnabled, ageSeconds: bridgeAge, consecutiveFailures: bridge?.consecutive_failures ?? 0 },
     queue: { oldestAgeSeconds: queueAge },
-    agents: { unacknowledged, stalled },
+    agents: { running, awaitingDelivery, unacknowledged, stalled },
+    checkpoints: {
+      pending: Object.values(pendingCheckpointCounts).reduce((total, count) => total + count, 0),
+      tasksAwaitingHuman: Object.keys(pendingCheckpointCounts).length,
+    },
   };
 }

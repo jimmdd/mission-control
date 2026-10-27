@@ -62,6 +62,8 @@ elif kind=='api':
     else:
         if config.get('writeError')==method: sys.exit(1)
         payload=json.loads(args[args.index('-d')+1])
+        if method=='PATCH' and payload.get('status')=='testing' and config.pop('failTestingOnce',False):
+            scenario.write_text(json.dumps(config));sys.exit(1)
         if method=='PUT': config.update(progress=payload)
         elif method=='POST': config['activities'].append(payload)
         else: config['task'].update(payload)
@@ -176,7 +178,7 @@ test('an open replacement wins over a historical closed or merged PR', () => {
   assert.equal(result.registry.deliveryPending, true);
   assert.ok(result.calls.some(([kind,,,url]) => kind === 'deliverable' && url === pr('OPEN',3).url));
   assert.ok(!result.calls.some(([kind]) => kind === 'complete'));
-  assert.equal(result.config.task.status, 'in_progress');
+  assert.equal(result.config.task.status, 'testing');
 });
 
 for (const gateStatus of ['pending','pass']) {
@@ -507,3 +509,15 @@ for (const gateStatus of ['ci_failed','review_blocked']) {
     assert.equal(result.registry.deliveryPending,true);
   });
 }
+
+
+test('PR handoff retries a failed Testing write before completing delivery ownership',()=>{
+  const result=fixture({repeat:true,failTestingOnce:true});
+  const patches=result.calls.filter(([kind,method])=>kind==='api'&&method==='PATCH');
+  assert.equal(patches.length,2);
+  assert.equal(result.config.task.status,'testing');
+  assert.equal(result.registry.changeRequestSource,'');
+  assert.equal(result.registry.deliveryPending,true);
+  assert.equal(result.calls.filter(([kind])=>kind==='deliverable').length,1);
+  assert.ok(!result.calls.some(([kind])=>['complete','launcher'].includes(kind)));
+});

@@ -83,6 +83,7 @@ mc_complete_task(){ [ "$SCENARIO" != completion_rejected ]; }
 log_health_check(){ :; }
 extract_agent_summary(){ :; }
 validate_gsd_artifacts(){ GSD_STATUS=passed; return 0; }
+pin_delivery_base(){ return 0; }
 run_codex_review(){ CODEX_REVIEW="$SCENARIO"; [ "$SCENARIO" != review_unavailable ]; }
 review_has_blocking_issues(){ [ "$SCENARIO" = review_failed ]; }
 tmux(){ echo unexpected-tmux >> ${JSON.stringify(output)}; return 1; }

@@ -513,3 +513,86 @@ print(json.dumps({"first": first, "second": second, "creates": creates}))
   assert.equal(result.creates[0].variables.input.teamId, "team-id");
   assert.equal(result.creates[0].variables.input.assigneeId, "user-id");
 });
+
+
+test("Linear's real missing-issue error allows first creation and preserves server timestamp", () => {
+  const result = runPython(`
+linear_sync.os.environ["LINEAR_API_KEY"] = "offline-test-key"
+linear_sync.os.environ["LINEAR_INTERACTION"] = "updates"
+calls = []
+class Reply:
+    def __init__(self, data): self.data = data
+    def __enter__(self): return self
+    def __exit__(self, *args): return False
+    def read(self): return json.dumps(self.data).encode()
+def request(req, timeout=0):
+    body = json.loads(req.data)
+    query = body["query"]
+    calls.append(query)
+    if "issue(id:$id)" in query:
+        return Reply({"errors": [{"message": "Entity not found: Issue", "path": ["issue"], "extensions": {"code": "INPUT_ERROR", "statusCode": 400}}]})
+    if "teams(first:2" in query:
+        return Reply({"data": {"teams": {"nodes": [{"id": "team", "key": "MET"}]}}})
+    if "users(first:250)" in query:
+        return Reply({"data": {"users": {"nodes": [{"id": "jinglun", "name": "Jinglun", "email": "jinglun@metadao.fi", "active": True}]}}})
+    if "issueCreate" in query:
+        assert linear_sync.uuid.UUID(body["variables"]["input"]["id"]).version == 4
+        return Reply({"data": {"issueCreate": {"success": True, "issue": {"id": body["variables"]["input"]["id"], "identifier": "MET-123", "createdAt": "2026-10-27T22:00:00.123Z"}}}})
+    raise AssertionError(query)
+linear_sync.urllib.request.urlopen = request
+result = linear_sync.create_linear_issue("Countdown", "Scoped diagnosis", "test-missing-issue", "MET", "jinglun@metadao.fi")
+print(json.dumps({"result": result, "calls": calls}))
+`);
+  assert.equal(result.result.created, true);
+  assert.equal(result.result.issue.createdAt, "2026-10-27T22:00:00.123Z");
+  assert.equal(result.calls.filter((q) => q.includes("issueCreate")).length, 1);
+  assert.ok(result.calls.filter((q) => q.includes("issue(id:$id)") || q.includes("issueCreate")).every((q) => q.includes("createdAt")));
+});
+
+test("issue lookup propagates auth, mixed GraphQL errors and transport failures", () => {
+  const result = runPython(`
+linear_sync.os.environ["LINEAR_API_KEY"] = "offline-test-key"
+cases = [
+    [{"message": "Unauthorized", "path": ["issue"], "extensions": {"code": "AUTHENTICATION_ERROR"}}],
+    [{"message": "Entity not found: Issue", "path": ["other"], "extensions": {"code": "INPUT_ERROR"}}],
+    [{"message": "Entity not found: Issue", "path": ["issue"], "extensions": {"code": "INPUT_ERROR"}}, {"message": "Unauthorized"}],
+]
+class Reply:
+    def __init__(self, errors): self.errors = errors
+    def __enter__(self): return self
+    def __exit__(self, *args): return False
+    def read(self): return json.dumps({"errors": self.errors}).encode()
+blocked = []
+for errors in cases:
+    linear_sync.urllib.request.urlopen = lambda *a, **kw: Reply(errors)
+    try: linear_sync._fetch_created_issue("new-id")
+    except RuntimeError: blocked.append(True)
+    else: blocked.append(False)
+def unavailable(*a, **kw): raise TimeoutError("offline transport timeout")
+linear_sync.urllib.request.urlopen = unavailable
+try: linear_sync._fetch_created_issue("new-id")
+except TimeoutError: blocked.append(True)
+else: blocked.append(False)
+print(json.dumps(blocked))
+`);
+  assert.deepEqual(result, [true, true, true, true]);
+});
+
+
+test("creation recovers a legacy deterministic v5 issue before writing", () => {
+  const result = runPython(`
+linear_sync.os.environ["LINEAR_INTERACTION"] = "updates"
+legacy = str(linear_sync.uuid.uuid5(linear_sync.uuid.NAMESPACE_URL, "mission-control-linear:legacy-request"))
+lookups = []
+def lookup(issue_id):
+    lookups.append(issue_id)
+    return {"id": legacy, "createdAt": "2026-10-01T00:00:00Z"} if issue_id == legacy else None
+linear_sync._fetch_created_issue = lookup
+linear_sync._resolve_create_team = lambda *args: (_ for _ in ()).throw(AssertionError("must recover before creation"))
+result = linear_sync.create_linear_issue("Existing", "", "legacy-request", "MET", "")
+print(json.dumps({"result": result, "versions": [linear_sync.uuid.UUID(x).version for x in lookups]}))
+`);
+  assert.equal(result.result.created, false);
+  assert.equal(result.result.issue.createdAt, "2026-10-01T00:00:00Z");
+  assert.deepEqual(result.versions, [4, 5]);
+});

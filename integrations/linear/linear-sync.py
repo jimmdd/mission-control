@@ -179,6 +179,14 @@ def save_state(state: dict):
     atomic_write_json(STATE_FILE, state)
 
 
+class LinearQueryError(RuntimeError):
+    """Keep GraphQL error details so callers can distinguish absence from failure."""
+
+    def __init__(self, errors: list):
+        self.errors = errors
+        super().__init__(f"Linear API error: {errors}")
+
+
 def linear_query(query: str, variables: Optional[dict] = None) -> dict:
     """Execute a Linear GraphQL query.
 
@@ -206,7 +214,7 @@ def linear_query(query: str, variables: Optional[dict] = None) -> dict:
     with urllib.request.urlopen(req, timeout=30) as resp:
         data = json.loads(resp.read())
         if "errors" in data:
-            raise RuntimeError(f"Linear API error: {data['errors']}")
+            raise LinearQueryError(data["errors"])
         return data["data"]
 
 
@@ -2343,18 +2351,31 @@ def _resolve_create_assignee(email: str) -> Optional[dict]:
 
 
 def _fetch_created_issue(issue_id: str) -> Optional[dict]:
-    data = linear_query(
-        """
-        query($id:String!){
-          issue(id:$id) {
-            id identifier title description url priority
-            team { id key name }
-            assignee { id name email }
-          }
-        }
-        """,
-        {"id": issue_id},
-    )
+    try:
+        data = linear_query(
+            """
+            query($id:String!){
+              issue(id:$id) {
+                id identifier title description url priority createdAt
+                team { id key name }
+                assignee { id name email }
+              }
+            }
+            """,
+            {"id": issue_id},
+        )
+    except LinearQueryError as exc:
+        # Linear reports a missing deterministic id as a GraphQL error, not null.
+        # Only this exact lookup miss permits creation; auth/transport errors fail closed.
+        if exc.errors and all(
+            isinstance(error, dict)
+            and error.get("message") == "Entity not found: Issue"
+            and error.get("path") == ["issue"]
+            and (error.get("extensions") or {}).get("code") == "INPUT_ERROR"
+            for error in exc.errors
+        ):
+            return None
+        raise
     issue = data.get("issue")
     return issue if isinstance(issue, dict) else None
 
@@ -2372,10 +2393,14 @@ def create_linear_issue(title: str, description: str, request_id: str,
     if _interaction_level() < INTERACTION_UPDATES:
         raise RuntimeError("LINEAR_INTERACTION must be 'updates' or 'full' to create tickets")
 
-    issue_id = str(uuid.uuid5(uuid.NAMESPACE_URL, f"mission-control-linear:{request_id.strip()}"))
-    existing = _fetch_created_issue(issue_id)
-    if existing:
-        return {"created": False, "issue": existing}
+    legacy_id = uuid.uuid5(uuid.NAMESPACE_URL, f"mission-control-linear:{request_id.strip()}")
+    # Linear requires UUIDv4 for supplied ids. Keep request-derived bits stable for
+    # retries, with v4 version/variant bits, and still recover older v5 receipts.
+    issue_id = str(uuid.UUID(bytes=legacy_id.bytes, version=4))
+    for candidate_id in (issue_id, str(legacy_id)):
+        existing = _fetch_created_issue(candidate_id)
+        if existing:
+            return {"created": False, "issue": existing}
 
     team = _resolve_create_team(team_key)
     assignee = _resolve_create_assignee(assignee_email)
@@ -2393,7 +2418,7 @@ def create_linear_issue(title: str, description: str, request_id: str,
       issueCreate(input:$input) {
         success
         issue {
-          id identifier title description url priority
+          id identifier title description url priority createdAt
           team { id key name }
           assignee { id name email }
         }

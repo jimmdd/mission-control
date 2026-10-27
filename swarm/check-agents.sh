@@ -295,7 +295,7 @@ reconcile_completed_agents_to_mc() {
     completion_patch=$(jq -cn --arg source "$completion_source" \
       '{status:"running",deliveryPending:true,completionSyncedAt:null,completionOriginSource:null} +
        (if $source == "review-recovery" then {changeRequestSource:"delivery"}
-        elif $source != "" then {changeRequestSource:$source} else {} end)')
+        elif $source != "" then {changeRequestSource:$source} else {changeRequestSource:""} end)')
     claimed_state=$(printf '%s' "$completed_state" | jq -c --argjson patch "$completion_patch" '. + $patch | del(.completionSyncedAt)')
     local_patch=$(jq -cn --arg source "$completion_source" \
       '{status:"running",deliveryPending:true,changeRequestSource:"local-completion",completionOriginSource:$source}')
@@ -429,8 +429,10 @@ reconcile_completed_agents_to_mc() {
         fresh_registry=$(jq -c --arg id "$task_id" '.[] | select(.id == $id)' "$REGISTRY")
         fresh_attempt=$(printf '%s' "$fresh_registry" | jq -r '.launchAttemptId // ""')
         if [ "$(printf '%s' "$fresh_registry" | jq -r '.status')" != "$handoff_status" ] || [ "$fresh_attempt" != "$handoff_attempt" ]; then
+          echo "[$TIMESTAMP] RECONCILE WAIT: $task_id — completed execution changed before delivery handoff" >> "$LOG"
           continue  # A recovered/new attempt owns execution now.
         fi
+        claim_completion_action "$task_id" "$completed_state" "$local_patch" || continue
         if ! fresh_task=$(mc_curl GET "/api/tasks/$mc_task_id" -fsS --max-time 10); then continue; fi
         fresh_status=$(printf '%s' "$fresh_task" | jq -r '.status // "unknown"')
         if [[ ! "$fresh_status" =~ ^(in_progress|assigned|planning|testing|review)$ ]]; then continue; fi
@@ -442,8 +444,8 @@ reconcile_completed_agents_to_mc() {
             continue
           fi
         fi
-        claim_completion_action "$task_id" "$completed_state" "$completion_patch" || continue
-        mc_add_deliverable "$mc_task_id" "Pull Request #${pr_num:-unknown}" "$pr_url"
+        if ! mc_add_deliverable "$mc_task_id" "Pull Request #${pr_num:-unknown}" "$pr_url"; then continue; fi
+        state_update "$task_id" "$completion_patch" "completion-awaiting-gates" "$local_state" || continue
         continue
       fi
       claim_completion_action "$task_id" "$completed_state" "$local_patch" || continue

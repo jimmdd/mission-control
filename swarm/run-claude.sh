@@ -209,7 +209,7 @@ while [ "$attempt" -lt "$MAX_RETRIES" ]; do
   # An expired/invalid login cannot recover by spending more model attempts.
   # Persist the terminal reason first so the bridge can reconcile an unavailable MC API.
   if [ "$exit_code" -ne 0 ] && printf '%s' "$attempt_output" \
-       | grep -qiE '^API Error:[[:space:]]*401|oauth token (has )?expired|authentication_error|authentication failed|not logged in|invalid api key'; then
+       | grep -qiE '^API Error:[[:space:]]*401|oauth (token|session) (has )?expired|failed to authenticate|authentication_error|authentication failed|not logged in|invalid api key'; then
     now_ms=$(($(date +%s) * 1000))
     update_registry_json "{\"status\":\"failed\",\"lastError\":\"authentication_required\",\"failedAt\":$now_ms,\"nextRateLimitRetryAt\":null}"
     echo "  Authentication is unavailable; stopping without auth retries or provider changes." | tee -a "$LOG"

@@ -2,10 +2,12 @@
 """Service health checker for Mission Control."""
 
 import json
+import math
 import os
 import shutil
 import subprocess
 import urllib.request
+import urllib.error
 import time
 from datetime import datetime, timezone
 from pathlib import Path
@@ -25,6 +27,32 @@ def load_env():
             os.environ.setdefault(key.strip(), value.strip())
 
 
+def _http_health_metadata(result, health_data):
+    if "pid" in health_data:
+        result["pid"] = health_data["pid"]
+    uptime_secs = health_data.get("uptime")
+    if (isinstance(uptime_secs, (int, float)) and not isinstance(uptime_secs, bool)
+            and math.isfinite(uptime_secs) and uptime_secs >= 0):
+        h, rem = divmod(int(uptime_secs), 3600)
+        m, s = divmod(rem, 60)
+        result["uptime"] = f"{h:02d}:{m:02d}:{s:02d}"
+    result["details"] = health_data.get("status", "ok")
+
+
+def _is_degraded_health(health_data):
+    """Only the service's structured health response proves it is alive."""
+    if not isinstance(health_data, dict) or health_data.get("status") != "degraded":
+        return False
+    reasons = health_data.get("reasons")
+    pid = health_data.get("pid")
+    uptime = health_data.get("uptime")
+    return (isinstance(reasons, list) and bool(reasons)
+            and all(isinstance(reason, str) and reason.strip() for reason in reasons)
+            and isinstance(pid, int) and not isinstance(pid, bool) and pid > 0
+            and isinstance(uptime, (int, float)) and not isinstance(uptime, bool)
+            and math.isfinite(uptime) and uptime >= 0)
+
+
 def check_http_service(name, url, timeout=5):
     """Check an HTTP service by hitting its health endpoint."""
     result = {"name": name, "status": "down", "pid": None, "uptime": None, "last_check": now_iso(), "details": ""}
@@ -37,19 +65,25 @@ def check_http_service(name, url, timeout=5):
             try:
                 health_data = json.loads(body)
                 if isinstance(health_data, dict):
-                    if "pid" in health_data:
-                        result["pid"] = health_data["pid"]
-                    if "uptime" in health_data:
-                        uptime_secs = health_data["uptime"]
-                        if isinstance(uptime_secs, (int, float)):
-                            h, rem = divmod(int(uptime_secs), 3600)
-                            m, s = divmod(rem, 60)
-                            result["uptime"] = f"{h:02d}:{m:02d}:{s:02d}"
-                    result["details"] = health_data.get("status", "ok")
+                    _http_health_metadata(result, health_data)
                 else:
                     result["details"] = body[:200]
             except (json.JSONDecodeError, ValueError):
                 result["details"] = "responding"
+    except urllib.error.HTTPError as error:
+        result["details"] = str(error)[:200]
+        try:
+            if error.code == 503:
+                health_data = json.loads(error.read().decode("utf-8"))
+                if _is_degraded_health(health_data):
+                    _http_health_metadata(result, health_data)
+                    result["status"] = "degraded"
+                    result["reasons"] = health_data["reasons"]
+                    result["details"] = "degraded: " + ", ".join(health_data["reasons"])
+        except Exception:
+            pass
+        finally:
+            error.close()
     except Exception as e:
         result["status"] = "down"
         result["details"] = str(e)[:200]
@@ -220,6 +254,19 @@ def now_iso():
     return datetime.now(timezone.utc).isoformat()
 
 
+def overall_status(services):
+    statuses = [s["status"] for s in services]
+    if all(s == "up" for s in statuses):
+        return "healthy"
+    if any(s == "down" for s in statuses):
+        down_count = statuses.count("down")
+        core_names = {"Mission Control", "PostgreSQL"}
+        core_down = any(s["status"] == "down" and s["name"] in core_names for s in services)
+        if down_count > len(statuses) // 2 or core_down:
+            return "critical"
+    return "degraded"
+
+
 def main():
     load_env()
     services = []
@@ -259,23 +306,7 @@ def main():
     ))
     services.append(check_knowledge_doctor())
 
-    # Determine overall status
-    statuses = [s["status"] for s in services]
-    if all(s == "up" for s in statuses):
-        overall = "healthy"
-    elif any(s == "down" for s in statuses):
-        down_count = statuses.count("down")
-        # Critical if more than half are down or if core services (MC, PG) are down
-        core_names = {"Mission Control", "PostgreSQL"}
-        core_down = any(s["status"] == "down" and s["name"] in core_names for s in services)
-        if down_count > len(statuses) // 2 or core_down:
-            overall = "critical"
-        else:
-            overall = "degraded"
-    else:
-        overall = "degraded"
-
-    print(json.dumps({"services": services, "overall": overall}, indent=2))
+    print(json.dumps({"services": services, "overall": overall_status(services)}, indent=2))
 
 
 if __name__ == "__main__":

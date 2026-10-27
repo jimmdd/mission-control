@@ -328,7 +328,8 @@
                 const meta = [pidText, uptimeText].filter(Boolean).join(' / ');
                 return `<div class="service-card">
                     <div class="svc-name">${escapeHtml(svc.name)}<span class="svc-badge ${svc.status}">${svc.status}</span></div>
-                    <div class="svc-meta">${meta || svc.details || '-'}</div>
+                    <div class="svc-meta">${escapeHtml(meta || svc.details || '-')}</div>
+                    ${svc.status === 'degraded' && meta && svc.details ? `<div class="svc-meta">${escapeHtml(svc.details)}</div>` : ''}
                 </div>`;
             }).join('');
 

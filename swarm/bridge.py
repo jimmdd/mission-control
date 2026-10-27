@@ -6301,7 +6301,7 @@ def _failed_agent_question(entry: dict) -> str:
             markers = list(re.finditer(r"(?m)^=== (?:Claude|Codex|Pi) Agent starting:", text))
             if markers:
                 text = text[markers[-1].start():]
-            auth = bool(re.search(r"(?im)^(?:API Error:\s*401|(?:Error:\s*)?OAuth token (?:has )?expired|"
+            auth = bool(re.search(r"(?im)^(?:API Error:\s*401|(?:Error:\s*)?OAuth (?:token|session) (?:has )?expired|Failed to authenticate:|"
                                   r"(?:Error:\s*)?(?:authentication (?:failed|required)|not logged in|invalid API key))", text))
         except OSError:
             pass

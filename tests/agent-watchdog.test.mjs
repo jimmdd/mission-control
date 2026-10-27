@@ -258,3 +258,11 @@ test("a plain API 401 response is an auth stop rather than a retryable process f
   assert.equal(h.registry().retryCount,1);
   assert.doesNotMatch(h.log(),/Retrying in|Failing over/);
 });
+
+
+test("the actual OAuth-session-expired worker error stops on its first attempt", () => {
+  const h=harness("WD-auth-session");
+  stub(h.binDir,"claude",'cat >/dev/null; echo "Failed to authenticate: OAuth session expired and could not be refreshed"; exit 1');
+  assert.throws(()=>h.run("run-claude.sh",{AGENT_PROFILE:"claude",MAX_AGENT_RETRIES:"3"}));
+  assert.equal(h.registry().lastError,"authentication_required");assert.equal(h.registry().retryCount,1);
+});
