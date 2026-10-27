@@ -696,7 +696,8 @@ def is_terminal_state(issue: dict) -> bool:
     return state_type in ("completed", "canceled", "cancelled")
 
 
-def _mc_initiated_hold(mc_task_id: str) -> bool:
+def _mc_initiated_hold(mc_task_id: str, *, unknown_is_hold: bool = False,
+                       hold_updated_at: str = "") -> bool:
     """True if MC parked this task on_hold ITSELF (a stuck plan / manual-intervention
     escalation) rather than mirroring a Linear backlog state. Such holds must NOT be
     auto-restored to inbox on the next sync — that bounces a deliberately-parked task
@@ -718,11 +719,23 @@ def _mc_initiated_hold(mc_task_id: str) -> bool:
              or "on hold" in a.get("message", "").lower())
     ]
     if not hold_acts:
-        return False
+        return unknown_is_hold
     hold_acts.sort(key=lambda a: a.get("created_at", ""), reverse=True)
     latest = hold_acts[0].get("message", "").lower()
     # Linear-mirrored holds say "Linear ticket moved to <state> — setting on hold".
-    return "linear ticket moved to" not in latest
+    if "linear ticket moved to" not in latest:
+        return True
+    if unknown_is_hold and not hold_updated_at:
+        return True
+    if hold_updated_at:
+        try:
+            changed = datetime.fromisoformat(hold_updated_at.replace("Z", "+00:00"))
+            mirrored = datetime.fromisoformat(hold_acts[0]["created_at"].replace("Z", "+00:00"))
+            if changed > mirrored:
+                return True  # A newer local hold/update cannot be undone by old provenance.
+        except (ValueError, TypeError, KeyError):
+            return True
+    return False
 
 
 def duplicate_of(issue: dict) -> Optional[str]:
@@ -1662,7 +1675,10 @@ def _check_description_changed(issue: dict, mc_task: dict, state: dict) -> bool:
     # finished work (this happened to MET-515). Record the new hash so we don't
     # re-fire, note the change, and let the human fold it in via a change-request note.
     mc_status = mc_task.get("status", "")
-    if mc_status not in ("inbox", "planning", "on_hold") or _mc_initiated_hold(mc_task_id):
+    if mc_status not in ("inbox", "planning", "on_hold") or _mc_initiated_hold(
+        mc_task_id, unknown_is_hold=mc_status == "on_hold",
+        hold_updated_at=(mc_task.get("updated_at") or "") if mc_status == "on_hold" else ""
+    ):
         logging.info(f"  Description changed for {issue['identifier']} but task is '{mc_status}' — noting, not re-triaging")
         synced_info["description_hash"] = current_hash
         state.setdefault("synced_issues", {})[issue_id] = synced_info
@@ -1684,13 +1700,11 @@ def _check_description_changed(issue: dict, mc_task: dict, state: dict) -> bool:
     state.get("answered_comments", {}).pop(issue_id, None)
 
     try:
-        mc_request("PUT", f"/api/tasks/{mc_task_id}/triage-state", None)
-    except Exception:
-        pass
-
-    try:
         mc_request("PATCH", f"/api/tasks/{mc_task_id}", {
             "status": "inbox",
+            "triage_state": None,
+            "expected_status": mc_status,
+            "expected_updated_at": mc_task.get("updated_at") or "",
             "description": "\n".join([
                 current_desc,
                 f"\n---\n*Synced from Linear: [{issue['identifier']}]({issue['url']})*",
@@ -2121,7 +2135,9 @@ def _sync(state):
                         except Exception as e:
                             logging.warning(f"  Failed to set on_hold for {mc_task_id[:8]}: {e}")
 
-                elif mc_task.get("status") == "on_hold" and not _mc_initiated_hold(mc_task["id"]) and (
+                elif mc_task.get("status") == "on_hold" and not _mc_initiated_hold(
+                    mc_task["id"], unknown_is_hold=True, hold_updated_at=mc_task.get("updated_at") or ""
+                ) and (
                     not is_on_hold_state(issue) or not hold_on_backlog
                 ):
                     # Restore a Linear-mirrored hold: the ticket left Backlog, OR (default) we
@@ -2131,7 +2147,7 @@ def _sync(state):
                     state_name = issue.get("state", {}).get("name", "?")
                     logging.info(f"  Restoring {issue['identifier']} ({mc_task_id[:8]}) from on_hold — will triage/dispatch")
                     try:
-                        mc_request("PATCH", f"/api/tasks/{mc_task_id}", {"status": "inbox"})
+                        mc_request("PATCH", f"/api/tasks/{mc_task_id}", {"status": "inbox", "expected_status": "on_hold", "expected_updated_at": mc_task.get("updated_at") or ""})
                         mc_request("POST", f"/api/tasks/{mc_task_id}/activities", {
                             "activity_type": "status_changed",
                             "message": f"Restored from on hold ({state_name}) — Backlog no longer parks tasks; triaging.",

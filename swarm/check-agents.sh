@@ -316,6 +316,8 @@ reconcile_completed_agents_to_mc() {
       continue
     fi
 
+    local handoff_attempt
+    handoff_attempt=$(jq -r --arg id "$task_id" '.[] | select(.id == $id) | .launchAttemptId // ""' "$REGISTRY")
     local task_type mc_status
     task_type=$(echo "$task_json" | jq -r '.task_type // "implementation"' 2>/dev/null)
     mc_status=$(echo "$task_json" | jq -r '.status // "unknown"' 2>/dev/null)
@@ -419,8 +421,27 @@ reconcile_completed_agents_to_mc() {
       if [ -n "$pr_url" ] && [ "$no_pr_mode" != "true" ]; then
         # A completed process has only handed off a PR. The shared CI/review
         # gate below owns readiness, even when its tmux session has exited.
-        # Release recovery execution ownership with that handoff; otherwise the
-        # running-loop deferral and bounded bridge would keep owning delivery.
+        local fresh_task fresh_status fresh_registry fresh_attempt handoff_payload handoff_status
+        handoff_status=$(printf '%s' "$completed_state" | jq -r '.status')
+        if jq -e --arg task "$mc_task_id" --arg id "$task_id" '.[] | select(.mcTaskId == $task and .id != $id and (.status == "running" or .status == "starting" or .status == "ready"))' "$REGISTRY" >/dev/null; then
+          continue  # A same-task sibling owns the active/queued retry.
+        fi
+        fresh_registry=$(jq -c --arg id "$task_id" '.[] | select(.id == $id)' "$REGISTRY")
+        fresh_attempt=$(printf '%s' "$fresh_registry" | jq -r '.launchAttemptId // ""')
+        if [ "$(printf '%s' "$fresh_registry" | jq -r '.status')" != "$handoff_status" ] || [ "$fresh_attempt" != "$handoff_attempt" ]; then
+          continue  # A recovered/new attempt owns execution now.
+        fi
+        if ! fresh_task=$(mc_curl GET "/api/tasks/$mc_task_id" -fsS --max-time 10); then continue; fi
+        fresh_status=$(printf '%s' "$fresh_task" | jq -r '.status // "unknown"')
+        if [[ ! "$fresh_status" =~ ^(in_progress|assigned|planning|testing|review)$ ]]; then continue; fi
+        if [[ ! "$fresh_status" =~ ^(testing|review)$ ]]; then
+          handoff_payload=$(jq -cn --arg expected "$fresh_status" '{status:"testing",expected_status:$expected}')
+          if ! mc_curl PATCH "/api/tasks/$mc_task_id" -fsS --max-time 10 \
+              -H "Content-Type: application/json" -d "$handoff_payload" >/dev/null 2>&1; then
+            echo "[$TIMESTAMP] RECONCILE WAIT: $task_id — unable to record PR handoff as testing" >> "$LOG"
+            continue
+          fi
+        fi
         claim_completion_action "$task_id" "$completed_state" "$completion_patch" || continue
         mc_add_deliverable "$mc_task_id" "Pull Request #${pr_num:-unknown}" "$pr_url"
         continue

@@ -1267,6 +1267,17 @@ async function handleApiRequest(
                 body.external_url = body.linear_issue_url;
                 delete body.linear_issue_url;
               }
+              // Optimistic status boundary for asynchronous delivery lookups.
+              if (typeof body.expected_status === "string" && db.getTask(taskId)?.status !== body.expected_status) {
+                sendJson(res, 409, { error: "Task status changed; stale transition rejected" });
+                return;
+              }
+              if (typeof body.expected_updated_at === "string" && db.getTask(taskId)?.updated_at !== body.expected_updated_at) {
+                sendJson(res, 409, { error: "Task changed; stale transition rejected" });
+                return;
+              }
+              delete body.expected_updated_at;
+              delete body.expected_status;
               delete body.processing_owner;
               delete body.processing_expires_at;
 
@@ -1972,7 +1983,7 @@ async function handleApiRequest(
                 return;
               }
               if (method === "PUT" || method === "POST" || method === "PATCH") {
-                const task = db.getTask(taskId);
+                let task = db.getTask(taskId);
                 if (!task) {
                   sendJson(res, 404, { error: "Task not found" });
                   return;
@@ -1982,6 +1993,8 @@ async function handleApiRequest(
                   sendJson(res, 400, { error: "Invalid request body" });
                   return;
                 }
+                task = db.getTask(taskId); // Body parsing is asynchronous; Hold/Testing may have won.
+                if (!task) { sendJson(res, 404, { error: "Task not found" }); return; }
                 const badState = invalidProgressState(body);
                 if (badState !== null) {
                   sendJson(res, 400, {
@@ -1999,6 +2012,13 @@ async function handleApiRequest(
                   }
                   input.state = input.state === "blocked" ? "blocked" : "waiting";
                   input.blocked_reason = input.blocked_reason?.trim() || pending.prompt.slice(0, 2000);
+                }
+                const hasDeliveryPr = db.listDeliverables(taskId, 100).some(deliverable =>
+                  ["pr", "pull_request"].includes(deliverable.deliverable_type) && Boolean(deliverable.path));
+                if (body.state === "done" && task.task_type === "implementation" &&
+                    (hasDeliveryPr || task.status === "testing") && !["review", "done", "closed"].includes(task.status)) {
+                  sendJson(res, 409, { error: "PR delivery is still awaiting CI/review; progress cannot claim done", status: task.status });
+                  return;
                 }
                 const progress = db.upsertProgress(taskId, input);
                 events.emit("progress", {
