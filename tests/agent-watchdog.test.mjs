@@ -237,3 +237,24 @@ test("a streamed account limit is still detected", () => {
   assert.match(log, /Stopped by the account limit, not by finishing: You've hit your session limit/);
   assert.equal(h.registry().status, "rate_limited");
 });
+
+
+test("a hard Claude authentication failure stops without blind retries or provider switching", () => {
+  const h=harness("WD-auth");
+  stub(h.binDir,"claude",'cat >/dev/null; echo "API Error: 401 OAuth token has expired"; exit 1');
+  assert.throws(()=>h.run("run-claude.sh",{AGENT_PROFILE:"claude",MAX_AGENT_RETRIES:"3"}));
+  assert.equal(h.registry().status,"failed");
+  assert.equal(h.registry().lastError,"authentication_required");
+  assert.equal(h.registry().retryCount,1);
+  assert.doesNotMatch(h.log(),/Retrying in|Failing over/);
+});
+
+
+test("a plain API 401 response is an auth stop rather than a retryable process failure", () => {
+  const h=harness("WD-auth-401");
+  stub(h.binDir,"claude",'cat >/dev/null; echo "API Error: 401 Unauthorized"; exit 1');
+  assert.throws(()=>h.run("run-claude.sh",{AGENT_PROFILE:"claude",MAX_AGENT_RETRIES:"3"}));
+  assert.equal(h.registry().lastError,"authentication_required");
+  assert.equal(h.registry().retryCount,1);
+  assert.doesNotMatch(h.log(),/Retrying in|Failing over/);
+});

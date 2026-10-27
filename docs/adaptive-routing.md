@@ -55,3 +55,23 @@ an explicit override on an unstarted task if it must change. Never clear/reroute
 active run. Reverting the branch requires a later approved bridge restart. No
 merge, deploy, runtime restart, global enablement or PR publication is part of this
 implementation.
+
+## Coding-agent failure visibility
+
+Exhausted execution failures are reconciled across providers to blocked task
+progress and one actionable question. Hard Claude OAuth/API-401 failures stop on
+the first attempt. No provider is switched globally. Questions are non-pausing to
+avoid killing a runtime recovered concurrently; a narrow race may briefly show
+stale blocked progress, which the recovered worker's next progress update clears.
+The operator reconnects/selects the task's profile and explicitly resumes it.
+Resolved questions dedupe by failure/attempt time, and pending questions repair
+missing progress without posting duplicate notifications. Raw logs stay local.
+
+Operational health counts failed/blocked workers separately from service liveness,
+using the latest attempt per task. New healthy retries supersede old failures;
+queued work, scheduled quota retries, intentional human waits and completed task
+history retain separate meanings. A blocked worker degrades operational health;
+`/health/live` remains a liveness signal, so the existing health monitor does not
+restart a healthy server because one worker needs input. Loading health changes
+requires a later coordinated server reload as well as the bridge reload; neither
+is performed by this implementation. Existing Codex runs are preserved.

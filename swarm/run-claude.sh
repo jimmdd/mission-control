@@ -206,6 +206,23 @@ while [ "$attempt" -lt "$MAX_RETRIES" ]; do
   # classified as having hit one. Classify on the result and raw CLI output only.
   attempt_output=$(tail -c "+$((log_mark + 1))" "$LOG" 2>/dev/null | grep -vE '^\[(agent|tool)\] ' || true)
 
+  # An expired/invalid login cannot recover by spending more model attempts.
+  # Persist the terminal reason first so the bridge can reconcile an unavailable MC API.
+  if [ "$exit_code" -ne 0 ] && printf '%s' "$attempt_output" \
+       | grep -qiE '^API Error:[[:space:]]*401|oauth token (has )?expired|authentication_error|authentication failed|not logged in|invalid api key'; then
+    now_ms=$(($(date +%s) * 1000))
+    update_registry_json "{\"status\":\"failed\",\"lastError\":\"authentication_required\",\"failedAt\":$now_ms,\"nextRateLimitRetryAt\":null}"
+    echo "  Authentication is unavailable; stopping without auth retries or provider changes." | tee -a "$LOG"
+    if [ -n "$MC_TASK_ID" ]; then
+      question="Agent authentication failed. Reauthenticate the existing profile or explicitly choose an already-authenticated profile for this task, then explicitly resume this task. Work is preserved; no automatic auth retry or global provider change is authorized."
+      payload=$(jq -cn --arg reason "$question" '{state:"blocked",phase:"execution",step_label:"Agent stopped; runtime decision required",blocked_reason:$reason}')
+      mc_curl PUT "/api/tasks/$MC_TASK_ID/progress" -s -H "Content-Type: application/json" -d "$payload" >/dev/null 2>&1 || true
+      payload=$(jq -cn --arg prompt "$question" '{kind:"question",prompt:$prompt,pause:false}')
+      mc_curl POST "/api/tasks/$MC_TASK_ID/checkpoints" -s -H "Content-Type: application/json" -d "$payload" >/dev/null 2>&1 || true
+    fi
+    exit "$exit_code"
+  fi
+
   # The same exit-0 trap, for the account rather than the run. MET-642 printed
   # "You've hit your session limit · resets 3pm" and exited 0 after seven seconds,
   # and was logged "completed successfully" with an empty worktree, no commits, no

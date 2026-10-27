@@ -37,8 +37,34 @@ export function operationalHealth(db: MissionControlDB, home: string, options: {
   if (bridgeEnabled && queueAge !== null && queueAge > 1800) reasons.push("dispatch_queue_stale");
   const registry = receipt(join(home, "swarm", "active-tasks.json"));
   const entries: Array<Record<string, any>> = Array.isArray(registry) ? registry : [];
+  // Keep task failure health separate from process liveness. Old attempts cannot
+  // override a newer healthy retry, and completed task history is not an outage.
+  const stamp = (entry: Record<string, any>) => {
+    const values = (keys: string[]) => keys.map(key => typeof entry[key] === "number" ? entry[key] : Date.parse(entry[key] ?? "")).filter(Number.isFinite);
+    const attempts = values(["lastAttemptAt", "lastRespawnAt", "runStartedAt", "startedAt"]);
+    return Math.max(0, ...(attempts.length ? attempts : values(["failedAt", "lastHeartbeatAt"])));
+  };
+  const current = new Map<string, Record<string, any>>();
+  entries.forEach((entry, index) => {
+    const key = String(entry.mcTaskId || entry.id || `unidentified-${index}`);
+    const prior = current.get(key);
+    if (!prior || stamp(entry) >= stamp(prior)) current.set(key, entry);
+  });
+  const failureCheckpointCounts = db.getPendingCheckpointCounts?.() ?? {};
+  const relevant = [...current.values()].filter(entry => {
+    if (!entry.mcTaskId || typeof db.getTask !== "function") return true;
+    const task = db.getTask(entry.mcTaskId);
+    return task && !["done", "closed"].includes(task.status);
+  });
+  let failedWorkers = 0, retryScheduled = 0, waitingForHuman = 0;
+  for (const entry of relevant) {
+    if (failureCheckpointCounts[entry.mcTaskId] > 0) waitingForHuman++;
+    if (entry.status === "rate_limited") retryScheduled++;
+    if (["failed", "blocked", "auth_blocked"].includes(entry.status)) failedWorkers++;
+  }
+  if (failedWorkers) reasons.push("agent_execution_blocked");
   let unacknowledged = 0, stalled = 0;
-  for (const entry of entries) {
+  for (const entry of relevant) {
     if (entry.status !== "running") continue;
     if (entry.launchState === "starting" && !entry.launchAcknowledgedAt && (age(entry.startedAt) ?? Infinity) > 90) unacknowledged++;
     if ((age(entry.lastHeartbeatAt ?? entry.startedAt) ?? Infinity) > 300) stalled++;
@@ -48,6 +74,7 @@ export function operationalHealth(db: MissionControlDB, home: string, options: {
   return {
     status: reasons.length ? "degraded" : "ok", reasons,
     schemaReady: database.schemaReady,
+    workerHealth: { status: failedWorkers ? "blocked" : unacknowledged || stalled ? "degraded" : "ok", failed: failedWorkers, waitingForHuman, retryScheduled },
     linear: { enabled: linearEnabled, lastSuccessAt: sync?.last_sync ?? null, ageSeconds: syncAge, failedIssues: Object.keys(sync?.failed_issues ?? {}).length },
     bridge: { enabled: bridgeEnabled, ageSeconds: bridgeAge, consecutiveFailures: bridge?.consecutive_failures ?? 0 },
     queue: { oldestAgeSeconds: queueAge },

@@ -6272,6 +6272,116 @@ def reap_dead_agents() -> int:
     return reaped
 
 
+
+
+def _runtime_attempt_epoch(entry: dict) -> float:
+    epochs = []
+    for key in ("lastAttemptAt", "lastRespawnAt", "runStartedAt", "startedAt"):
+        stamp = entry.get(key)
+        try:
+            value = float(stamp) / 1000 if isinstance(stamp, (int, float)) and not isinstance(stamp, bool) else _activity_epoch({"created_at": stamp})
+            if value is not None and 0 < value < float("inf"):
+                epochs.append(value)
+        except (ValueError, TypeError, OverflowError):
+            pass
+    return max(epochs) if epochs else 0
+
+def _failed_agent_question(entry: dict) -> str:
+    """Classify locally; never send credentials, raw output or local paths to MC."""
+    error = str(entry.get("lastError") or "")
+    auth = error == "authentication_required"
+    agent_id = str(entry.get("id") or "")
+    if not auth and agent_id and Path(agent_id).name == agent_id:
+        try:
+            with (SWARM_DIR / "logs" / f"agent-{agent_id}.log").open("rb") as log:
+                log.seek(0, 2)
+                log.seek(max(0, log.tell() - 65536))
+                text = "\n".join(line for line in log.read().decode(errors="replace").splitlines()
+                                 if not line.startswith(("[agent] ", "[tool] ")))
+            markers = list(re.finditer(r"(?m)^=== (?:Claude|Codex|Pi) Agent starting:", text))
+            if markers:
+                text = text[markers[-1].start():]
+            auth = bool(re.search(r"(?im)^(?:API Error:\s*401|(?:Error:\s*)?OAuth token (?:has )?expired|"
+                                  r"(?:Error:\s*)?(?:authentication (?:failed|required)|not logged in|invalid API key))", text))
+        except OSError:
+            pass
+    if auth:
+        return ("Agent authentication failed. Reauthenticate the existing profile or explicitly choose "
+                "an already-authenticated profile for this task, then explicitly resume this task. "
+                "Work is preserved; no automatic auth retry or global provider change is authorized.")
+    return ("The agent exhausted its execution retries. Inspect the failed attempt locally and resolve "
+            "the concrete runtime blocker before resuming this task. Work is preserved; "
+            "no further automatic execution retry is scheduled.")
+
+
+def reconcile_failed_agents() -> int:
+    """Expose exhausted workers through existing blocked progress + question APIs.
+
+    Non-pausing checkpoints never kill a concurrently recovered runtime. Only
+    terminal execution failures are reconciled; review and lost-session recovery
+    retain their existing owners. This function never launches or switches agents.
+    """
+    reconciled = 0
+    entries = _load_active_tasks()
+    for entry in entries:
+        task_id = entry.get("mcTaskId")
+        error = str(entry.get("lastError") or "")
+        if (not task_id or entry.get("status") != "failed" or entry.get("reviewOnly")
+                or (entry.get("agentEnv") or {}).get("MC_REVIEW_ONLY") == "1"
+                or entry.get("deliveryPending") or error == "agent_session_lost"):
+            continue
+        try:
+            current = mc_request("GET", f"/api/tasks/{task_id}")
+            if not isinstance(current, dict) or current.get("status") not in ("assigned", "in_progress", "testing"):
+                continue
+            checkpoints = mc_request("GET", f"/api/tasks/{task_id}/checkpoints")
+            statuses = {"pending", "approved", "rejected", "answered", "cancelled"}
+            if (not isinstance(checkpoints, list) or any(not isinstance(c, dict)
+                    or c.get("status") not in statuses for c in checkpoints)):
+                continue
+            # Re-read after API calls: a human/monitor may already have recovered it.
+            fresh = [e for e in _load_active_tasks() if e.get("mcTaskId") == task_id]
+            identity = ("id", "launchAttemptId", "lastAttemptAt", "failedAt", "lastError", "status")
+            if (not any(all(e.get(k) == entry.get(k) for k in identity) for e in fresh)
+                    or any(_runtime_attempt_epoch(e) > _runtime_attempt_epoch(entry) for e in fresh)
+                    or any(e.get("status") != "failed" and (
+                        not _runtime_attempt_epoch(e) or _runtime_attempt_epoch(e) >= _runtime_attempt_epoch(entry)) for e in fresh)
+                    or any(_tmux_session_alive(e.get("tmuxSession", "")) for e in fresh)):
+                continue
+            question = _failed_agent_question(entry)
+            pending = [c for c in checkpoints if c.get("status") == "pending"]
+            if pending:
+                if any(c.get("prompt") == question for c in pending):
+                    # The launcher/previous tick may have posted the question while
+                    # a transient progress write failed. Repair it without reposting.
+                    mc_set_progress(task_id, state="blocked", phase="execution",
+                                    step_label="Agent stopped; runtime decision required", blocked_reason=question)
+                continue
+            # A resolved question is not permission to retry the same failure. A
+            # later failed attempt has a newer failedAt and can ask its own question.
+            epochs = []
+            for key in ("failedAt", "lastAttemptAt", "lastRespawnAt", "runStartedAt", "startedAt"):
+                stamp = entry.get(key)
+                try:
+                    epoch = float(stamp) / 1000 if isinstance(stamp, (int, float)) and not isinstance(stamp, bool) else _activity_epoch({"created_at": stamp})
+                    if epoch is not None and 0 < epoch < float("inf"):
+                        epochs.append(epoch)
+                except (ValueError, TypeError, OverflowError):
+                    pass
+            failed_epoch = max(epochs) if epochs else None
+            if any(c.get("prompt") == question and (
+                    failed_epoch is None or (_activity_epoch(c) or 0) >= failed_epoch)
+                    for c in checkpoints):
+                continue
+            mc_set_progress(task_id, state="blocked", phase="execution",
+                            step_label="Agent stopped; runtime decision required", blocked_reason=question)
+            mc_request("POST", f"/api/tasks/{task_id}/checkpoints",
+                       {"kind": "question", "prompt": question, "pause": False})
+            reconciled += 1
+        except Exception as e:
+            logging.warning(f"  Failed-agent reconciliation deferred for {str(task_id)[:8]}: {type(e).__name__}")
+    return reconciled
+
 def _agent_slots_free(registry: list) -> Optional[int]:
     """How many more agent sessions may start right now, or None for no ceiling.
 
@@ -8874,6 +8984,8 @@ def run_once():
         reap_dead_agents()
     with cycle_boundary("process_local_review_recovery"):
         process_local_review_recovery()
+    with cycle_boundary("reconcile_failed_agents"):
+        reconcile_failed_agents()
     with cycle_boundary("recover_dispatches"):
         recover_interrupted_dispatches()
     with cycle_boundary("process_open_questions"):
