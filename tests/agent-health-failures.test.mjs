@@ -26,6 +26,7 @@ test('queued, quota, intentional human wait and completed history remain distinc
  const checkpoint=db.createCheckpoint({task_id:t.id,kind:'question',prompt:'Reconnect this coding profile'});
  const blocked=health([{mcTaskId:t.id,status:'failed',lastError:'authentication_required'}]);
  assert.equal(blocked.workerHealth.waitingForHuman,1);assert.equal(blocked.status,'degraded');
+ assert.equal(health([{mcTaskId:t.id,status:'paused'}]).workerHealth.status,'waiting');
  db.resolveCheckpoint(checkpoint.id,'answered','Reconnected');db.updateTask(t.id,{status:'done'});
  assert.equal(health([{mcTaskId:t.id,status:'failed'}]).status,'ok');
 }));

@@ -74,7 +74,7 @@ export function operationalHealth(db: MissionControlDB, home: string, options: {
   return {
     status: reasons.length ? "degraded" : "ok", reasons,
     schemaReady: database.schemaReady,
-    workerHealth: { status: failedWorkers ? "blocked" : unacknowledged || stalled ? "degraded" : "ok", failed: failedWorkers, waitingForHuman, retryScheduled },
+    workerHealth: { status: failedWorkers ? "blocked" : unacknowledged || stalled ? "degraded" : waitingForHuman ? "waiting" : "ok", failed: failedWorkers, waitingForHuman, retryScheduled },
     linear: { enabled: linearEnabled, lastSuccessAt: sync?.last_sync ?? null, ageSeconds: syncAge, failedIssues: Object.keys(sync?.failed_issues ?? {}).length },
     bridge: { enabled: bridgeEnabled, ageSeconds: bridgeAge, consecutiveFailures: bridge?.consecutive_failures ?? 0 },
     queue: { oldestAgeSeconds: queueAge },
