@@ -1,42 +1,14 @@
-"""Which workflow a ticket gets — light, heavy or GSD — and Jev's shadow verdict on it.
+"""Adaptive bounded-issue routing, opt-in for future tasks.
 
-Every implementation ticket runs the full GSD workflow, so a two-line footer weight
-change costs the same hours as a new launch flow. The fix is to let Jev (TypeSafe's
-System One model, typed answers with probabilities) route bounded frontend tickets
-to a lighter path. This module holds both halves, and only the first is on by default:
-
-SHADOW (on; MC_JEV_SHADOW=0 turns it off) — each ticket gets a light/full verdict,
-the verdict is written to the shadow log, and the ticket runs exactly as before. The
-verdicts are compared against what the merged PRs actually turned out to be.
-
-ROUTING (off; `workflowRouting.enabled` in swarm-config.json turns it on) — the
-verdict picks the workflow:
-
-    light — one agent, no planning stage, one gate review.
-    heavy — the same agent, plus a short plan it writes itself, one critic pass on
-            that plan, and a final code + gate review. Still no separate stage.
-    gsd   — the GSD loop. While routing is off, every ticket gets it, as today.
-            With routing on it is never chosen automatically (measured 1–3.5 hours
-            and 25–29M input tokens per ticket, 2026-09-22), only by explicit
-            override. A per-ticket override is honoured either way.
-
-Why shadow first: the thresholds were fitted against 35 past tickets whose merged
-PRs are the ground truth (2026-09-22) and scored on those same tickets — 14 picked
-light, 10 right, 2 misses — so they are probably optimistic. "UI-only" alone was not
-enough: nine of 23 UI-only tickets were large (MET-726 changed 7k lines). And no
-reading of a ticket can see backend work it does not mention (MET-657, MET-659 read
-as UI and needed new API queries), which is why a light run carries its own bounds
-and escalates when it crosses them.
-
-The policy stays here, in code: Jev reports what it sees; `decide` and
-`choose_workflow` choose. Every uncertainty resolves away from light, because a small
-ticket sent the long way wastes time while a large one sent the short way ships a
-thin PR.
+Light and heavy run in one session; GSD remains an explicit structured option.
+The historical UI-only shadow verdict is retained for comparing old assessments.
+New routing requires complete behavioral risk scores, independent of code layer.
 """
 
 from __future__ import annotations
 
 import json
+import math
 import re
 import time
 import urllib.error
@@ -73,22 +45,34 @@ BUDGET_MINUTES = {"light": 45, "heavy": 120}
 # thinking on a large context (MET-792: 54 of 71 minutes), so light runs lower.
 EFFORT = {"light": "medium", "heavy": "high"}
 
-# What a light run may not touch. Crossing either bound means the ticket was not
-# what it looked like, and the run switches to the heavy workflow.
+POLICY_VERSION = "adaptive-bounded-v1"
+RISK_LIMITS = {
+    "behavioral_uncertainty": 0.3,
+    "blast_radius": 0.3,
+    "hard_to_reverse": 0.3,
+    "hard_to_test": 0.3,
+    "migration_or_contract": 0.3,
+    "money_or_chain": 0.3,
+}
+RISK_QUESTIONS = {
+    "behavioral_uncertainty": "Are requirements unclear or is existing behavior insufficiently understood to name a concrete repro, expected result and bounded fix?",
+    "blast_radius": "Could the change affect several consumers, services, workflows or broad shared contracts rather than one bounded behavior?",
+    "hard_to_reverse": "Would rollback be difficult, destructive or leave persistent external effects?",
+    "hard_to_test": "Is it difficult to verify the requested behavior with focused deterministic regression checks and existing local tooling?",
+    "migration_or_contract": "Does the task require a database migration, schema change, broad API/shared contract change or compatibility rollout?",
+}
+
+# Paths are a conservative backstop, not a UI-only allowlist. Local backend
+# mappings, read queries and shared helpers can be bounded. Semantics still win.
 LIGHT_MAX_FILES = 15
 LIGHT_BLOCKED_PATHS = re.compile(
-    r"(^|/)(migrations?|drizzle|alembic|\.sqlx|sql)(/|$)"
-    r"|\.sql$"
-    r"|^\.github/workflows/"
-    r"|^apps/(new-api|api|backable-api|backable-ws|ws-server|chat-server|cranker|accelerated-cranker"
-    r"|futarchy-indexer-v2|backoffice)/"
-    r"|^packages/",
-    re.I,
+    r"(^|/)(migrations?|drizzle|alembic|schema|schemas|auth|authentication|authorization|contracts?|programs)(/|$)"
+    r"|(^|/)schema\.[^/]+$|^\.github/workflows/", re.I,
 )
 LIGHT_BLOCKED_PATHS_HUMAN = (
-    "API or backend services (`apps/new-api`, `apps/api`, `apps/backable-api`, "
-    "indexers, crankers, ws/chat servers, backoffice), shared `packages/`, SQL, "
-    "migrations or schema, and `.github/workflows`"
+    "migrations/schema, auth or funds/chain semantics, broad shared/API contracts, "
+    "CI workflows, unclear requirements, hard-to-reverse effects, or behavior without focused verification. "
+    "A bounded backend field mapping, read query or shared helper alone is allowed"
 )
 
 QUESTIONS = {
@@ -108,11 +92,11 @@ QUESTIONS = {
         "type": "score",
         "instructions": "How large is the change `ticket` asks for?",
         "criteria": [
-            "A single tweak to an existing element: a color, spacing, copy, icon, or one "
-            "component's styling.",
-            "A few closely related adjustments on one existing page or component.",
-            "Several separate concerns, or a substantial rework of an existing section or flow.",
-            "A new page, feature, or multi-step flow, or a change that spans many pages.",
+            "One local change to existing behavior: copy/style, an output field mapping, "
+            "a read-query correction or a small helper with focused regression coverage.",
+            "A few closely related adjustments to one existing behavior or boundary.",
+            "Several separate concerns, or a substantial rework of a component, endpoint or flow.",
+            "A new feature, multi-step flow or change spanning many consumers/services.",
         ],
     },
     "money_or_chain": {
@@ -122,6 +106,19 @@ QUESTIONS = {
                         "how they are displayed)?",
     },
 }
+
+QUESTIONS.update({name: {"type": "noul", "instructions": question +
+    " Assess the behavior and evidence in ticket, regardless of frontend/backend location. "
+    "Unknown or missing evidence counts as risk; do not assume safety from a small description."}
+    for name, question in RISK_QUESTIONS.items()})
+
+
+def _number(value, maximum=1.0):
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        raise ValueError("risk score must be a number")
+    if not math.isfinite(value) or not 0 <= value <= maximum:
+        raise ValueError("risk score outside range")
+    return value
 
 
 def ticket_state(task: Dict) -> Dict:
@@ -135,7 +132,7 @@ def ticket_state(task: Dict) -> Dict:
 
 
 def ask_jev(task: Dict, api_key: str, timeout: float = 10.0, retries: int = 2) -> Dict:
-    """One call, three questions. Returns the raw Jev answers; raises on any failure."""
+    """One call, bounded risk questions. Returns the raw Jev answers; raises on any failure."""
     body = json.dumps({"model": JEV_MODEL, "state": ticket_state(task),
                        "questions": QUESTIONS}).encode()
     last: Optional[Exception] = None
@@ -154,15 +151,43 @@ def ask_jev(task: Dict, api_key: str, timeout: float = 10.0, retries: int = 2) -
 
 
 def summarise(response: Dict) -> Dict:
-    """The three numbers the policy reads."""
+    """Validated legacy and behavioral risk numbers; unknown risk remains unknown."""
     a = response["answers"]
-    return {
+    result = {
         "model": response.get("model", ""),
-        "ui_only": round(float(a["ui_only"]["noul"]), 3),
-        "scope": round(float(a["scope"]["score"]), 3),
-        "scope_confidence": round(float(a["scope"].get("confidence", 0.0)), 3),
-        "money_or_chain": round(float(a["money_or_chain"]["noul"]), 3),
+        "ui_only": round(_number(a["ui_only"]["noul"]), 3),
+        "scope": round(_number(a["scope"]["score"], 3), 3),
+        "scope_confidence": round(_number(a["scope"].get("confidence", 0.0)), 3),
+        "money_or_chain": round(_number(a["money_or_chain"]["noul"]), 3),
     }
+    # Old shadow responses remain readable, but cannot qualify new work as lean.
+    for name in RISK_QUESTIONS:
+        if name in a:
+            result[name] = round(_number(a[name]["noul"]), 3)
+    return result
+
+
+def assess_risk(assessment: Dict, thresholds: Optional[Dict] = None) -> Dict:
+    """All safety evidence is required. Invalid/unknown scores fail away from lean."""
+    limits = {**RISK_LIMITS}
+    if thresholds and "money_max" in thresholds:
+        limits["money_or_chain"] = thresholds["money_max"]
+    blockers = []
+    try:
+        scope = _number(assessment.get("scope"), 3)
+        scope_max = _number((thresholds or {}).get("scope_max", 1.2), 3)
+        if scope > scope_max:
+            blockers.append(f"size {scope:.1f}/3 is above {scope_max:.1f}")
+        for name, limit in limits.items():
+            score = _number(assessment.get(name))
+            if score >= _number(limit):
+                blockers.append(f"{name.replace('_', ' ')} risk {score:.0%}")
+    except (ValueError, TypeError, AttributeError):
+        return {"verdict": "full", "why": ["missing or invalid behavioral risk assessment"]}
+    return {"verdict": "full" if blockers else "light", "why": blockers or [
+        "bounded scope; low behavioral uncertainty and blast radius",
+        "reversible with focused regression checks; no high-risk semantics or migration/contract change",
+    ]}
 
 
 def decide(jev: Dict, thresholds: Optional[Dict] = None) -> Dict:
@@ -242,16 +267,24 @@ def routing_enabled(config: Optional[Dict]) -> bool:
     return isinstance(routing, dict) and routing.get("enabled") is True
 
 
+def routing_applies(config: Optional[Dict], task_id: str) -> bool:
+    """Optional canary allowlist limits activation to selected future task IDs."""
+    if not routing_enabled(config):
+        return False
+    if "taskIds" not in config["workflowRouting"]:
+        return True
+    ids = config["workflowRouting"]["taskIds"]
+    return (isinstance(ids, list) and all(isinstance(i, str) and i for i in ids)
+            and task_id in ids)
+
+
 def choose_workflow(jev: Optional[Dict], *, enabled: bool, override: str = "",
                     level: str = "", thresholds: Optional[Dict] = None,
                     jev_error: str = "") -> Dict:
-    """Return {'workflow', 'source', 'why': [...]} — never a bare tier.
+    """Choose a bounded path from complete risk evidence; GSD remains explicit.
 
-    `jev` is `summarise()` output, or None when Jev was not asked or failed. With
-    routing off (`enabled=False`) the answer is `gsd` with source `off` unless the
-    ticket carries an explicit override. With routing on, `decide`'s light verdict
-    becomes `light` and anything else `heavy`; `careful` process level alone forces
-    `heavy`, and nothing here returns `gsd` except an override.
+    Routing off preserves the legacy default. Missing evidence falls back to heavy.
+    Overrides apply only before dispatch; the bridge owns active-run preservation.
     """
     if override in WORKFLOWS:
         return {"workflow": override, "source": "override",
@@ -263,7 +296,7 @@ def choose_workflow(jev: Optional[Dict], *, enabled: bool, override: str = "",
     if not jev:
         return {"workflow": "heavy", "source": "fallback",
                 "why": [f"Jev unavailable ({jev_error})" if jev_error else "Jev not configured"]}
-    verdict = decide(jev, thresholds)
+    verdict = assess_risk(jev, thresholds)
     return {"workflow": "light" if verdict["verdict"] == "light" else "heavy",
             "source": "jev", "why": verdict["why"]}
 

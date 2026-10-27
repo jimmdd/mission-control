@@ -1911,6 +1911,7 @@ def generate_prompt(task: dict, repo_context: str, project: str, repo: str,
               " proceeding."
         )
 
+    tier_for_delivery = (workflow or {}).get("workflow")
     finish_title = "Finish + Report" if _pr_is_disabled(task) else "PR + Report"
     finish_body = f"""After local verification and independent review pass, publish the PR (unless no-PR mode).
 For published PRs, wait for current-head remote CI and review resolution before reporting completion.
@@ -1923,7 +1924,7 @@ Local-only tasks do not push or require remote CI:
 f'''2. Push commits to the existing PR branch `{existing_pr.get("branch")}`
 3. Update the existing PR at {existing_pr.get("url")}. Do NOT run `gh pr create` and do NOT open another PR.
 4. Report completion to Mission Control:''' if existing_pr and not existing_pr.get("error") else f'''2. Push your branch
-3. Create a PR with `gh pr create` — title MUST start with `[{_task_ref(task)}]`
+3. Create a PR with `gh pr create`{ " --draft" if tier_for_delivery in ("light", "heavy") else ""} — title MUST start with `[{_task_ref(task)}]`
 4. Report completion to Mission Control:''')}
    curl -X POST {MC_BASE_URL}/api/webhooks/agent-completion \\
      -H "Content-Type: application/json" \\
@@ -2102,6 +2103,11 @@ def _discipline_section(task: dict, workflow: dict) -> str:
     deadline = datetime.fromtimestamp(now.timestamp() + budget * 60, tz=timezone.utc)
     tdir = _ticket_dir(task["id"])
     role = ROLE_SH
+    policy = workflow.get("policy_version") or workflow_router.POLICY_VERSION
+    stage_progress = json.dumps({"state": "running", "phase": "execute", "step_label": f"{tier}:trace",
+        "detail": f"policy_version={policy}; stage=trace"})
+    stage_activity = json.dumps({"activity_type": "updated", "message": "workflow_stage: trace",
+        "metadata": json.dumps({"workflow_stage": "trace", "policy_version": policy})})
     return f"""
 ### How to work (both tiers)
 - **Say the intent first**, one line: "Intent: <fix|feature|refactor> — <what> — <files I expect to touch>".
@@ -2121,36 +2127,52 @@ def _discipline_section(task: dict, workflow: dict) -> str:
 - **Two identical failures = stop and change approach.** After a second failed fix, ask the oracle (below);
   after a third, raise a checkpoint instead of trying again.
 
+### Required stage telemetry
+Before each stage (trace, plan, implement, checks, review, fix_findings, draft_pr), persist
+its name using the existing progress and activity APIs. Do not mark a stage passed before its checks pass.
+Policy version: `{workflow.get("policy_version") or workflow_router.POLICY_VERSION}`.
+```bash
+curl --fail -X PUT {MC_BASE_URL}/api/tasks/{task['id']}/progress \
+  -H "Content-Type: application/json" \
+  -d '{stage_progress}'
+curl --fail -X POST {MC_BASE_URL}/api/tasks/{task['id']}/activities \
+  -H "Content-Type: application/json" \
+  -d '{stage_activity}'
+```
+Replace trace and the tier with the current stage and workflow. Stage history lives in activity;
+latest stage lives in progress. If blocked, state the exact missing decision/action, attempted
+recovery and affected behavior in the existing question checkpoint, then stop. Routine repo
+lookups and implementation choices are agent work; never ask a generic "continue?".
+
 ### Helpers (each is a separate read-only run that returns a short answer)
 Put the request on stdin. Use them to keep your own context small, not to double-check yourself —
-never ask a helper to verify work you can verify directly.
+use direct checks for local facts; the final independent review is required.
 - `echo "<question>" | {role} explore --cd "$(pwd)"` — only when the answer spans 2+ modules you have not read.
 - `echo "<criteria>" | {role} looker --cd "$(pwd)" --image <png> [--image <png>]` — **every** visual check.
   Do not open screenshots or design exports yourself. For Paper designs, read the specific values you need
   (e.g. computed styles of one node) — never dump a whole design tree; export an image and ask the looker.
 - `echo "<ticket criteria + what you changed>" | {role} critic --cd "$(pwd)"` — the gate review (see steps).
 - `echo "<problem + both failed attempts>" | {role} oracle --cd "$(pwd)"` — after two failed fixes only.
-If a helper returns `ROLE ERROR`, continue without it and say so in the PR.
+If the independent reviewer returns `ROLE ERROR`, review is blocked: diagnose once, then raise a concrete checkpoint if still unavailable. Never claim PASS.
 
 ### Time budget
 Started {now:%H:%M} UTC; budget {budget} minutes (until {deadline:%H:%M} UTC). Check `date -u` between steps.
-At the budget, stop: push what you have, open it as a **draft** PR, and list what is done, what is not,
-and why. A draft with an honest status beats another hour of loops.
+At the budget, stop implementation and report what is done, what is not, and why.
+Publish a **draft** PR only when authorized and required verification/review pass; otherwise retain the local branch.
 """
 
 
 def _light_workflow_section(task: dict, workflow: dict, finish_title: str, finish_body: str) -> str:
-    """The default path: one agent, no planning stage, one gate review.
+    """A bounded issue: trace, brief plan, minimal fix and independent review.
 
-    Chosen when Jev reads the ticket as a bounded frontend change (`workflow_router`).
-    The bounds travel with the prompt: a light run that finds backend work or a
-    sprawling diff switches to the heavy workflow in the same session and records why.
+    Code layer alone does not determine risk. New semantic/scope uncertainty
+    escalates in the same session with a persisted reason.
     """
-    why = "; ".join(workflow.get("why") or []) or "judged a small frontend change"
+    why = "; ".join(workflow.get("why") or []) or "judged a bounded reversible change"
     task_id = task["id"]
     role = ROLE_SH
     return f"""
-## Light Workflow (small frontend change)
+## Light Workflow (bounded issue fix)
 
 Mission Control routed this ticket to the light workflow — {why}.
 There is no planning stage and no GSD on this path: do NOT run `/gsd-*` commands, do NOT create
@@ -2159,17 +2181,21 @@ There is no planning stage and no GSD on this path: do NOT run `/gsd-*` commands
 ### Steps
 1. **Read** the ticket, the files it names, and the instructions for the app you are changing
    (its AGENTS.md / CLAUDE.md). Where the app's visual or review gate has a light variant, use it.
-2. **Intent + criteria** (1–2), as above.
-3. **Build** the smallest change, with focused commits.
+2. **Trace and repro** the reported behavior; inspect the actual data/behavior boundary.
+   **Intent + criteria** (1–2), as above. **Brief plan**: a few lines naming the cause,
+   expected behavior, files, regression check, rollback and stop line. Keep it in the ticket.
+3. **Build** the minimal fix and a focused regression test that catches the reported issue, with focused commits.
 4. **Prove** each criterion; visual checks go through the looker at the viewports the ticket names.
-5. **Gate review**, once: send the critic the ticket's criteria, your proof summary and the diff
+5. **Independent gate review**, once: send the critic the ticket's criteria, your proof summary and the diff
    (`git diff origin/master...HEAD`, or your base). Fix only BLOCKERS it cites; NOTES go in the PR.
    Re-run the critic at most twice, and only on what changed.
 6. **{finish_title}**
 {finish_body}
 ### Stay inside the light bounds
 Stop building on this path if the change turns out to need any of: {workflow_router.LIGHT_BLOCKED_PATHS_HUMAN},
-or more than {workflow_router.LIGHT_MAX_FILES} changed files. Then:
+or more than {workflow_router.LIGHT_MAX_FILES} changed files. Reassess behavior, not just paths:
+backend/SQL/shared code alone is allowed; changed auth/funds/chain semantics, migrations,
+broad contracts, unclear requirements or weak verification require escalation. Then:
 1. Record why, so the ticket page shows the escalation:
    curl -X PATCH {MC_BASE_URL}/api/tasks/{task_id}/triage-state \\
      -H "Content-Type: application/json" \\
@@ -2186,7 +2212,7 @@ def _heavy_workflow_section(task: dict, workflow: dict, finish_title: str, finis
     verify / gap re-plan loop and coverage auditor with one self-written plan, one
     bounded critic pass on it, and one bounded review at the end.
     """
-    why = "; ".join(workflow.get("why") or []) or "not judged a small frontend change"
+    why = "; ".join(workflow.get("why") or []) or "needs additional planning and risk checks"
     tdir = _ticket_dir(task["id"])
     return f"""
 ## Heavy Workflow
@@ -2229,11 +2255,11 @@ def _triage_state_of(task: dict) -> dict:
     return {}
 
 
-def _workflow_routing_enabled() -> bool:
+def _workflow_routing_enabled(task_id: str = "") -> bool:
     """Read fresh each call, like the TypeSafe key: flipping the switch in
     swarm-config.json must not need a bridge restart."""
     try:
-        return workflow_router.routing_enabled(json.loads(SWARM_CONFIG_PATH.read_text()))
+        return workflow_router.routing_applies(json.loads(SWARM_CONFIG_PATH.read_text()), task_id)
     except Exception:
         return False
 
@@ -2254,23 +2280,34 @@ def _choose_workflow(task: dict) -> dict:
     override = str(state.get("workflow_override") or "")
     if override not in workflow_router.OVERRIDES:
         override = ""
-    enabled = _workflow_routing_enabled()
-    if not enabled and not override:
-        return workflow_router.choose_workflow(None, enabled=False)
     recorded = state.get("workflow")
-    if (isinstance(recorded, dict) and recorded.get("workflow") in workflow_router.WORKFLOWS
-            and recorded.get("source") != "off"
-            and recorded.get("override", "") == override):
-        return recorded
+    valid_record = isinstance(recorded, dict) and recorded.get("workflow") in workflow_router.WORKFLOWS
+    # A rollout or override never moves an existing runtime to another workflow.
+    if task.get("status") in ("in_progress", "testing", "review", "on_hold", "done", "closed") and not (
+            valid_record and recorded.get("workflow") == "light" and state.get("workflow_escalation")):
+        if valid_record:
+            return recorded
+        return {"workflow": "gsd", "source": "preserved",
+                "why": ["existing run keeps its original GSD workflow"]}
 
     jev, jev_error = None, ""
-    if state.get("workflow_escalation") and override != "light":
-        decision = {"workflow": "heavy", "source": "escalation",
-                    "why": ["a light run escalated: "
-                            + str((state.get("workflow_escalation") or {}).get("reason") or "no reason given")]}
-    elif _read_planning_job(_planning_job_path(task_id)) is not None and override != "light":
-        # A GSD planning job from before this change: let it finish the way it started.
+    enabled = _workflow_routing_enabled(task_id)
+    planning_started = _read_planning_job(_planning_job_path(task_id)) is not None
+    escalation = state.get("workflow_escalation")
+    if planning_started:
+        # Planning ownership wins even over a later explicit light override.
+        if valid_record and recorded.get("workflow") == "gsd":
+            return recorded
         decision = {"workflow": "gsd", "source": "rules", "why": ["GSD planning had already started"]}
+    elif escalation:
+        if valid_record and recorded.get("source") == "escalation" and recorded.get("escalation") == escalation:
+            return recorded
+        decision = {"workflow": "heavy", "source": "escalation",
+                    "why": ["a light run escalated: " + str(escalation.get("reason") or "no reason given")]}
+    elif valid_record and recorded.get("source") != "off" and recorded.get("override", "") == override:
+        return recorded
+    elif not enabled and not override:
+        return workflow_router.choose_workflow(None, enabled=False)
     else:
         key = _typesafe_api_key()
         if key and override == "":
@@ -2285,16 +2322,19 @@ def _choose_workflow(task: dict) -> dict:
             jev_error=jev_error if key else "")
 
     record = {**decision, "jev": jev, "override": override,
+              "policy_version": workflow_router.POLICY_VERSION,
+              **({"escalation": escalation} if escalation else {}),
               "decided_at": datetime.now(timezone.utc).isoformat()}
+    # Persist before dispatch. A failed write must not turn a retry into a new route.
+    mc_request("PATCH", f"/api/tasks/{task_id}/triage-state", {"workflow": record})
+    task["triage_state"] = {**state, "workflow": record}
     try:
-        mc_request("PATCH", f"/api/tasks/{task_id}/triage-state", {"workflow": record})
         mc_log_activity(task_id, "updated",
                         f"Workflow: **{record['workflow']}** — " + "; ".join(record["why"]))
     except Exception as e:
-        logging.warning(f"  Could not record workflow for {task_id[:8]}: {e}")
+        logging.warning(f"  Could not log workflow activity for {task_id[:8]}: {e}")
     # The caller's task dict is reused for the rest of this tick; without this the
     # dispatch below would see no record and ask Jev (and log) a second time.
-    task["triage_state"] = {**state, "workflow": record}
     logging.info(f"  {task_id[:8]} workflow {record['workflow']} ({record['source']}): {'; '.join(record['why'])}")
     return record
 
@@ -5228,6 +5268,14 @@ def route_plan_stage_outcome(task: dict, verdict: dict) -> bool:
                                     "Repository lookups returned to the planner for one corrective retry; "
                                     "no human answer is required.")
                 return False
+        if not questions:
+            reason = str(verdict.get("reason") or "no decision was supplied")[:500]
+            mc_log_activity(task_id, "needs_human",
+                "Planner returned a blocked result without an actionable question: " + reason +
+                ". Inspect the planner failure and correct/retry the task; do not infer permission to implement.")
+            mc_set_progress(task_id, state="blocked", phase="planning",
+                            blocked_reason="Planner failed to provide an actionable question")
+            return False
         post_planning_questions(task_id, questions)
         mc_update_task(task_id, {"status": "planning"})
         mc_set_progress(task_id, state="waiting", phase="planning",

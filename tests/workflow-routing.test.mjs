@@ -29,33 +29,23 @@ const BACKTEST = {
   "MET-606 backoffice migration": { ui_only: 0.03, scope: 1.72, money_or_chain: 0.03 },
 };
 
-test("the policy reproduces the backtest's calls on real tickets", () => {
+test("historical UI-only assessments lack the behavioral evidence needed for new lean routing", () => {
   const r = python(`
 import workflow_router as w
-route = lambda jev, **kw: w.choose_workflow(jev, enabled=True, **kw)
 cases = json.loads(${JSON.stringify(JSON.stringify(BACKTEST))})
-print(json.dumps({k: route(v) for k, v in cases.items()}))
+print(json.dumps({k: w.choose_workflow(v, enabled=True) for k,v in cases.items()}))
 `);
-  assert.equal(r["MET-661 footer weight, 2 lines"].workflow, "light");
-  assert.equal(r["MET-667 breadcrumb color, 8 lines"].workflow, "light");
-  assert.deepEqual(r["MET-661 footer weight, 2 lines"].why,
-    ["UI-only 83%", "size 0.6/3", "funds/chain/auth 2%"]);
-  // UI-only is not enough on its own: MET-650 was frontend-only and 1.8k lines.
-  assert.equal(r["MET-650 homepage, 1793 lines UI-only"].workflow, "heavy");
-  assert.deepEqual(r["MET-650 homepage, 1793 lines UI-only"].why, ["size 1.9/3 is above 1.2"]);
-  assert.equal(r["MET-726 founders game, 7067 lines"].workflow, "heavy");
-  assert.equal(r["MET-726 founders game, 7067 lines"].why.length, 2, "both the UI and size reasons are reported");
-  assert.equal(r["MET-591 connect w/o signing"].workflow, "heavy");
-  assert.match(r["MET-591 connect w/o signing"].why.join(), /funds, chain or auth behaviour \(89%\)/);
-  assert.equal(r["MET-606 backoffice migration"].workflow, "heavy");
-  for (const v of Object.values(r)) assert.equal(v.source, "jev");
+  for (const v of Object.values(r)) {
+    assert.equal(v.workflow, "heavy");
+    assert.match(v.why.join(), /missing or invalid behavioral risk assessment/);
+  }
 });
 
 test("each threshold is exclusive on the risky side", () => {
   const r = python(`
 import workflow_router as w
 route = lambda jev, **kw: w.choose_workflow(jev, enabled=True, **kw)
-ok = {"ui_only": 0.9, "scope": 0.5, "money_or_chain": 0.0}
+ok = {"ui_only": 0.9, "scope": 0.5, "money_or_chain": 0.0, **{k: .01 for k in w.RISK_QUESTIONS}}
 print(json.dumps({
   "ui_at_min": route({**ok, "ui_only": 0.7})["workflow"],
   "ui_above": route({**ok, "ui_only": 0.701})["workflow"],
@@ -66,7 +56,7 @@ print(json.dumps({
   "custom": route({**ok, "scope": 0.5}, thresholds={"scope_max": 0.4})["workflow"],
 }))
 `);
-  assert.deepEqual(r, { ui_at_min: "heavy", ui_above: "light", scope_at_max: "light",
+  assert.deepEqual(r, { ui_at_min: "light", ui_above: "light", scope_at_max: "light",
     scope_above: "heavy", money_at_max: "heavy", money_below: "light", custom: "heavy" });
 });
 
@@ -74,13 +64,13 @@ test("override, careful, and a missing Jev all resolve before the numbers", () =
   const r = python(`
 import workflow_router as w
 route = lambda jev, **kw: w.choose_workflow(jev, enabled=True, **kw)
-light = {"ui_only": 0.95, "scope": 0.1, "money_or_chain": 0.0}
+light = {"ui_only": 0.95, "scope": 0.1, "money_or_chain": 0.0, **{k: .01 for k in w.RISK_QUESTIONS}}
 heavy = {"ui_only": 0.1, "scope": 3.0, "money_or_chain": 0.9}
 print(json.dumps({
   "override_light": route(heavy, override="light"),
   "override_heavy": route(light, override="heavy"),
   "override_gsd": route(light, override="gsd"),
-  "never_gsd": sorted({route({"ui_only": u, "scope": sc, "money_or_chain": m})["workflow"]
+  "never_gsd": sorted({route({**light, "ui_only": u, "scope": sc, "money_or_chain": m})["workflow"]
                        for u in (0, .5, 1) for sc in (0, 1.5, 3) for m in (0, .5, 1)}),
   "override_beats_careful": route(heavy, override="light", level="careful")["workflow"],
   "careful": route(light, level="careful"),
@@ -111,7 +101,7 @@ print(json.dumps(w.summarise({"model": "jev-1.13.0", "answers": {
     scope_confidence: 0.71, money_or_chain: 0.019 });
 });
 
-test("a light run's bounds catch the backend work tickets never mention", () => {
+test("a light run's path backstop distinguishes local queries from schema and CI changes", () => {
   const r = python(`
 import workflow_router as w
 route = lambda jev, **kw: w.choose_workflow(jev, enabled=True, **kw)
@@ -133,8 +123,8 @@ print(json.dumps({
 `);
   assert.equal(r.ui15, null);
   assert.equal(r.ui16, "changes 16 files (light allows 15)");
-  assert.equal(r.new_api, "touches apps/new-api/src/api/v1/jupiter_api.rs");
-  for (const k of ["sqlx", "sql", "workflow", "backable_api", "packages", "drizzle"]) {
+  for (const k of ["new_api", "sqlx", "sql", "backable_api"]) assert.equal(r[k], null);
+  for (const k of ["workflow", "packages", "drizzle"]) {
     assert.match(r[k] || "", /^touches /, `${k} must cross the bounds`);
   }
   assert.equal(r.sql_named_ui_file, null, "a UI file named sql-* is not SQL");
@@ -145,14 +135,15 @@ print(json.dumps({
 
 const BRIDGE_HARNESS = `
 import bridge, workflow_router
-bridge._workflow_routing_enabled = lambda: True
+bridge._workflow_routing_enabled = lambda *a: True
 calls = {"jev": 0, "writes": [], "activity": []}
 def fake_jev(task, key, **kw):
     calls["jev"] += 1
     calls["jev_input"] = workflow_router.ticket_state(task)
     return {"model": "jev-1.13.0", "answers": {
         "ui_only": {"noul": JEV["ui"]}, "scope": {"score": JEV["scope"], "confidence": 0.8},
-        "money_or_chain": {"noul": JEV["money"]}}}
+        "money_or_chain": {"noul": JEV["money"]},
+        **{k: {"noul": .01} for k in workflow_router.RISK_QUESTIONS}}}
 workflow_router.ask_jev = fake_jev
 bridge._typesafe_api_key = lambda: KEY
 bridge._read_planning_job = lambda path: PLANNING_JOB
@@ -175,7 +166,8 @@ print(json.dumps({"first": first, "second": second, "calls": calls, "task_state"
   assert.equal(r.first.workflow, "light");
   assert.equal(r.first.source, "jev");
   assert.deepEqual(r.first.jev, { model: "jev-1.13.0", ui_only: 0.9, scope: 0.5,
-    scope_confidence: 0.8, money_or_chain: 0.02 });
+    scope_confidence: 0.8, money_or_chain: 0.02,
+    behavioral_uncertainty: .01, blast_radius: .01, hard_to_reverse: .01, hard_to_test: .01, migration_or_contract: .01 });
   assert.equal(r.calls.jev, 1, "cached after the first decision");
   assert.deepEqual(r.second, r.first);
   // Jev reads the ticket in the backtest's shape.
@@ -185,7 +177,7 @@ print(json.dumps({"first": first, "second": second, "calls": calls, "task_state"
   assert.deepEqual(r.calls.writes[0].slice(0, 2), ["PATCH", "/api/tasks/t1/triage-state"]);
   assert.deepEqual(Object.keys(r.calls.writes[0][2]), ["workflow"]);
   assert.equal(r.calls.writes[0][2].workflow.workflow, "light");
-  assert.deepEqual(r.calls.activity, ["Workflow: **light** — UI-only 90%; size 0.5/3; funds/chain/auth 2%"]);
+  assert.deepEqual(r.calls.activity, ["Workflow: **light** — bounded scope; low behavioral uncertainty and blast radius; reversible with focused regression checks; no high-risk semantics or migration/contract change"]);
   assert.deepEqual(r.task_state.questions, [], "the rest of the state survives");
 });
 
@@ -302,13 +294,13 @@ print(json.dumps(out))
 test("routing off: the bridge never asks Jev or records a choice, so turning it on later still routes", () => {
   const r = python(`
 ${BRIDGE_HARNESS}
-bridge._workflow_routing_enabled = lambda: False
+bridge._workflow_routing_enabled = lambda *a: False
 task = {"id": "t1", "title": "[MET-1] Footer weight", "description": "d", "triage_state": {"questions": []}}
 off = bridge._choose_workflow(task)
 off_calls, off_writes, off_activity = calls["jev"], list(calls["writes"]), list(calls["activity"])
 # The confirm gate stores whatever was chosen; that "off" record must not stick once routing is on.
 task["triage_state"] = {"questions": [], "workflow": off}
-bridge._workflow_routing_enabled = lambda: True
+bridge._workflow_routing_enabled = lambda *a: True
 on = bridge._choose_workflow(task)
 overridden = bridge._choose_workflow({"id": "t2", "title": "t", "description": "d",
                                       "triage_state": {"workflow_override": "light"}})
@@ -329,7 +321,7 @@ print(json.dumps({"off": off, "off_calls": off_calls, "off_writes": off_writes, 
 test("with routing off an explicit override is still honoured and recorded on the ticket", () => {
   const r = python(`
 ${BRIDGE_HARNESS}
-bridge._workflow_routing_enabled = lambda: False
+bridge._workflow_routing_enabled = lambda *a: False
 task = {"id": "t3", "title": "t", "description": "d", "triage_state": {"workflow_override": "heavy"}}
 chosen = bridge._choose_workflow(task)
 print(json.dumps({"chosen": chosen["workflow"], "source": chosen["source"], "jev": calls["jev"],
@@ -375,9 +367,9 @@ print(json.dumps({
       assert.ok(p.includes(`${role} ${helper} --cd`), `${name} names the ${helper} helper`);
     }
     assert.match(p, /Do not open screenshots or design exports yourself/, name);
-    assert.match(p, /never ask a helper to verify work you can verify directly/, name);
+    assert.match(p, /final independent review is required/, name);
     assert.ok(p.includes(`${tdir}/evidence/`), `${name} keeps proof out of git`);
-    assert.match(p, /gh pr create` — title MUST start with `\[MET-661\]`/, name);
+    assert.match(p, /gh pr create` --draft — title MUST start with `\[MET-661\]`/, name);
     assert.match(p, /success criteria are the source of truth/, name);
   }
   // Budgets and criteria counts differ by tier.
@@ -392,7 +384,7 @@ print(json.dumps({
   assert.match(light, /more than 15 changed files/);
   assert.match(light, /"workflow_escalation": \{"from": "light", "to": "heavy", "reason": "WHAT_YOU_FOUND"\}/);
   assert.match(light, /Your budget becomes 120 minutes/);
-  assert.doesNotMatch(light, /plan\.md/);
+  assert.match(light, /Brief plan/);
   // Heavy: self-written plan outside the repo, one critic pass on it, final review.
   assert.match(heavy, /## Heavy Workflow/);
   assert.ok(heavy.includes(`Plan** in \`${tdir}/plan.md\` (outside the repo, never committed)`));
@@ -619,4 +611,23 @@ test("choosing a workflow PATCHes the one field the bridge reads", async () => {
   assert.deepEqual(JSON.parse(opts.body), { workflow_override: "light" });
   assert.equal(select.disabled, true, "held until the reload redraws it");
   assert.equal(globalThis.__wfReloaded, true, "the page reloads to show the bridge's new call");
+});
+
+ test("adaptive workflow panel shows persisted reasons, risk dimensions and policy version", () => {
+  const { renderWorkflow } = page();
+  const out = renderWorkflow({ status: "planning" }, { workflow: { ...LIGHT_RECORD,
+    policy_version: "adaptive-bounded-v1", why: ["bounded backend mapping"],
+    jev: { behavioral_uncertainty: .1, blast_radius: .1, hard_to_reverse: .1, hard_to_test: .1 } } });
+  assert.match(out, /uncertainty 10% · blast radius 10%/);
+  assert.match(out, /bounded backend mapping/);
+  assert.match(out, /adaptive-bounded-v1/);
+  assert.doesNotMatch(out, /UI-only/);
+});
+
+test("an active recorded route is shown even if a later override differs", () => {
+  const { renderWorkflow, workflowFacts } = page();
+  const triage = { workflow: LIGHT_RECORD, workflow_override: "gsd" };
+  assert.equal(workflowFacts(triage, {status:"in_progress"}).effective, "light");
+  assert.match(renderWorkflow({status:"in_progress"}, triage), /data-workflow="light"/);
+  assert.equal(workflowFacts(triage, {status:"planning"}).effective, "gsd");
 });
